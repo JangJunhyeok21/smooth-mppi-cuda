@@ -23,6 +23,11 @@ add_library(cuda_mppi_lib
   src/mppi_core.cu
 )
 
+# GCC line directive 경고 억제 (nvcc 생성 코드)
+target_compile_options(cuda_mppi_lib PRIVATE
+  $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-Wno-gnu-line-directive>
+)
+
 # 헤더 경로 설정
 target_include_directories(cuda_mppi_lib PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -33,6 +38,10 @@ target_include_directories(cuda_mppi_lib PUBLIC
 # 실행 파일 생성
 add_executable(cuda_mppi_node
   src/cuda_mppi_node.cpp
+)
+
+target_compile_options(cuda_mppi_node PRIVATE
+  $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-Wno-gnu-line-directive>
 )
 
 target_include_directories(cuda_mppi_node PUBLIC

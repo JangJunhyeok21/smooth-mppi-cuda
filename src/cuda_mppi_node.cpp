@@ -15,8 +15,8 @@ public:
     MPPINode() : Node("mppi_controller") {
         load_parameters();
 
-        // K=3000, T=100 (약 2초 예측 - 반응성 향상)
-        solver_ = std::make_unique<mppi::MPPISolver>(6000, 150, mppi_params_);
+        // K=3000, T=80 (약 1.6초 예측)
+        solver_ = std::make_unique<mppi::MPPISolver>(3000, 80, mppi_params_);
 
         drive_pub_ = this->create_publisher<ackermann_msgs::msg::AckermannDriveStamped>(drive_topic_, 10);
         vis_pub_ = this->create_publisher<visualization_msgs::msg::MarkerArray>("/mppi_viz", 10);
@@ -41,21 +41,20 @@ private:
         this->declare_parameter("min_accel", -3.0);
         this->declare_parameter("max_accel", 3.0);
         this->declare_parameter("min_speed", 0.0);
-        this->declare_parameter("target_speed", 2.5); // 적당한 속도로 시작
-        this->declare_parameter("max_speed", 5.0);
+        this->declare_parameter("target_speed", 2.0);
+        this->declare_parameter("max_speed", 3.0);
         
         // --- [중요] 고착 해결을 위한 가중치 설정 ---
         this->declare_parameter("q_dist", 10.0);  // 경로 따라가기 (Main)
         this->declare_parameter("q_v", 4.0);      // 속도 내기 (Main) - 값을 높여서 앞으로 가게 유도
         
         // ** 방해 요소 모두 끄기 **
-        this->declare_parameter("q_lat", 0.0);       // 코너 감속 OFF
-        this->declare_parameter("q_collision", 0.0); // 충돌 방지 OFF
+        this->declare_parameter("q_lat", 0.0);
         
         // 부드러운 주행
-        this->declare_parameter("q_u", 0.1);
-        this->declare_parameter("q_du", 0.1);
-        this->declare_parameter("collision_radius", 0.2);
+        this->declare_parameter("q_u", 1.0);
+        this->declare_parameter("q_du", 3.0);
+        this->declare_parameter("collision_radius", 0.30);
 
         this->declare_parameter("odom_topic", "/odom0"); 
         this->declare_parameter("scan_topic", "/scan0");
@@ -81,7 +80,6 @@ private:
         mppi_params_.q_lat = this->get_parameter("q_lat").as_double();
         mppi_params_.q_u = this->get_parameter("q_u").as_double();
         mppi_params_.q_du = this->get_parameter("q_du").as_double();
-        mppi_params_.q_collision = this->get_parameter("q_collision").as_double();
         mppi_params_.collision_radius = this->get_parameter("collision_radius").as_double();
     }
 
@@ -173,6 +171,7 @@ private:
         const auto& states = solver_->get_generated_trajectories();
         int K = solver_->get_K();
         int T = solver_->get_T();
+        int best_k = solver_->get_best_k();
 
         visualization_msgs::msg::Marker traj_marker;
         traj_marker.header.frame_id = "map";
@@ -181,15 +180,15 @@ private:
         traj_marker.id = 0;
         traj_marker.type = visualization_msgs::msg::Marker::LINE_LIST;
         traj_marker.action = visualization_msgs::msg::Marker::ADD;
-        traj_marker.scale.x = 0.02; 
-        traj_marker.color.r = 0.0; traj_marker.color.g = 1.0; traj_marker.color.b = 0.0; traj_marker.color.a = 0.15;
+        traj_marker.scale.x = 0.1; 
+        traj_marker.color.r = 1.0; traj_marker.color.g = 0.2; traj_marker.color.b = 0.0; traj_marker.color.a = 1.0;
 
-        for (int k = 0; k < K; k += 100) { 
+        if (best_k >= 0 && best_k < K) {
             for (int t = 0; t < T - 1; ++t) {
-                int idx = k * T + t;
+                int idx = best_k * T + t;
                 geometry_msgs::msg::Point p1, p2;
                 p1.x = states[idx].x; p1.y = states[idx].y;
-                p2.x = states[idx+1].x; p2.y = states[idx+1].y;
+                p2.x = states[idx + 1].x; p2.y = states[idx + 1].y;
                 traj_marker.points.push_back(p1);
                 traj_marker.points.push_back(p2);
             }

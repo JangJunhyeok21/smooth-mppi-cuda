@@ -41,7 +41,6 @@ struct Params {
     float q_lat;
     float q_u;
     float q_du;
-    float q_collision;
     float collision_radius;
 };
 
@@ -59,6 +58,7 @@ public:
     
     // Visualization & Debugging
     const std::vector<State>& get_generated_trajectories() const;
+    int get_best_k() const;
     bool is_cuda_active() const { return true; } // 에러 해결용
     int get_K() const;
     int get_T() const;
@@ -77,6 +77,7 @@ private:
     std::vector<Control> h_prev_controls_; // 이전 제어 입력 (T개)
     std::vector<float> h_costs_;        // 비용 데이터
     std::vector<float> h_weights_;      // 가중치
+    int best_k_ = 0;
 
     // --- Device Memory Pointers (GPU) ---
     void* d_rng_states_;     // curandState*

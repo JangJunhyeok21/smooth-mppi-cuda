@@ -7,11 +7,11 @@ mppi_controller:
     target_speed: 3.0
     max_speed: 5.0
     q_dist: 10.0
-    q_v: 2.0
-    q_lat: 0.5
-    q_u: 0.1
-    q_du: 0.1
-    collision_radius: 0.2
+    q_v: 5.0
+    q_lat: 0.2
+    q_u: 1.0
+    q_du: 3.0
+    collision_radius: 0.30
     odom_topic: /odom0
     scan_topic: /scan0
     drive_topic: /ackermann_cmd0

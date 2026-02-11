@@ -5,6 +5,9 @@
 #include <cmath>
 #include <iostream>
 
+#define MAX_STEER_RATE_NOISE 0.1f 
+#define MAX_ACCEL_RATE_NOISE 0.2f
+
 namespace mppi
 {
 
@@ -30,15 +33,12 @@ namespace mppi
         next_s.yaw = angle_normalize_cuda(yaw + (v / p.wheel_base) * tanf(u.steer) * p.dt);
         next_s.v = v + u.accel * p.dt;
 
-        if (next_s.v < p.min_speed)
-            next_s.v = p.min_speed;
         return next_s;
     }
 
-    // [수정됨] 유턴 방지 로직이 추가된 비용 함수
     __device__ float compute_cost_cuda(
         const State &s,
-        const float *ref_xs, const float *ref_ys, const float *ref_vs, int path_len,
+        const float *ref_xs, const float *ref_ys, const float *ref_yaws, const float *ref_vs, int path_len,
         const Control &u, const Control &u_prev,
         const Params &p)
     {
@@ -83,48 +83,24 @@ namespace mppi
         float v_error = (s.v - ref_v) * (s.v - ref_v);
 
         // 3. 헤딩(Heading) 오차 비용
-        // 경로 상의 다음 점을 보고 방향을 구함
-        // 마지막 점에서는 이전 점을 사용
-        int next_idx = nearest_idx;
-        if (nearest_idx + 1 < path_len)
-        {
-            next_idx = nearest_idx + 1;
-        }
-        else if (nearest_idx > 0)
-        {
-            next_idx = nearest_idx - 1;
-        }
-
-        float path_dx = ref_xs[next_idx] - ref_xs[nearest_idx];
-        float path_dy = ref_ys[next_idx] - ref_ys[nearest_idx];
-
+        float path_yaw = ref_yaws[nearest_idx];
+        float yaw_diff = angle_normalize_cuda(s.yaw - path_yaw);
         float heading_cost = 0.0f;
-        // path_dx == 0 && path_dy == 0 이면 유효한 접선이 없으므로 헤딩 비용을 건너뜀
-        if (path_dx != 0.0f || path_dy != 0.0f)
+        // 방향이 90도 이상 틀어지면 비용 폭증 -> 유턴 방지
+        if (abs(yaw_diff) > 1.57f)
+        { // 90도(PI/2) 이상
+            heading_cost = 1000.0f;
+        }
+        else
         {
-            float path_yaw = atan2f(path_dy, path_dx);
-            float yaw_diff = angle_normalize_cuda(s.yaw - path_yaw);
-            // 방향이 90도 이상 틀어지면 비용 폭증 -> 유턴 방지
-            if (abs(yaw_diff) > 1.57f)
-            { // 90도(PI/2) 이상
-                heading_cost = 1000.0f;
-            }
-            else
-            {
-                heading_cost = 2.0f * (yaw_diff * yaw_diff); // 평소에는 부드럽게
-            }
+            heading_cost = 2.0f * (yaw_diff * yaw_diff); // 평소에는 부드럽게
         }
 
-        // 4. 제어 입력 비용들 (기존)
-        float lat_accel = (s.v * s.v) * tanf(u.steer) / p.wheel_base;
-        float lat_cost = p.q_lat * lat_accel; //횡g는 선형비용으로 처리
+        // 4. 제어 입력 비용
         float input_cost = p.q_u * (u.steer * u.steer + u.accel * u.accel);
-        float d_steer = u.steer - u_prev.steer;
-        float d_accel = u.accel - u_prev.accel;
-        float input_delta_cost = p.q_du * (d_steer * d_steer + d_accel * d_accel);
 
         // 최종 비용 합산
-        return p.q_dist * dist_error + p.q_v * v_error + heading_cost + lat_cost + input_cost + input_delta_cost;
+        return p.q_dist * dist_error + p.q_v * v_error + heading_cost + input_cost;
     }
     __device__ bool violates_scan_hard_constraint(
         const State &s,
@@ -141,8 +117,6 @@ namespace mppi
         float local_x = dx * cosf(robot_pose.yaw) + dy * sinf(robot_pose.yaw);
         float local_y = -dx * sinf(robot_pose.yaw) + dy * cosf(robot_pose.yaw);
 
-        const float min_dist_sq = collision_radius * collision_radius;
-
         for (int i = 0; i < scan_len; ++i)
         {
             float r = scan_ranges[i];
@@ -157,7 +131,7 @@ namespace mppi
             float dy_obs = local_y - obs_y;
             float dist_sq_obs = dx_obs * dx_obs + dy_obs * dy_obs;
 
-            if (dist_sq_obs < min_dist_sq)
+            if (dist_sq_obs < collision_radius * collision_radius)
             {
                 return true;
             }
@@ -177,76 +151,98 @@ namespace mppi
     }
 
     __global__ void rollout_kernel(
-        State *states,           // [Output] Generated Trajectories (K * T)
-        Control *controls,       // [Output] Sampled Controls (K * T)
-        float *costs,            // [Output] Costs per sample (K)
-        curandState *rng_states, // [Input/Output] RNG states
+        State *states,
+        Control *controls,
+        float *costs,
+        curandState *rng_states,
         const State start_state,
-        const Control *prev_controls, // [Input] Previous Mean Controls (T)
+        const Control *prev_controls, // 이것은 이전 틱의 최적 '행동(Action)' 시퀀스
         const Params p,
-        const float *ref_xs, const float *ref_ys, const float *ref_vs, int path_len,
+        const float *ref_xs, const float *ref_ys, const float *ref_yaws, const float *ref_vs, int path_len,
         const float *scan_ranges, int scan_len, float scan_angle_min, float scan_angle_inc,
         int K, int T)
     {
         int k = blockIdx.x * blockDim.x + threadIdx.x;
-        if (k >= K)
-            return;
+        if (k >= K) return;
 
         State x = start_state;
         float total_cost = 0.0f;
-        Control last_u = prev_controls[0];
+        
+        Control current_action = prev_controls[0]; 
+        Control last_u = current_action;
 
         for (int t = 0; t < T; ++t)
         {
             int idx = k * T + t;
 
-            // 2. 제어 입력 적용 (Mean + Noise)
-            Control u = prev_controls[t];
-            u.steer += curand_normal(&rng_states[idx]) * 0.2f;
-            u.accel += curand_normal(&rng_states[idx]) * 0.4f;
+            // 1. Input Lifting: 변화율(Rate) 계산
+            // 이전 최적 궤적(Action)에서 변화율을 역산하여 기준(Mean Rate)으로 삼음
+            Control u_mean_curr = prev_controls[t];
+            Control u_mean_prev = (t == 0) ? prev_controls[0] : prev_controls[t-1];
+            
+            float mean_steer_rate = u_mean_curr.steer - u_mean_prev.steer;
+            float mean_accel_rate = u_mean_curr.accel - u_mean_prev.accel;
 
-            // Clamp
-            u.steer = fminf(fmaxf(u.steer, -p.max_steer), p.max_steer);
-            u.accel = fminf(fmaxf(u.accel, p.min_accel), p.max_accel);
+            // 2. Sampling: 변화율에 노이즈 주입 (작은 분산 사용)
+            // 논문에 따라 분산을 작게 설정 (0.05 ~ 0.1 수준)
+            float noise_steer_rate = curand_normal(&rng_states[idx]) * 0.02f; 
+            float noise_accel_rate = curand_normal(&rng_states[idx]) * 0.08f;
 
-            // Enforce speed bounds through acceleration
-            float v_next = x.v + u.accel * p.dt;
-            if (v_next > p.max_speed)
-            {
-                u.accel = (p.max_speed - x.v) / p.dt;
+            // 3. Integration: 변화율을 적분하여 행동(Action) 생성
+            //최대 변화율 제한
+            // a_t = a_{t-1} + (mean_rate + noise)
+            current_action.steer += (mean_steer_rate + fminf(fmaxf(noise_steer_rate, -MAX_STEER_RATE_NOISE), MAX_STEER_RATE_NOISE));
+            current_action.accel += (mean_accel_rate + fminf(fmaxf(noise_accel_rate, -MAX_ACCEL_RATE_NOISE), MAX_ACCEL_RATE_NOISE));
+
+            // 4. Clamping
+            Control u_clamped = current_action;
+            u_clamped.steer = fminf(fmaxf(u_clamped.steer, -p.max_steer), p.max_steer);
+            u_clamped.accel = fminf(fmaxf(u_clamped.accel, p.min_accel), p.max_accel);
+            
+            float limit_g = 9.8f;
+            float v_sq = x.v * x.v;
+
+            if (v_sq > 0.2f) {
+                // 현재 속도에서 1G를 내기 위한 최대 조향각 계산
+                float max_lat_steer = atanf((limit_g * p.wheel_base) / v_sq);
+                
+                // 기존 조향각을 이 동적 한계(dynamic limit) 안으로 자름
+                u_clamped.steer = fminf(fmaxf(u_clamped.steer, -max_lat_steer), max_lat_steer);
             }
-            else if (v_next < p.min_speed)
-            {
-                u.accel = (p.min_speed - x.v) / p.dt;
-            }
 
-            // 3. 상태 업데이트
-            x = update_dynamics_cuda(x, u, p);
-            states[idx] = x; // 시각화용 저장
+            // 속도 제한 로직
+            float v_next = x.v + u_clamped.accel * p.dt;
+            if (v_next > p.max_speed) u_clamped.accel = (p.max_speed - x.v) / p.dt;
+            else if (v_next < p.min_speed) u_clamped.accel = (p.min_speed - x.v) / p.dt;
 
-            // 제어 입력 저장 (최적 제어 복원용)
-            controls[idx] = u;
+            // [중요] Clamp된 값을 다시 적분 변수에 반영할지 여부
+            // SMPPI에서는 Clamp된 행동에서 다시 출발하는 것이 물리적으로 타당함
+            current_action = u_clamped; 
 
-            // 4. Hard Collision Constraint
-            if (violates_scan_hard_constraint(x, scan_ranges, scan_len, scan_angle_min, scan_angle_inc,
-                                              start_state, p.collision_radius))
+            // 5. Dynamics Update
+            x = update_dynamics_cuda(x, u_clamped, p);
+            states[idx] = x;
+            
+            // [중요] 적분된 행동(Action)을 저장해야 나중에 가중 평균낼 때 올바른 결과가 나옴
+            controls[idx] = u_clamped; 
+
+            // 6. Cost Calculation
+            if (violates_scan_hard_constraint(x, scan_ranges, scan_len, scan_angle_min, scan_angle_inc, start_state, p.collision_radius))
             {
                 total_cost = 1.0e9f;
                 break;
             }
 
-            // 5. 비용 계산
             if (path_len > 0)
             {
                 total_cost += compute_cost_cuda(
-                    x, ref_xs, ref_ys, ref_vs, path_len,
-                    u, last_u, p);
+                    x, ref_xs, ref_ys, ref_yaws, ref_vs, path_len,
+                    u_clamped, last_u, p);
             }
-            last_u = u;
+            last_u = u_clamped;
         }
         costs[k] = total_cost;
     }
-
     // --- Host Implementation ---
 
     MPPISolver::MPPISolver(int K, int T, Params params)
@@ -278,6 +274,7 @@ namespace mppi
         int max_path = 2000;
         cudaMalloc(&d_ref_xs_, max_path * sizeof(float));
         cudaMalloc(&d_ref_ys_, max_path * sizeof(float));
+        cudaMalloc(&d_ref_yaws_, max_path * sizeof(float));
         cudaMalloc(&d_ref_vs_, max_path * sizeof(float));
 
         // Scan data는 set_scan_data에서 동적으로 할당
@@ -299,6 +296,7 @@ namespace mppi
         cudaFree(d_rng_states_);
         cudaFree(d_ref_xs_);
         cudaFree(d_ref_ys_);
+        cudaFree(d_ref_yaws_);
         cudaFree(d_ref_vs_);
         if (d_scan_ranges_ != nullptr)
         {
@@ -312,7 +310,6 @@ namespace mppi
     void MPPISolver::set_reference_path(const std::vector<float> &xs, const std::vector<float> &ys,
                                         const std::vector<float> &yaws, const std::vector<float> &vs)
     {
-        (void)yaws;
         ref_path_len_ = xs.size();
         if (ref_path_len_ > 2000)
             ref_path_len_ = 2000;
@@ -321,6 +318,7 @@ namespace mppi
         {
             cudaMemcpy(d_ref_xs_, xs.data(), ref_path_len_ * sizeof(float), cudaMemcpyHostToDevice);
             cudaMemcpy(d_ref_ys_, ys.data(), ref_path_len_ * sizeof(float), cudaMemcpyHostToDevice);
+            cudaMemcpy(d_ref_yaws_, yaws.data(), ref_path_len_ * sizeof(float), cudaMemcpyHostToDevice);
             cudaMemcpy(d_ref_vs_, vs.data(), ref_path_len_ * sizeof(float), cudaMemcpyHostToDevice);
         }
     }
@@ -375,7 +373,7 @@ namespace mppi
             current_state,
             d_prev_controls_,
             params_,
-            d_ref_xs_, d_ref_ys_, d_ref_vs_, ref_path_len_,
+            d_ref_xs_, d_ref_ys_, d_ref_yaws_, d_ref_vs_, ref_path_len_,
             d_scan_ranges_, scan_len_, scan_angle_min_, scan_angle_inc_,
             K_, T_);
 

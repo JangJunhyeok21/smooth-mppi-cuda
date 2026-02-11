@@ -48,12 +48,8 @@ private:
         this->declare_parameter("q_dist", 10.0);  // 경로 따라가기 (Main)
         this->declare_parameter("q_v", 4.0);      // 속도 내기 (Main) - 값을 높여서 앞으로 가게 유도
         
-        // ** 방해 요소 모두 끄기 **
-        this->declare_parameter("q_lat", 0.0);
-        
         // 부드러운 주행
         this->declare_parameter("q_u", 1.0);
-        this->declare_parameter("q_du", 3.0);
         this->declare_parameter("collision_radius", 0.30);
 
         this->declare_parameter("odom_topic", "/odom0"); 
@@ -77,9 +73,7 @@ private:
         
         mppi_params_.q_dist = this->get_parameter("q_dist").as_double();
         mppi_params_.q_v = this->get_parameter("q_v").as_double();
-        mppi_params_.q_lat = this->get_parameter("q_lat").as_double();
         mppi_params_.q_u = this->get_parameter("q_u").as_double();
-        mppi_params_.q_du = this->get_parameter("q_du").as_double();
         mppi_params_.collision_radius = this->get_parameter("collision_radius").as_double();
     }
 
@@ -148,7 +142,7 @@ private:
         // drive_msg.drive.speed = v_cmd;
         
         drive_pub_->publish(drive_msg);
-        publish_visualization();
+        publish_path_visualization();
 
         auto end = std::chrono::high_resolution_clock::now();
         std::chrono::duration<double, std::milli> elapsed = end - start;
@@ -160,7 +154,7 @@ private:
         }
     }
 
-    void publish_visualization() {
+    void publish_path_visualization() {
         visualization_msgs::msg::MarkerArray markers;
         const auto& states = solver_->get_generated_trajectories();
         int K = solver_->get_K();

@@ -38,9 +38,7 @@ struct Params {
     // Cost Weights
     float q_dist;
     float q_v;
-    float q_lat;
     float q_u;
-    float q_du;
     float collision_radius;
 };
 
@@ -92,6 +90,7 @@ private:
     // Reference Path (Device)
     float* d_ref_xs_;
     float* d_ref_ys_;
+    float* d_ref_yaws_;
     float* d_ref_vs_;
     int ref_path_len_ = 0;
 

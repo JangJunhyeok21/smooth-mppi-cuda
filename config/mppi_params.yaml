@@ -1,16 +1,14 @@
 mppi_controller:
   ros__parameters:
     max_steer: 4.0
-    min_accel: -40.0
-    max_accel: 40.0
-    min_speed: 0.8
+    min_accel: -9.0
+    max_accel: 9.0
+    min_speed: 1.2
     target_speed: 5.0
-    max_speed: 20.0
-    q_dist: 10.0
-    q_v: 8.0
-    q_lat: 4.0
-    q_u: 2.5
-    q_du: 3.5
+    max_speed: 7.0
+    q_dist: 5.0
+    q_v: 20.0
+    q_u: 0.0
     collision_radius: 0.35
     odom_topic: /odom0
     scan_topic: /scan0

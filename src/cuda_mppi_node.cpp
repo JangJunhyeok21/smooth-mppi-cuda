@@ -130,7 +130,6 @@ private:
             RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000, "Waiting for Odom...");
             return;
         }
-
         if (!scan_received_) {
             RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000, "Waiting for LaserScan...");
         }
@@ -144,14 +143,9 @@ private:
         drive_msg.drive.steering_angle = u.steer;
         drive_msg.drive.acceleration = u.accel;
         
-        float v_cmd = current_state_.v + u.accel * mppi_params_.dt;
-
-        if (v_cmd > mppi_params_.max_speed) {
-            v_cmd = mppi_params_.max_speed;
-        }
-        
-        // 최소 속도 제한 (기존 코드)
-        drive_msg.drive.speed = std::max(mppi_params_.min_speed, v_cmd);
+        //시뮬레이션에서는 가속도와 스티어 값만 받음
+        // float v_cmd = current_state_.v + u.accel * mppi_params_.dt;
+        // drive_msg.drive.speed = v_cmd;
         
         drive_pub_->publish(drive_msg);
         publish_visualization();
@@ -171,7 +165,6 @@ private:
         const auto& states = solver_->get_generated_trajectories();
         int K = solver_->get_K();
         int T = solver_->get_T();
-        int best_k = solver_->get_best_k();
 
         visualization_msgs::msg::Marker traj_marker;
         traj_marker.header.frame_id = "map";
@@ -180,20 +173,42 @@ private:
         traj_marker.id = 0;
         traj_marker.type = visualization_msgs::msg::Marker::LINE_LIST;
         traj_marker.action = visualization_msgs::msg::Marker::ADD;
-        traj_marker.scale.x = 0.1; 
-        traj_marker.color.r = 1.0; traj_marker.color.g = 0.2; traj_marker.color.b = 0.0; traj_marker.color.a = 1.0;
+        traj_marker.scale.x = 0.02; 
+        traj_marker.color.r = 0.0; traj_marker.color.g = 1.0; traj_marker.color.b = 0.0; traj_marker.color.a = 0.2;
 
-        if (best_k >= 0 && best_k < K) {
+        for (int k = 0; k < K; k += 100) { 
             for (int t = 0; t < T - 1; ++t) {
-                int idx = best_k * T + t;
+                int idx = k * T + t;
                 geometry_msgs::msg::Point p1, p2;
                 p1.x = states[idx].x; p1.y = states[idx].y;
-                p2.x = states[idx + 1].x; p2.y = states[idx + 1].y;
+                p2.x = states[idx+1].x; p2.y = states[idx+1].y;
                 traj_marker.points.push_back(p1);
                 traj_marker.points.push_back(p2);
             }
         }
         markers.markers.push_back(traj_marker);
+
+        // 최종 선택된 경로 (빨간색)
+        visualization_msgs::msg::Marker best_traj_marker;
+        best_traj_marker.header.frame_id = "map";
+        best_traj_marker.header.stamp = this->now();
+        best_traj_marker.ns = "best_trajectory";
+        best_traj_marker.id = 1;
+        best_traj_marker.type = visualization_msgs::msg::Marker::LINE_LIST;
+        best_traj_marker.action = visualization_msgs::msg::Marker::ADD;
+        best_traj_marker.scale.x = 0.05;
+        best_traj_marker.color.r = 1.0; best_traj_marker.color.g = 0.0; best_traj_marker.color.b = 0.0; best_traj_marker.color.a = 0.8;
+
+        const auto& best_trajectory = solver_->get_best_trajectory();
+        for (int t = 0; t < (int)best_trajectory.size() - 1; ++t) {
+            geometry_msgs::msg::Point p1, p2;
+            p1.x = best_trajectory[t].x; p1.y = best_trajectory[t].y;
+            p2.x = best_trajectory[t+1].x; p2.y = best_trajectory[t+1].y;
+            best_traj_marker.points.push_back(p1);
+            best_traj_marker.points.push_back(p2);
+        }
+        markers.markers.push_back(best_traj_marker);
+
         vis_pub_->publish(markers);
     }
 

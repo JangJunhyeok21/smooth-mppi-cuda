@@ -58,6 +58,7 @@ public:
     
     // Visualization & Debugging
     const std::vector<State>& get_generated_trajectories() const;
+    const std::vector<State>& get_best_trajectory() const;
     int get_best_k() const;
     bool is_cuda_active() const { return true; } // 에러 해결용
     int get_K() const;
@@ -78,6 +79,7 @@ private:
     std::vector<float> h_costs_;        // 비용 데이터
     std::vector<float> h_weights_;      // 가중치
     int best_k_ = 0;
+    std::vector<State> best_trajectory_;
 
     // --- Device Memory Pointers (GPU) ---
     void* d_rng_states_;     // curandState*

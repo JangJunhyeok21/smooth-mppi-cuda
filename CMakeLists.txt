@@ -1,6 +1,13 @@
 cmake_minimum_required(VERSION 3.8)
 project(cuda_mppi_controller)
 
+set(CMAKE_CXX_STANDARD 14)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+set(CMAKE_CUDA_STANDARD 14)
+set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+set(CMAKE_CUDA_EXTENSIONS OFF)
+
 # CUDA 언어 활성화
 enable_language(CUDA)
 
@@ -25,7 +32,7 @@ add_library(cuda_mppi_lib
 
 # GCC line directive 경고 억제 (nvcc 생성 코드)
 target_compile_options(cuda_mppi_lib PRIVATE
-  $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-Wno-gnu-line-directive>
+  $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CXX_COMPILER_ID:Clang>>:-Xcompiler=-Wno-gnu-line-directive>
 )
 
 # 헤더 경로 설정
@@ -41,7 +48,7 @@ add_executable(cuda_mppi_node
 )
 
 target_compile_options(cuda_mppi_node PRIVATE
-  $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-Wno-gnu-line-directive>
+  $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CXX_COMPILER_ID:Clang>>:-Xcompiler=-Wno-gnu-line-directive>
 )
 
 target_include_directories(cuda_mppi_node PUBLIC

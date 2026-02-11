@@ -37,10 +37,10 @@ namespace mppi
 
     // [수정됨] 유턴 방지 로직이 추가된 비용 함수
     __device__ float compute_cost_cuda(
-        const State& s,
-        const float* ref_xs, const float* ref_ys, const float* ref_vs, int path_len,
-        const Control& u, const Control& u_prev,
-        const Params& p) 
+        const State &s,
+        const float *ref_xs, const float *ref_ys, const float *ref_vs, int path_len,
+        const Control &u, const Control &u_prev,
+        const Params &p)
     {
         float min_dist_sq = 1e9f;
         int nearest_idx = -1;
@@ -49,67 +49,82 @@ namespace mppi
         // 하지만 GPU 병렬 처리 특성상 로컬 인덱스를 알기 어려우므로,
         // "차량의 진행 방향(Yaw)과 경로의 방향이 비슷한지" 체크하는 로직 추가.
 
-        for (int i = 0; i < path_len; ++i) {
+        for (int i = 0; i < path_len; ++i)
+        {
             float dx = s.x - ref_xs[i];
             float dy = s.y - ref_ys[i];
             float dist_sq = dx * dx + dy * dy;
 
             // 거리가 너무 멀면(예: 10m 이상) 아예 후보에서 제외 (넓은 공터에서 엉뚱한 점 잡는 것 방지)
-            if (dist_sq > 100.0f) continue; 
+            if (dist_sq > 100.0f)
+                continue;
 
-            if (dist_sq < min_dist_sq) {
+            if (dist_sq < min_dist_sq)
+            {
                 min_dist_sq = dist_sq;
                 nearest_idx = i;
             }
         }
-        
+
         // 만약 유효한 경로점을 못 찾았다면(너무 멀어서), 그냥 엄청 큰 비용 부과
-        if (nearest_idx == -1) return 1.0e9f;
+        if (nearest_idx == -1)
+            return 1.0e9f;
 
-        // [핵심 수정 2] 유턴 방지: 진행 방향 벡터 내적 (Dot Product)
-        // 차량이 바라보는 방향(cos, sin)과 
+        // 3. 헤딩(Heading) 오차 비용
+        // 차량이 바라보는 방향(cos, sin)과
         // 경로점이 위치한 방향(path_x - car_x, path_y - car_y)이 반대면 페널티
-        
         // 경로의 접선 방향(Tangent)을 구해서 차량 헤딩과 비교하는 것이 가장 정확함.
-        // 여기서는 간단하게 "경로점 인덱스가 진행하는 방향"을 따르도록 유도.
-        // 하지만 GPU 내에서 인덱스 추적은 복잡하므로, "Heading Error"를 추가합니다.
 
-        // 1. 거리 오차 (기존)
+        // 1. 거리 오차
         float dist_error = min_dist_sq;
-        
-        // 2. 속도 오차 (기존)
+
+        // 2. 속도 오차
         float ref_v = ref_vs[nearest_idx];
         float v_error = (s.v - ref_v) * (s.v - ref_v);
 
-        // 3. [추가] 헤딩(Heading) 오차 비용
+        // 3. 헤딩(Heading) 오차 비용
         // 경로 상의 다음 점을 보고 방향을 구함
-        int next_idx = (nearest_idx + 1 < path_len) ? nearest_idx + 1 : nearest_idx;
+        // 마지막 점에서는 이전 점을 사용
+        int next_idx = nearest_idx;
+        if (nearest_idx + 1 < path_len)
+        {
+            next_idx = nearest_idx + 1;
+        }
+        else if (nearest_idx > 0)
+        {
+            next_idx = nearest_idx - 1;
+        }
+
         float path_dx = ref_xs[next_idx] - ref_xs[nearest_idx];
         float path_dy = ref_ys[next_idx] - ref_ys[nearest_idx];
-        float path_yaw = atan2f(path_dy, path_dx);
-        
-        float yaw_diff = angle_normalize_cuda(s.yaw - path_yaw);
-        // 방향이 90도 이상 틀어지면 비용 폭증 -> 유턴 방지
+
         float heading_cost = 0.0f;
-        if (abs(yaw_diff) > 1.57f) { // 90도(PI/2) 이상
-            heading_cost = 1000.0f; 
-        } else {
-            heading_cost = 2.0f * (yaw_diff * yaw_diff); // 평소에는 부드럽게
+        // path_dx == 0 && path_dy == 0 이면 유효한 접선이 없으므로 헤딩 비용을 건너뜀
+        if (path_dx != 0.0f || path_dy != 0.0f)
+        {
+            float path_yaw = atan2f(path_dy, path_dx);
+            float yaw_diff = angle_normalize_cuda(s.yaw - path_yaw);
+            // 방향이 90도 이상 틀어지면 비용 폭증 -> 유턴 방지
+            if (abs(yaw_diff) > 1.57f)
+            { // 90도(PI/2) 이상
+                heading_cost = 1000.0f;
+            }
+            else
+            {
+                heading_cost = 2.0f * (yaw_diff * yaw_diff); // 평소에는 부드럽게
+            }
         }
 
         // 4. 제어 입력 비용들 (기존)
         float lat_accel = (s.v * s.v) * tanf(u.steer) / p.wheel_base;
-        float lat_cost = p.q_lat * (lat_accel * lat_accel);
+        float lat_cost = p.q_lat * lat_accel; //횡g는 선형비용으로 처리
         float input_cost = p.q_u * (u.steer * u.steer + u.accel * u.accel);
         float d_steer = u.steer - u_prev.steer;
         float d_accel = u.accel - u_prev.accel;
         float input_delta_cost = p.q_du * (d_steer * d_steer + d_accel * d_accel);
 
         // 최종 비용 합산
-        return p.q_dist * dist_error 
-            + p.q_v * v_error 
-            + heading_cost    // [추가됨]
-            + lat_cost + input_cost + input_delta_cost;
+        return p.q_dist * dist_error + p.q_v * v_error + heading_cost + lat_cost + input_cost + input_delta_cost;
     }
     __device__ bool violates_scan_hard_constraint(
         const State &s,
@@ -185,24 +200,25 @@ namespace mppi
         {
             int idx = k * T + t;
 
-            // 1. 노이즈 생성
-            float noise_steer = curand_normal(&rng_states[idx]) * 0.1f;
-            float noise_accel = curand_normal(&rng_states[idx]) * 0.2f;
-
             // 2. 제어 입력 적용 (Mean + Noise)
             Control u = prev_controls[t];
-            u.steer += noise_steer;
-            u.accel += noise_accel;
+            u.steer += curand_normal(&rng_states[idx]) * 0.2f;
+            u.accel += curand_normal(&rng_states[idx]) * 0.4f;
 
             // Clamp
-            if (u.steer > p.max_steer)
-                u.steer = p.max_steer;
-            else if (u.steer < -p.max_steer)
-                u.steer = -p.max_steer;
-            if (u.accel > p.max_accel)
-                u.accel = p.max_accel;
-            else if (u.accel < p.min_accel)
-                u.accel = p.min_accel;
+            u.steer = fminf(fmaxf(u.steer, -p.max_steer), p.max_steer);
+            u.accel = fminf(fmaxf(u.accel, p.min_accel), p.max_accel);
+
+            // Enforce speed bounds through acceleration
+            float v_next = x.v + u.accel * p.dt;
+            if (v_next > p.max_speed)
+            {
+                u.accel = (p.max_speed - x.v) / p.dt;
+            }
+            else if (v_next < p.min_speed)
+            {
+                u.accel = (p.min_speed - x.v) / p.dt;
+            }
 
             // 3. 상태 업데이트
             x = update_dynamics_cuda(x, u, p);
@@ -296,6 +312,7 @@ namespace mppi
     void MPPISolver::set_reference_path(const std::vector<float> &xs, const std::vector<float> &ys,
                                         const std::vector<float> &yaws, const std::vector<float> &vs)
     {
+        (void)yaws;
         ref_path_len_ = xs.size();
         if (ref_path_len_ > 2000)
             ref_path_len_ = 2000;
@@ -373,31 +390,62 @@ namespace mppi
 
     Control MPPISolver::compute_optimal_control()
     {
-        // 1. 최적(최소 비용) 궤적 선택
-        int best_k = 0;
-        float min_cost = 1e9f;
+        auto min_it = std::min_element(h_costs_.begin(), h_costs_.end());
+        float min_cost = *min_it;
+        best_k_ = static_cast<int>(std::distance(h_costs_.begin(), min_it));
+
+        float lambda = 1.0f;
+        float sum_weights = 0.0f;
+
+        // 1. 가중치(Softmax) 계산
         for (int k = 0; k < K_; ++k)
         {
-            if (h_costs_[k] < min_cost)
+            // 비용이 낮을수록 weight가 커짐 (exp 함수 특성)
+            h_weights_[k] = expf(-(h_costs_[k] - min_cost) / lambda);
+            sum_weights += h_weights_[k];
+        }
+
+        if (sum_weights < 1e-6)
+            sum_weights = 1e-6;
+
+        // 2. 가중 평균 제어 입력 계산
+        std::vector<Control> weighted_controls(T_, {0.0f, 0.0f});
+
+        for (int k = 0; k < K_; ++k)
+        {
+            float w = h_weights_[k] / sum_weights;
+            for (int t = 0; t < T_; ++t)
             {
-                min_cost = h_costs_[k];
-                best_k = k;
+                // k번째 샘플의 t번째 제어 입력
+                Control u_k = h_controls_[k * T_ + t];
+
+                weighted_controls[t].steer += w * u_k.steer;
+                weighted_controls[t].accel += w * u_k.accel;
             }
         }
-        best_k_ = best_k;
 
-        // 2. 최적 궤적의 첫 제어 입력 사용
-        Control output = h_controls_[best_k * T_ + 0];
-        // t번째 칸에 t+1번째 최적 입력을 당겨와서 저장 (Shift)
+        // 3. 실행할 제어 입력 (t=0)
+        Control output = weighted_controls[0];
+
+        // 4. 다음 주기를 위한 h_prev_controls_ 업데이트 (Shift)
         for (int t = 0; t < T_ - 1; ++t)
         {
-            h_prev_controls_[t] = h_controls_[best_k * T_ + (t + 1)];
+            h_prev_controls_[t] = weighted_controls[t + 1];
         }
-        h_prev_controls_[T_ - 1] = h_prev_controls_[T_ - 2];
+        h_prev_controls_[T_ - 1] = weighted_controls[T_ - 1];
+
+        // 5. 최적 샘플 궤적 저장 (시각화용)
+        best_trajectory_.resize(T_);
+        int base = best_k_ * T_;
+        for (int t = 0; t < T_; ++t)
+        {
+            best_trajectory_[t] = h_states_[base + t];
+        }
+
         return output;
     }
-
     const std::vector<State> &MPPISolver::get_generated_trajectories() const { return h_states_; }
+    const std::vector<State> &MPPISolver::get_best_trajectory() const { return best_trajectory_; }
     int MPPISolver::get_best_k() const { return best_k_; }
     int MPPISolver::get_K() const { return K_; }
     int MPPISolver::get_T() const { return T_; }

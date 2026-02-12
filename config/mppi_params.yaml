@@ -12,16 +12,16 @@ cuda_mppi_controller:
     q_dist: 8.0
     q_v: 1.2
     q_u: 0.05
-    q_du: 5.0
-    q_heading: 7.5
+    q_du: 6.0
+    q_heading: 3.0
     q_lat: 5.5
-    q_collision: 7.6
-    collision_radius: 0.35
+    q_collision: 3.4
+    collision_radius: 0.3
     
     # --- Noise & Tuning ---
-    noise_steer_std: 0.025
+    noise_steer_std: 0.01
     noise_accel_std: 0.08
-    max_steer_rate: 0.04  # steer_vel_max(4.0) * dt(0.02) = 0.08
+    max_steer_rate: 0.06  # steer_vel_max(4.0) * dt(0.02) = 0.08
     max_accel_rate: 1.0   # jerk_max(100.0) * dt(0.02) = 2.0
     lambda: 15.0
     visualize_candidates: true

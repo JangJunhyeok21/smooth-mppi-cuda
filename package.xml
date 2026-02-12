@@ -3,9 +3,14 @@
 <package format="3">
   <name>cuda_mppi_controller</name>
   <version>0.0.0</version>
-  <description>TODO: Package description</description>
-  <maintainer email="jangjh1995@naver.com">a</maintainer>
-  <license>TODO: License declaration</license>
+  <description>
+    CUDA-accelerated MPPI (Model Predictive Path Integral) controller 
+    for F1TENTH autonomous racing. Real-time trajectory optimization 
+    on NVIDIA GPUs using parallel sampling and cost minimization.
+  </description>
+  <maintainer email="jangjh1995@naver.com">JangJunhyeok</maintainer>
+  <license>MIT</license>
+  <author email="jangjh1995@naver.com">JangJunhyeok</author>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
 

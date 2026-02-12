@@ -4,6 +4,8 @@
 #include <vector>
 #include <random>
 #include <memory>
+#include <iostream>
+#include <cstdio>
 
 #ifdef __CUDACC__
 #define HOST_DEVICE __host__ __device__
@@ -11,13 +13,25 @@
 #define HOST_DEVICE
 #endif
 
+// 에러 체크 매크로
+#define CUDA_CHECK(call) \
+    do { \
+        cudaError_t err = call; \
+        if (err != cudaSuccess) { \
+            fprintf(stderr, "CUDA Error: %s at %s:%d\n", cudaGetErrorString(err), __FILE__, __LINE__); \
+        } \
+    } while (0)
+
 namespace mppi {
 
+// [수정] Dynamic Model을 위한 상태 변수 확장
 struct alignas(16) State {
     float x;
     float y;
     float yaw;
-    float v;
+    float v;      // vx (Longitudinal velocity)
+    float vy;     // [추가] vy (Lateral velocity)
+    float omega;  // [추가] Yaw rate
 };
 
 struct alignas(8) Control {
@@ -27,7 +41,9 @@ struct alignas(8) Control {
 
 struct Params {
     float dt;
-    float wheel_base;
+    float wheel_base; // Kinematic용 (Legacy)
+    
+    // Limits
     float max_steer;
     float min_accel;
     float max_accel;
@@ -39,7 +55,30 @@ struct Params {
     float q_dist;
     float q_v;
     float q_u;
+    float q_du;
+    float q_heading;
+    float q_lat;
+    float q_collision;
     float collision_radius;
+    
+    // Noise & Tuning
+    float noise_steer_std;
+    float noise_accel_std;
+    float max_steer_rate; // steer_vel_max * dt
+    float max_accel_rate; // jerk_max * dt
+    float lambda;
+    bool visualize_candidates;
+
+    // [추가] Vehicle Dynamics Params (User Provided)
+    float mass;  // kg
+    float I_z;   // kg*m^2
+    float l_f;   // m
+    float l_r;   // m
+    
+    // Pacejka Magic Formula Coefficients
+    // Force = D * sin(C * atan(B * alpha))
+    float B_f, C_f, D_f; // Front Tire
+    float B_r, C_r, D_r; // Rear Tire
 };
 
 class MPPISolver {
@@ -54,11 +93,9 @@ public:
     
     Control solve(const State& current_state);
     
-    // Visualization & Debugging
     const std::vector<State>& get_generated_trajectories() const;
     const std::vector<State>& get_best_trajectory() const;
     int get_best_k() const;
-    bool is_cuda_active() const { return true; } // 에러 해결용
     int get_K() const;
     int get_T() const;
 
@@ -70,35 +107,32 @@ private:
     int K_, T_;
     Params params_;
     
-    // --- Host Memory (CPU) ---
-    std::vector<State> h_states_;       // 시각화용 궤적 데이터
-    std::vector<Control> h_controls_;   // 샘플 제어 입력 (K * T)
-    std::vector<Control> h_prev_controls_; // 이전 제어 입력 (T개)
-    std::vector<float> h_costs_;        // 비용 데이터
-    std::vector<float> h_weights_;      // 가중치
+    // --- Host Memory ---
+    std::vector<State> h_states_;       
+    std::vector<Control> h_controls_;   
+    std::vector<Control> h_prev_controls_; 
+    std::vector<float> h_costs_;        
+    std::vector<float> h_weights_;      
     int best_k_ = 0;
     std::vector<State> best_trajectory_;
 
-    // --- Device Memory Pointers (GPU) ---
-    void* d_rng_states_;     // curandState*
+    // --- Device Memory ---
+    void* d_rng_states_;     
+    State* d_states_;        
+    Control* d_controls_;    
+    Control* d_prev_controls_; 
+    float* d_costs_;         
     
-    State* d_states_;        // K * T (Trajectory States)
-    Control* d_controls_;    // K * T (Sampled Controls)
-    Control* d_prev_controls_; // T (Previous Mean Controls)
-    float* d_costs_;         // K (Costs)
-    
-    // Reference Path (Device)
     float* d_ref_xs_;
     float* d_ref_ys_;
     float* d_ref_yaws_;
     float* d_ref_vs_;
     int ref_path_len_ = 0;
 
-    // Scan Data (Device) - 필요 시 확장
     float* d_scan_ranges_;
     int scan_len_ = 0;
-    float scan_angle_min_ = 0.0f; // 스캔 각도 최소값
-    float scan_angle_inc_ = 0.0f;  // 스캔 각도 증가값
+    float scan_angle_min_ = 0.0f; 
+    float scan_angle_inc_ = 0.0f;  
 };
 } // namespace mppi
 #endif

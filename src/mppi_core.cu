@@ -28,9 +28,9 @@ namespace mppi
         if (vx < 0.1f) {
             State next_s;
             float beta = atanf(p.l_r * tanf(u.steer) / (p.l_f + p.l_r));
-            next_s.x = px + vx * cosf(yaw + beta) * p.dt;
-            next_s.y = py + vx * sinf(yaw + beta) * p.dt;
-            next_s.yaw = angle_normalize_cuda(yaw + (vx / p.l_r) * sinf(beta) * p.dt);
+            next_s.x = px + vx * __cosf(yaw + beta) * p.dt;
+            next_s.y = py + vx * __sinf(yaw + beta) * p.dt;
+            next_s.yaw = angle_normalize_cuda(yaw + (vx / p.l_r) * __sinf(beta) * p.dt);
             next_s.v = vx + u.accel * p.dt;
             next_s.vy = 0.0f;
             next_s.omega = 0.0f;
@@ -38,33 +38,28 @@ namespace mppi
         }
 
         // 1. Slip Angles (alpha)
-        // alpha_f = delta - atan2(vy + lf*omega, vx)
         float alpha_f = u.steer - atan2f(vy + p.l_f * omega, vx);
-        // alpha_r = - atan2(vy - lr*omega, vx)
         float alpha_r = -atan2f(vy - p.l_r * omega, vx);
 
         // 2. Lateral Forces (Pacejka Magic Formula)
-        // F = D * sin(C * atan(B * alpha))
-        float F_fy = p.D_f * sinf(p.C_f * atanf(p.B_f * alpha_f));
-        float F_ry = p.D_r * sinf(p.C_r * atanf(p.B_r * alpha_r));
+        float F_fy = p.D_f * __sinf(p.C_f * atanf(p.B_f * alpha_f));
+        float F_ry = p.D_r * __sinf(p.C_r * atanf(p.B_r * alpha_r));
 
         // 3. Equations of Motion
-        // F_rx는 질량 * 가속도 명령으로 가정
         float F_rx = p.mass * u.accel; 
 
         // dot_vx = (F_rx - F_fy * sin(delta) + m * vy * omega) / m
-        float dot_vx = (F_rx - F_fy * sinf(u.steer) + p.mass * vy * omega) / p.mass;
+        float dot_vx = (F_rx - F_fy * __sinf(u.steer) + p.mass * vy * omega) / p.mass;
 
         // dot_vy = (F_ry + F_fy * cos(delta) - m * vx * omega) / m
-        float dot_vy = (F_ry + F_fy * cosf(u.steer) - p.mass * vx * omega) / p.mass;
+        float dot_vy = (F_ry + F_fy * __cosf(u.steer) - p.mass * vx * omega) / p.mass;
 
         // dot_omega = (F_fy * lf * cos(delta) - F_ry * lr) / Iz
-        float dot_omega = (F_fy * p.l_f * cosf(u.steer) - F_ry * p.l_r) / p.I_z;
+        float dot_omega = (F_fy * p.l_f * __cosf(u.steer) - F_ry * p.l_r) / p.I_z;
 
         // 4. Integration (Euler)
-        // Global Frame Update
-        float dot_x = vx * cosf(yaw) - vy * sinf(yaw);
-        float dot_y = vx * sinf(yaw) + vy * cosf(yaw);
+        float dot_x = vx * __cosf(yaw) - vy * __sinf(yaw);
+        float dot_y = vx * __sinf(yaw) + vy * __cosf(yaw);
 
         State next_s;
         next_s.x = px + dot_x * p.dt;
@@ -82,18 +77,35 @@ namespace mppi
         const float *ref_xs, const float *ref_ys, const float *ref_yaws, const float *ref_vs, int path_len,
         const Control &u, const Control &u_prev,
         const Params &p,
-        float min_obstacle_dist)  // 외부에서 계산된 최소 장애물 거리
+        float min_obstacle_dist,
+        int* last_idx)  
     {
         float min_dist_sq = 1e9f;
         int nearest_idx = -1;
 
-        for (int i = 0; i < path_len; ++i)
+        int start_search = *last_idx; 
+        int search_window = 50; // 앞쪽 50개만 탐색 (Window Search)
+        
+        // 안전 장치: 인덱스가 범위 밖이면 보정
+        if (start_search >= path_len) start_search %= path_len;
+        if (start_search < 0) start_search = 0;
+
+        // [순환 탐색 최적화]
+        // 모듈러 연산(%)은 비싸므로, 덧셈과 조건문으로 처리
+        for (int offset = 0; offset < search_window; ++offset)
         {
+            // 1. 단순 덧셈
+            int i = start_search + offset;
+            
+            // 2. 범위를 넘어가면 path_len 만큼 빼서 0부터 다시 시작 (Wrap Around)
+            // 예: path_len=100, i=100 -> i=0, i=101 -> i=1
+            if (i >= path_len) {
+                i -= path_len;
+            }
+
             float dx = s.x - ref_xs[i];
             float dy = s.y - ref_ys[i];
             float dist_sq = dx * dx + dy * dy;
-
-            if (dist_sq > 100.0f) continue; // 너무 먼 점 무시
 
             if (dist_sq < min_dist_sq)
             {
@@ -102,9 +114,15 @@ namespace mppi
             }
         }
 
-        if (nearest_idx == -1) return 1.0e9f;
+        // 못 찾았으면(그럴 리 없지만) 시작점 유지, 찾았으면 갱신
+        if (nearest_idx == -1) nearest_idx = start_search;
+        
+        // [중요] 다음 스텝을 위해 last_idx 업데이트
+        // nearest_idx가 0이 되었다면, 다음 틱에서는 0부터 검색 시작하므로 자연스럽게 순환됨
+        *last_idx = nearest_idx; 
 
-        float dist_error = min_dist_sq;
+        // --- 이하 비용 계산 로직 동일 ---
+        float dist_error = min_dist_sq; 
         float ref_v = ref_vs[nearest_idx];
         float v_error = (s.v - ref_v) * (s.v - ref_v);
 
@@ -112,20 +130,21 @@ namespace mppi
         float yaw_diff = angle_normalize_cuda(s.yaw - path_yaw);
         
         float heading_cost = 0.0f;
-        if (abs(yaw_diff) > 1.047f) { //60도
+        if (abs(yaw_diff) > 1.047f) { // 60도
             heading_cost = 1000.0f;
         } else {
             heading_cost = p.q_heading * (yaw_diff * yaw_diff);
         }
 
+        // 입력 비용 (오타 수정됨)
         float input_cost = p.q_u * (u.steer * u.steer + u.accel * u.accel);
 
-        // a_t - a_{t-1}
+        // Action Rate Cost
         float d_steer = u.steer - u_prev.steer;
         float d_accel = u.accel - u_prev.accel;
         float rate_cost = p.q_du * (d_steer * d_steer + d_accel * d_accel);
 
-        // 횡G 비용 (Dynamic Model이므로 원심력 v * omega 사용 가능)
+        // 횡G 비용
         float current_lat_g = s.v * s.omega; 
         float g_limit = 9.8f; 
         float safe_ratio = 0.85f;
@@ -136,19 +155,18 @@ namespace mppi
             lat_cost = p.q_lat * (violation * violation); 
         }
 
-        // 벽 근접 비용 (기하급수적 증가)
+        // 장애물 비용
         float obstacle_cost = 0.0f;
         float danger_threshold = p.collision_radius * 2.0f;
         if (min_obstacle_dist < danger_threshold) {
             float scale = p.collision_radius * 0.5f;
             float proximity = (danger_threshold - min_obstacle_dist) / scale;
-            obstacle_cost = fminf(p.q_collision * expf(proximity), 1.0e8f);
+            obstacle_cost = fminf(p.q_dist * 5.0f * __expf(proximity), 1.0e8f);
         }
         
         return p.q_dist * dist_error + p.q_v * v_error + heading_cost + input_cost + rate_cost + lat_cost + obstacle_cost;
     }
-
-    // 장애물까지의 최소 거리를 반환 (없으면 1e9f)
+    
     __device__ float compute_min_obstacle_distance(
         const State &s,
         const float *scan_ranges, int scan_len,
@@ -159,28 +177,34 @@ namespace mppi
 
         float dx = s.x - robot_pose.x;
         float dy = s.y - robot_pose.y;
-        float local_x = dx * cosf(robot_pose.yaw) + dy * sinf(robot_pose.yaw);
-        float local_y = -dx * sinf(robot_pose.yaw) + dy * cosf(robot_pose.yaw);
+        float local_x = dx * __cosf(robot_pose.yaw) + dy * __sinf(robot_pose.yaw);
+        float local_y = -dx * __sinf(robot_pose.yaw) + dy * __cosf(robot_pose.yaw);
 
-        float min_dist = 1e9f;
-        for (int i = 0; i < scan_len; ++i)
+        float min_dist_sq = 1e9f;
+        
+        // [최적화] Stride 4 적용 (4개 중 1개만 검사)
+        for (int i = 0; i < scan_len; i += 4)
         {
             float r = scan_ranges[i];
             if (isinf(r) || isnan(r)) continue;
 
             float ang = scan_angle_min + i * scan_angle_inc;
-            float obs_x = r * cosf(ang);
-            float obs_y = r * sinf(ang);
+            float obs_x = r * __cosf(ang);
+            float obs_y = r * __sinf(ang);
 
             float dx_obs = local_x - obs_x;
             float dy_obs = local_y - obs_y;
-            float dist = sqrtf(dx_obs * dx_obs + dy_obs * dy_obs);
+            
+            // 제곱 거리만 비교 (sqrt 제거)
+            float dist_sq = dx_obs * dx_obs + dy_obs * dy_obs;
 
-            if (dist < min_dist) {
-                min_dist = dist;
+            if (dist_sq < min_dist_sq) {
+                min_dist_sq = dist_sq;
             }
         }
-        return min_dist;
+        
+        // 마지막에 한 번만 sqrt 수행
+        return sqrtf(min_dist_sq);
     }
 
     __global__ void init_rng_kernel(curandState *states, long seed, int K, int T)
@@ -201,7 +225,8 @@ namespace mppi
         const Params p,
         const float *ref_xs, const float *ref_ys, const float *ref_yaws, const float *ref_vs, int path_len,
         const float *scan_ranges, int scan_len, float scan_angle_min, float scan_angle_inc,
-        int K, int T)
+        int K, int T,
+        int start_path_idx) // CPU에서 계산된 시작 인덱스
     {
         int k = blockIdx.x * blockDim.x + threadIdx.x;
         if (k >= K) return;
@@ -211,6 +236,9 @@ namespace mppi
         
         Control current_action = prev_controls[0]; 
         Control last_u = current_action;
+        
+        // 각 샘플별 로컬 경로 인덱스 초기화
+        int local_path_idx = start_path_idx;
 
         for (int t = 0; t < T; ++t)
         {
@@ -242,11 +270,11 @@ namespace mppi
             states[idx] = x;
             controls[idx] = u_clamped; 
 
-            // 최소 장애물 거리 계산 (한 번만)
+            // 최소 장애물 거리 계산 (최적화됨)
             float min_dist = compute_min_obstacle_distance(
                 x, scan_ranges, scan_len, scan_angle_min, scan_angle_inc, start_state);
             
-            // Hard constraint: collision_radius보다 가까우면 즉시 큰 비용
+            // Hard constraint: 충돌 반경 내 진입 시 즉시 종료
             if (min_dist < p.collision_radius)
             {
                 total_cost = 1.0e9f;
@@ -255,10 +283,11 @@ namespace mppi
 
             if (path_len > 0)
             {
-                // Soft cost: min_dist를 cost 계산에 전달
+                // compute_cost_cuda 내부에서 local_path_idx를 갱신하며 윈도우 탐색
                 total_cost += compute_cost_cuda(
                     x, ref_xs, ref_ys, ref_yaws, ref_vs, path_len,
-                    u_clamped, last_u, p, min_dist);
+                    u_clamped, last_u, p, min_dist,
+                    &local_path_idx); 
             }
             last_u = u_clamped;
         }
@@ -322,6 +351,9 @@ namespace mppi
     void MPPISolver::set_reference_path(const std::vector<float> &xs, const std::vector<float> &ys,
                                         const std::vector<float> &yaws, const std::vector<float> &vs)
     {
+        h_ref_xs_ = xs;
+        h_ref_ys_ = ys;
+
         ref_path_len_ = xs.size();
         if (ref_path_len_ > 2000) ref_path_len_ = 2000;
 
@@ -356,6 +388,21 @@ namespace mppi
     {
         CUDA_CHECK(cudaMemcpy(d_prev_controls_, h_prev_controls_.data(), T_ * sizeof(Control), cudaMemcpyHostToDevice));
 
+        // [최적화] CPU에서 가장 가까운 경로점 인덱스(start_path_idx) 찾기
+        int start_path_idx = 0;
+        if (!h_ref_xs_.empty()) {
+            float min_dist_sq = 1e9f;
+            for (int i = 0; i < h_ref_xs_.size(); ++i) {
+                float dx = current_state.x - h_ref_xs_[i];
+                float dy = current_state.y - h_ref_ys_[i];
+                float d_sq = dx*dx + dy*dy;
+                if (d_sq < min_dist_sq) {
+                    min_dist_sq = d_sq;
+                    start_path_idx = i;
+                }
+            }
+        }
+
         int threadsPerBlock = 128;
         int blocksPerGrid = (K_ + threadsPerBlock - 1) / threadsPerBlock;
 
@@ -364,7 +411,8 @@ namespace mppi
             current_state, d_prev_controls_, params_,
             d_ref_xs_, d_ref_ys_, d_ref_yaws_, d_ref_vs_, ref_path_len_,
             d_scan_ranges_, scan_len_, scan_angle_min_, scan_angle_inc_,
-            K_, T_);
+            K_, T_, 
+            start_path_idx); // 계산된 시작 인덱스 전달
         
         CUDA_CHECK(cudaGetLastError());
 
@@ -388,10 +436,10 @@ namespace mppi
         if (min_cost >= 1.0e8f) {
             Control stop_control;
             stop_control.steer = 0.0f;
-            stop_control.accel = params_.min_accel/2.0f;
+            stop_control.accel = params_.min_accel / 2.0f; // 적절한 감속
             for (int t = 0; t < T_; ++t) {
                 h_prev_controls_[t].steer = 0.0f;
-                h_prev_controls_[t].accel = params_.min_accel/2.0f;
+                h_prev_controls_[t].accel = params_.min_accel / 2.0f;
             }
             return stop_control;
         }

@@ -115,6 +115,8 @@ private:
     std::vector<float> h_weights_;      
     int best_k_ = 0;
     std::vector<State> best_trajectory_;
+    std::vector<float> h_ref_xs_;
+    std::vector<float> h_ref_ys_;
 
     // --- Device Memory ---
     void* d_rng_states_;     

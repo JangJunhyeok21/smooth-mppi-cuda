@@ -9,20 +9,20 @@ cuda_mppi_controller:
     max_speed: 7.0       # m/s
     
     # --- Costs ---
-    q_dist: 7.0
-    q_v: 1.2
-    q_u: 0.03
+    q_dist: 12.0
+    q_v: 2.0
+    q_u: 3.0
     q_du: 4.0
-    q_heading: 4.0
-    q_lat: 7.0
-    q_collision: 2.0
+    q_heading: 1.0
+    q_lat: 4.0
+    q_collision: 3.0
     collision_radius: 0.3
     
     # --- Noise & Tuning ---
-    noise_steer_std: 0.01
-    noise_accel_std: 0.08
-    max_steer_rate: 0.06  # steer_vel_max(4.0) * dt(0.02) = 0.08
-    max_accel_rate: 1.0   # jerk_max(100.0) * dt(0.02) = 2.0
+    noise_steer_std: 0.4  # rad/s
+    noise_accel_std: 5.0  # m/s^2
+    max_steer_rate: 4.0  # rad/s (약 229도/s)
+    max_accel_rate: 1000.0   # m/s^3
     lambda: 15.0
     visualize_candidates: true
     

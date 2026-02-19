@@ -17,7 +17,7 @@ public:
         load_parameters();
         validate_parameters();
 
-        solver_ = std::make_unique<mppi::MPPISolver>(3000, 80, mppi_params_);
+        solver_ = std::make_unique<mppi::MPPISolver>(3000, 100, mppi_params_);
 
         drive_pub_ = this->create_publisher<ackermann_msgs::msg::AckermannDriveStamped>(drive_topic_, 10);
         vis_pub_ = this->create_publisher<visualization_msgs::msg::MarkerArray>("/mppi_viz", 10);
@@ -75,17 +75,17 @@ private:
         this->declare_parameter("collision_radius", 0.4);
         mppi_params_.collision_radius = this->get_parameter("collision_radius").as_double();
 
-        this->declare_parameter("noise_steer_std", 0.01);
+        this->declare_parameter("noise_steer_std", 0.5);
         mppi_params_.noise_steer_std = this->get_parameter("noise_steer_std").as_double();
-        this->declare_parameter("noise_accel_std", 0.2); 
+        this->declare_parameter("noise_accel_std", 5.0); 
         mppi_params_.noise_accel_std = this->get_parameter("noise_accel_std").as_double();
         
-        this->declare_parameter("max_steer_rate", 0.08); 
+        this->declare_parameter("max_steer_rate", 4.0); 
         mppi_params_.max_steer_rate = this->get_parameter("max_steer_rate").as_double();
-        this->declare_parameter("max_accel_rate", 2.0); 
+        this->declare_parameter("max_accel_rate", 1000.0); 
         mppi_params_.max_accel_rate = this->get_parameter("max_accel_rate").as_double();
 
-        this->declare_parameter("lambda", 1.0);
+        this->declare_parameter("lambda", 15.0);
         mppi_params_.lambda = this->get_parameter("lambda").as_double();
         this->declare_parameter("visualize_candidates", true);
         mppi_params_.visualize_candidates = this->get_parameter("visualize_candidates").as_bool();

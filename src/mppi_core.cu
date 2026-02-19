@@ -216,20 +216,20 @@ namespace mppi
 
             Control u_mean_curr = prev_controls[t];
             Control u_mean_prev = (t == 0) ? prev_controls[0] : prev_controls[t-1];
-            
-            float mean_steer_rate = u_mean_curr.steer - u_mean_prev.steer;
-            float mean_accel_rate = u_mean_curr.accel - u_mean_prev.accel;
-
-            float noise_steer_rate = curand_normal(&rng_states[idx]) * p.noise_steer_std; 
-            float noise_accel_rate = curand_normal(&rng_states[idx]) * p.noise_accel_std;
-
-            current_action.steer += (mean_steer_rate + fminf(fmaxf(noise_steer_rate, -p.max_steer_rate), p.max_steer_rate));
-            current_action.accel += (mean_accel_rate + fminf(fmaxf(noise_accel_rate, -p.max_accel_rate), p.max_accel_rate));
-
+            // 1. Mean 경로의 '틱당 변화량(Delta)' 산출
+            float mean_steer_rate = u_mean_curr.steer - u_mean_prev.steer;  //rad
+            float mean_accel_rate = u_mean_curr.accel - u_mean_prev.accel;  //m/s^2
+            // 2. 파라미터(시간 단위)에 dt를 곱해 '틱당 노이즈 변화량(Delta)' 산출
+            float noise_delta_steer = curand_normal(&rng_states[idx]) * p.noise_steer_std * p.dt;   // rad
+            float noise_delta_accel = curand_normal(&rng_states[idx]) * p.noise_accel_std * p.dt;   // m/s^2
+            // 3. 물리적 모터/구동계 한계(rate * dt)를 적용하여 클램핑 후 적분(+=)
+            current_action.steer += fminf(fmaxf(mean_steer_rate + noise_delta_steer, -p.max_steer_rate * p.dt), p.max_steer_rate * p.dt);    
+            current_action.accel += fminf(fmaxf(mean_accel_rate + noise_delta_accel, -p.max_accel_rate * p.dt), p.max_accel_rate * p.dt);
+            // 4. 절대 제어값 한계 적용
             Control u_clamped = current_action;
             u_clamped.steer = fminf(fmaxf(u_clamped.steer, -p.max_steer), p.max_steer);
             u_clamped.accel = fminf(fmaxf(u_clamped.accel, p.min_accel), p.max_accel);
-
+            // 5. 속도 제한 적용 (가속도 역산)
             float v_next = x.v + u_clamped.accel * p.dt;
             if (v_next > p.max_speed) u_clamped.accel = (p.max_speed - x.v) / p.dt;
             else if (v_next < p.min_speed) u_clamped.accel = (p.min_speed - x.v) / p.dt;
@@ -383,7 +383,7 @@ namespace mppi
             current_state, d_prev_controls_, params_,
             d_ref_xs_, d_ref_ys_, d_ref_yaws_, d_ref_vs_, ref_path_len_,
             d_scan_ranges_, scan_len_, scan_angle_min_, scan_angle_inc_,
-            K_, T_, start_path_idx); // 전달
+            K_, T_, start_path_idx);
         
         CUDA_CHECK(cudaGetLastError());
 

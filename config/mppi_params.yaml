@@ -4,18 +4,18 @@ cuda_mppi_controller:
     max_steer: 0.507        # rad (약 29도)
     min_accel: -9.0      # m/s^2
     max_accel: 9.0       # m/s^2
-    min_speed: 0.0        # m/s
-    target_speed: 5.5    # m/s
+    min_speed: 0.5        # m/s
+    target_speed: 7.0    # m/s
     max_speed: 7.0       # m/s
     
     # --- Costs ---
-    q_dist: 8.0
-    q_v: 1.2
-    q_u: 0.05
-    q_du: 6.0
-    q_heading: 3.0
-    q_lat: 5.5
-    q_collision: 3.4
+    q_dist: 7.0
+    q_v: 0.9
+    q_u: 0.03
+    q_du: 4.0
+    q_heading: 4.0
+    q_lat: 7.0
+    q_collision: 2.0
     collision_radius: 0.3
     
     # --- Noise & Tuning ---

@@ -125,7 +125,7 @@ namespace mppi
         float d_accel = u.accel - u_prev.accel;
         float rate_cost = p.q_du * (d_steer * d_steer + d_accel * d_accel);
 
-        // 횡G 비용 (Dynamic Model이므로 원심력 v * omega 사용 가능)
+        // 횡G 비용
         float current_lat_g = s.v * s.omega; 
         float g_limit = 9.8f; 
         float safe_ratio = 0.85f;
@@ -138,7 +138,7 @@ namespace mppi
 
         // 벽 근접 비용 (기하급수적 증가)
         float obstacle_cost = 0.0f;
-        float danger_threshold = p.collision_radius * 2.0f;
+        float danger_threshold = p.collision_radius * 1.5f;
         if (min_obstacle_dist < danger_threshold) {
             float scale = p.collision_radius * 0.5f;
             float proximity = (danger_threshold - min_obstacle_dist) / scale;
@@ -416,6 +416,9 @@ namespace mppi
             }
         }
 
+        // [추가] 계산된 최적 제어 입력을 멤버 변수에 저장 (디버깅용)
+        optimal_controls_ = weighted_controls;
+
         Control output = weighted_controls[0];
 
         for (int t = 0; t < T_ - 1; ++t) {
@@ -435,6 +438,7 @@ namespace mppi
     const std::vector<State> &MPPISolver::get_generated_trajectories() const { return h_states_; }
     const std::vector<State> &MPPISolver::get_best_trajectory() const { return best_trajectory_; }
     int MPPISolver::get_best_k() const { return best_k_; }
+    const std::vector<Control>& MPPISolver::get_optimal_controls() const { return optimal_controls_; }
     int MPPISolver::get_K() const { return K_; }
     int MPPISolver::get_T() const { return T_; }
 }

@@ -10,7 +10,7 @@ cuda_mppi_controller:
     
     # --- Costs ---
     q_dist: 7.0
-    q_v: 0.9
+    q_v: 1.2
     q_u: 0.03
     q_du: 4.0
     q_heading: 4.0

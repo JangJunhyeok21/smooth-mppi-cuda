@@ -95,6 +95,11 @@ public:
     
     const std::vector<State>& get_generated_trajectories() const;
     const std::vector<State>& get_best_trajectory() const;
+
+    const std::vector<Control>& get_optimal_controls() const;
+    const std::vector<float>& get_ref_xs() const { return h_ref_xs_; }
+    const std::vector<float>& get_ref_ys() const { return h_ref_ys_; }
+    
     int get_best_k() const;
     int get_K() const;
     int get_T() const;
@@ -115,9 +120,9 @@ private:
     std::vector<float> h_weights_;      
     int best_k_ = 0;
     std::vector<State> best_trajectory_;
+    std::vector<Control> optimal_controls_;
     std::vector<float> h_ref_xs_;
     std::vector<float> h_ref_ys_;
-
     // --- Device Memory ---
     void* d_rng_states_;     
     State* d_states_;        

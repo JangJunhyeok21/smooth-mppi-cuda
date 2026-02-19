@@ -10,7 +10,6 @@
 #include <cmath>
 
 using namespace std::chrono_literals;
-using OnSetParametersCallbackHandle = rclcpp::Node::OnSetParametersCallbackHandle;
 
 class MPPINode : public rclcpp::Node {
 public:
@@ -18,7 +17,7 @@ public:
         load_parameters();
         validate_parameters();
 
-        solver_ = std::make_unique<mppi::MPPISolver>(3000, 90, mppi_params_);
+        solver_ = std::make_unique<mppi::MPPISolver>(3000, 80, mppi_params_);
 
         drive_pub_ = this->create_publisher<ackermann_msgs::msg::AckermannDriveStamped>(drive_topic_, 10);
         vis_pub_ = this->create_publisher<visualization_msgs::msg::MarkerArray>("/mppi_viz", 10);
@@ -34,37 +33,31 @@ public:
 
         timer_ = this->create_wall_timer(20ms, std::bind(&MPPINode::timer_callback, this));
         
-        // 파라미터 변경 감지 콜백 등록
-        param_callback_handle_ = this->add_on_set_parameters_callback(
-            std::bind(&MPPINode::parameters_callback, this, std::placeholders::_1));
-        
-        RCLCPP_INFO(this->get_logger(), "MPPI Node Started: DYNAMIC BICYCLE MODEL (PACEJKA)");
+        RCLCPP_INFO(this->get_logger(), "MPPI Node Started: Optimization & Monitor Enabled");
     }
 
 private:
     void load_parameters() {
         mppi_params_.dt = 0.02;
 
-        // [수정] Limits (User Provided)
-        this->declare_parameter("max_steer", 4.0); // User provided: 4.0 rad
+        this->declare_parameter("max_steer", 4.0);
         mppi_params_.max_steer = this->get_parameter("max_steer").as_double();
         
-        this->declare_parameter("min_accel", -40.0); // decel_max: 40.0
+        this->declare_parameter("min_accel", -40.0);
         mppi_params_.min_accel = this->get_parameter("min_accel").as_double();
         
-        this->declare_parameter("max_accel", 40.0);  // accel_max: 40.0
+        this->declare_parameter("max_accel", 40.0);
         mppi_params_.max_accel = this->get_parameter("max_accel").as_double();
         
         this->declare_parameter("min_speed", 0.0);
         mppi_params_.min_speed = this->get_parameter("min_speed").as_double();
         
-        this->declare_parameter("target_speed", 10.0); // User max is 20, set target appropriately
+        this->declare_parameter("target_speed", 10.0);
         mppi_params_.target_speed = this->get_parameter("target_speed").as_double();
         
-        this->declare_parameter("max_speed", 20.0); // speed_max: 20.0
+        this->declare_parameter("max_speed", 20.0);
         mppi_params_.max_speed = this->get_parameter("max_speed").as_double();
         
-        // Costs
         this->declare_parameter("q_dist", 10.0);
         mppi_params_.q_dist = this->get_parameter("q_dist").as_double();
         this->declare_parameter("q_v", 2.0);
@@ -77,21 +70,19 @@ private:
         mppi_params_.q_heading = this->get_parameter("q_heading").as_double();
         this->declare_parameter("q_lat", 3.0);
         mppi_params_.q_lat = this->get_parameter("q_lat").as_double();
-        this->declare_parameter("q_collision", 10.0);
+        this->declare_parameter("q_collision", 3.0);
         mppi_params_.q_collision = this->get_parameter("q_collision").as_double();
         this->declare_parameter("collision_radius", 0.4);
         mppi_params_.collision_radius = this->get_parameter("collision_radius").as_double();
 
-        // Noise & Tuning
         this->declare_parameter("noise_steer_std", 0.01);
         mppi_params_.noise_steer_std = this->get_parameter("noise_steer_std").as_double();
-        this->declare_parameter("noise_accel_std", 0.2); // Accel이 커서 노이즈도 키움
+        this->declare_parameter("noise_accel_std", 0.2); 
         mppi_params_.noise_accel_std = this->get_parameter("noise_accel_std").as_double();
         
-        this->declare_parameter("max_steer_rate", 0.08); // steer_vel_max 4.0 * 0.02
+        this->declare_parameter("max_steer_rate", 0.08); 
         mppi_params_.max_steer_rate = this->get_parameter("max_steer_rate").as_double();
-        
-        this->declare_parameter("max_accel_rate", 2.0); // jerk_max 100 * 0.02
+        this->declare_parameter("max_accel_rate", 2.0); 
         mppi_params_.max_accel_rate = this->get_parameter("max_accel_rate").as_double();
 
         this->declare_parameter("lambda", 1.0);
@@ -99,7 +90,6 @@ private:
         this->declare_parameter("visualize_candidates", true);
         mppi_params_.visualize_candidates = this->get_parameter("visualize_candidates").as_bool();
 
-        // [수정] Dynamic Model Params (User Provided)
         this->declare_parameter("mass", 3.5);
         mppi_params_.mass = this->get_parameter("mass").as_double();
         
@@ -112,7 +102,6 @@ private:
         this->declare_parameter("I_z", 0.07);
         mppi_params_.I_z = this->get_parameter("I_z").as_double();
         
-        // Pacejka
         this->declare_parameter("B_f", 1.5); mppi_params_.B_f = this->get_parameter("B_f").as_double();
         this->declare_parameter("C_f", 1.5); mppi_params_.C_f = this->get_parameter("C_f").as_double();
         this->declare_parameter("D_f", 30.0); mppi_params_.D_f = this->get_parameter("D_f").as_double();
@@ -121,11 +110,11 @@ private:
         this->declare_parameter("C_r", 1.5); mppi_params_.C_r = this->get_parameter("C_r").as_double();
         this->declare_parameter("D_r", 30.0); mppi_params_.D_r = this->get_parameter("D_r").as_double();
 
-        this->declare_parameter("odom_topic", "/state0"); // User provided
+        this->declare_parameter("odom_topic", "/state0"); 
         odom_topic_ = this->get_parameter("odom_topic").as_string();
         this->declare_parameter("scan_topic", "/scan0");
         scan_topic_ = this->get_parameter("scan_topic").as_string();
-        this->declare_parameter("drive_topic", "/ackermann_cmd0"); // User provided
+        this->declare_parameter("drive_topic", "/ackermann_cmd0");
         drive_topic_ = this->get_parameter("drive_topic").as_string();
         this->declare_parameter("path_topic", "/center_path");
         path_topic_ = this->get_parameter("path_topic").as_string();        
@@ -135,43 +124,6 @@ private:
         if (mppi_params_.min_speed > mppi_params_.max_speed) std::swap(mppi_params_.min_speed, mppi_params_.max_speed);
         if (mppi_params_.lambda <= 0.0f) mppi_params_.lambda = 1.0f;
         if (mppi_params_.collision_radius < 0.0f) mppi_params_.collision_radius = std::abs(mppi_params_.collision_radius);
-    }
-
-    rcl_interfaces::msg::SetParametersResult parameters_callback(
-        const std::vector<rclcpp::Parameter> &parameters)
-    {
-        rcl_interfaces::msg::SetParametersResult result;
-        result.successful = true;
-        
-        for (const auto &param : parameters) {
-            if (param.get_name() == "q_dist") mppi_params_.q_dist = param.as_double();
-            else if (param.get_name() == "q_v") mppi_params_.q_v = param.as_double();
-            else if (param.get_name() == "q_u") mppi_params_.q_u = param.as_double();
-            else if (param.get_name() == "q_du") mppi_params_.q_du = param.as_double();
-            else if (param.get_name() == "q_heading") mppi_params_.q_heading = param.as_double();
-            else if (param.get_name() == "q_lat") mppi_params_.q_lat = param.as_double();
-            else if (param.get_name() == "q_collision") mppi_params_.q_collision = param.as_double();
-            else if (param.get_name() == "collision_radius") mppi_params_.collision_radius = param.as_double();
-            else if (param.get_name() == "lambda") mppi_params_.lambda = param.as_double();
-            else if (param.get_name() == "noise_steer_std") mppi_params_.noise_steer_std = param.as_double();
-            else if (param.get_name() == "noise_accel_std") mppi_params_.noise_accel_std = param.as_double();
-            else if (param.get_name() == "target_speed") mppi_params_.target_speed = param.as_double();
-            else if (param.get_name() == "visualize_candidates") mppi_params_.visualize_candidates = param.as_bool();
-            else if (param.get_name() == "max_steer") mppi_params_.max_steer = param.as_double();
-            else if (param.get_name() == "min_accel") mppi_params_.min_accel = param.as_double();
-            else if (param.get_name() == "max_accel") mppi_params_.max_accel = param.as_double();
-            else if (param.get_name() == "min_speed") mppi_params_.min_speed = param.as_double();
-            else if (param.get_name() == "max_speed") mppi_params_.max_speed = param.as_double();
-            else if (param.get_name() == "max_steer_rate") mppi_params_.max_steer_rate = param.as_double();
-            else if (param.get_name() == "max_accel_rate") mppi_params_.max_accel_rate = param.as_double();
-        }
-        
-        // 변경된 파라미터를 solver에 업데이트
-        validate_parameters();
-        solver_->update_params(mppi_params_);
-        
-        RCLCPP_INFO(this->get_logger(), "Parameters updated");
-        return result;
     }
 
     void path_callback(const nav_msgs::msg::Path::SharedPtr msg) {
@@ -205,18 +157,58 @@ private:
         current_state_.x = msg->pose.pose.position.x;
         current_state_.y = msg->pose.pose.position.y;
         current_state_.yaw = (float)yaw;
-        
-        // [수정] Dynamics에 필요한 Vx, Vy, Omega 모두 수신
         current_state_.v = msg->twist.twist.linear.x;
         current_state_.vy = msg->twist.twist.linear.y;
         current_state_.omega = msg->twist.twist.angular.z;
         
         odom_received_ = true;
     }
-    
+
     void scan_callback(const sensor_msgs::msg::LaserScan::SharedPtr msg) {
         solver_->set_scan_data(msg->ranges, msg->angle_min, msg->angle_increment);
         scan_received_ = true;
+    }
+
+    // [추가] 실시간 비용 모니터링 함수
+    void monitor_costs() {
+        const auto& traj = solver_->get_best_trajectory();
+        const auto& controls = solver_->get_optimal_controls();
+        
+        if (traj.empty() || controls.empty()) return;
+
+        float total_vel_cost = 0.0f;
+        float total_lat_cost = 0.0f;
+        float total_input_cost = 0.0f;
+        
+        for (size_t t = 0; t < traj.size(); ++t) {
+            const auto& s = traj[t];
+            const auto& u = controls[t];
+            
+            // 1. 횡G 비용 (Lat Cost)
+            float lat_g = s.v * s.omega;
+            float g_limit = 9.8f * 0.85f;
+            if (std::abs(lat_g) > g_limit) {
+                float violation = std::abs(lat_g) - g_limit;
+                total_lat_cost += mppi_params_.q_lat * (violation * violation);
+            }
+
+            // 2. 입력 비용 (Input Cost)
+            total_input_cost += mppi_params_.q_u * (u.steer * u.steer + u.accel * u.accel);
+
+            // 3. 속도 비용 (Velocity Cost)
+            float v_error = (s.v - mppi_params_.target_speed);
+            total_vel_cost += mppi_params_.q_v * (v_error * v_error);
+        }
+
+        // 터미널 출력 (디버깅용)
+        static int print_count = 0;
+        if (print_count++ % 10 == 0) {
+            printf("=== Real-time Cost Monitor ===\n");
+            printf("Vel Cost : %10.2f\n", total_vel_cost);
+            printf("Lat Cost : %10.2f\n", total_lat_cost);
+            printf("InputCost: %10.2f\n", total_input_cost);
+            printf("------------------------------\n");
+        }
     }
 
     void timer_callback() {
@@ -226,7 +218,12 @@ private:
         }
         
         auto start = std::chrono::high_resolution_clock::now();
+
+        // MPPI 실행
         mppi::Control u = solver_->solve(current_state_);
+        
+        // 3. 비용 모니터링 (디버깅)
+        // monitor_costs();
         
         ackermann_msgs::msg::AckermannDriveStamped drive_msg;
         drive_msg.header.stamp = this->now();
@@ -242,14 +239,13 @@ private:
         
         static int count = 0;
         if (count++ % 20 == 0) {
-          RCLCPP_INFO(this->get_logger(), "MPPI: %.2fms | V: %.2f | Vy: %.2f | Omega: %.2f", 
-          elapsed.count(), current_state_.v, current_state_.vy, current_state_.omega);
+          RCLCPP_INFO(this->get_logger(), "MPPI: %.2fms | V: %.2f", elapsed.count(), current_state_.v);
         }
     }
 
     void publish_path_visualization() {
         if (!mppi_params_.visualize_candidates) {
-            // Best Traj만 그림
+            // ...
         }
         
         visualization_msgs::msg::MarkerArray markers;
@@ -258,6 +254,7 @@ private:
             const auto& states = solver_->get_generated_trajectories();
             int K = solver_->get_K();
             int T = solver_->get_T();
+
             visualization_msgs::msg::Marker traj_marker;
             traj_marker.header.frame_id = "map";
             traj_marker.header.stamp = this->now();
@@ -266,7 +263,7 @@ private:
             traj_marker.type = visualization_msgs::msg::Marker::LINE_LIST;
             traj_marker.action = visualization_msgs::msg::Marker::ADD;
             traj_marker.scale.x = 0.02; 
-            traj_marker.color.r = 0.0; traj_marker.color.g = 1.0; traj_marker.color.b = 0.0; traj_marker.color.a = 0.4;
+            traj_marker.color.r = 0.0; traj_marker.color.g = 1.0; traj_marker.color.b = 0.0; traj_marker.color.a = 0.2;
 
             for (int k = 0; k < K; k += 100) { 
                 for (int t = 0; t < T - 1; ++t) {
@@ -308,13 +305,14 @@ private:
     mppi::Params mppi_params_;
     std::unique_ptr<mppi::MPPISolver> solver_;
     mppi::State current_state_;
+
     rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr path_sub_;
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
     rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr scan_sub_;
     rclcpp::Publisher<ackermann_msgs::msg::AckermannDriveStamped>::SharedPtr drive_pub_;
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr vis_pub_;
     rclcpp::TimerBase::SharedPtr timer_;
-    OnSetParametersCallbackHandle::SharedPtr param_callback_handle_;
+    
     std::string odom_topic_, scan_topic_, drive_topic_, path_topic_;
     bool odom_received_ = false;
     bool scan_received_ = false;

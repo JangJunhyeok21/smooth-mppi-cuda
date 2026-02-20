@@ -13,7 +13,6 @@
 #define HOST_DEVICE
 #endif
 
-// 에러 체크 매크로
 #define CUDA_CHECK(call) \
     do { \
         cudaError_t err = call; \
@@ -24,14 +23,14 @@
 
 namespace mppi {
 
-// [수정] Dynamic Model을 위한 상태 변수 확장
 struct alignas(16) State {
     float x;
     float y;
     float yaw;
-    float v;      // vx (Longitudinal velocity)
-    float vy;     // [추가] vy (Lateral velocity)
-    float omega;  // [추가] Yaw rate
+    float v;
+    float vy;
+    float omega;
+    float ay; // odom_callback 용 추가
 };
 
 struct alignas(8) Control {
@@ -41,7 +40,6 @@ struct alignas(8) Control {
 
 struct Params {
     float dt;
-    float wheel_base; // Kinematic용 (Legacy)
     
     // Limits
     float max_steer;
@@ -64,21 +62,20 @@ struct Params {
     // Noise & Tuning
     float noise_steer_std;
     float noise_accel_std;
-    float max_steer_rate; // steer_vel_max * dt
-    float max_accel_rate; // jerk_max * dt
+    float max_steer_rate;
+    float max_accel_rate;
     float lambda;
     bool visualize_candidates;
 
-    // [추가] Vehicle Dynamics Params (User Provided)
-    float mass;  // kg
-    float I_z;   // kg*m^2
-    float l_f;   // m
-    float l_r;   // m
+    // Dynamics
+    float mass;
+    float I_z;
+    float l_f;
+    float l_r;
     
-    // Pacejka Magic Formula Coefficients
-    // Force = D * sin(C * atan(B * alpha))
-    float B_f, C_f, D_f; // Front Tire
-    float B_r, C_r, D_r; // Rear Tire
+    // Pacejka
+    float B_f, C_f, D_f;
+    float B_r, C_r, D_r;
 };
 
 class MPPISolver {
@@ -87,18 +84,18 @@ public:
     ~MPPISolver();
 
     void update_params(Params p);
+    
+    // 경로 및 바운더리 설정
     void set_reference_path(const std::vector<float>& xs, const std::vector<float>& ys,
                             const std::vector<float>& yaws, const std::vector<float>& vs);
-    void set_scan_data(const std::vector<float>& ranges, float angle_min, float angle_inc);
+    void set_boundaries(const std::vector<float>& left_xs, const std::vector<float>& left_ys,
+                        const std::vector<float>& right_xs, const std::vector<float>& right_ys);
     
     Control solve(const State& current_state);
     
     const std::vector<State>& get_generated_trajectories() const;
     const std::vector<State>& get_best_trajectory() const;
-
     const std::vector<Control>& get_optimal_controls() const;
-    const std::vector<float>& get_ref_xs() const { return h_ref_xs_; }
-    const std::vector<float>& get_ref_ys() const { return h_ref_ys_; }
     
     int get_best_k() const;
     int get_K() const;
@@ -121,8 +118,11 @@ private:
     int best_k_ = 0;
     std::vector<State> best_trajectory_;
     std::vector<Control> optimal_controls_;
+
+    // Host Reference Path
     std::vector<float> h_ref_xs_;
     std::vector<float> h_ref_ys_;
+
     // --- Device Memory ---
     void* d_rng_states_;     
     State* d_states_;        
@@ -136,10 +136,12 @@ private:
     float* d_ref_vs_;
     int ref_path_len_ = 0;
 
-    float* d_scan_ranges_;
-    int scan_len_ = 0;
-    float scan_angle_min_ = 0.0f; 
-    float scan_angle_inc_ = 0.0f;  
+    // Boundary Device Memory
+    float* d_left_bnd_xs_;
+    float* d_left_bnd_ys_;
+    float* d_right_bnd_xs_;
+    float* d_right_bnd_ys_;
+    int bnd_len_ = 0;
 };
 } // namespace mppi
 #endif

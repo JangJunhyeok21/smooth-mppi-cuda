@@ -1,29 +1,30 @@
 cuda_mppi_controller:
   ros__parameters:
     # --- Limits (User Provided) ---
-    max_steer: 0.507        # rad (약 29도)
+    max_steer: 0.7        # rad (약 40도)
     min_accel: -9.0      # m/s^2
     max_accel: 9.0       # m/s^2
-    min_speed: 0.5        # m/s
-    target_speed: 7.0    # m/s
+    min_speed: 0.0        # m/s
+    target_speed: 5.0    # m/s
     max_speed: 7.0       # m/s
     
     # --- Costs ---
-    q_dist: 12.0
-    q_v: 2.0
-    q_u: 3.0
-    q_du: 4.0
-    q_heading: 1.0
-    q_lat: 4.0
-    q_collision: 3.0
-    collision_radius: 0.3
+    q_dist: 5.0
+    q_v: 0.05
+    q_u: 0.0
+    q_du: 0.1
+    q_heading: 0.0
+    q_lat: 0.0
+    q_collision: 1.0
+    collision_radius: 0.2
     
     # --- Noise & Tuning ---
-    noise_steer_std: 0.4  # rad/s
+    # 한번에 얼마까지 변화를 줄까
+    noise_steer_std: 0.45  # rad/s
     noise_accel_std: 5.0  # m/s^2
     max_steer_rate: 4.0  # rad/s (약 229도/s)
     max_accel_rate: 1000.0   # m/s^3
-    lambda: 15.0
+    lambda: 5.0
     visualize_candidates: true
     
     # --- Dynamic Model Params ---

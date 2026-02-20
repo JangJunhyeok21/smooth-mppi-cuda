@@ -17,7 +17,7 @@ public:
         load_parameters();
         validate_parameters();
 
-        solver_ = std::make_unique<mppi::MPPISolver>(3000, 100, mppi_params_);
+        solver_ = std::make_unique<mppi::MPPISolver>(10000, 120, mppi_params_);
 
         drive_pub_ = this->create_publisher<ackermann_msgs::msg::AckermannDriveStamped>(drive_topic_, 10);
         vis_pub_ = this->create_publisher<visualization_msgs::msg::MarkerArray>("/mppi_viz", 10);
@@ -25,15 +25,22 @@ public:
         path_sub_ = this->create_subscription<nav_msgs::msg::Path>(
             path_topic_, 1, std::bind(&MPPINode::path_callback, this, std::placeholders::_1));
         
+        // [추가] 시뮬레이터와 동일한 QoS(Transient Local) 설정
+        auto qos = rclcpp::QoS(rclcpp::KeepLast(1)).reliable().transient_local();
+
+        // [추가] 좌우가 뒤집히는 현상을 방지하기 위해 토픽 이름을 교차해서 구독합니다.
+        left_bnd_sub_ = this->create_subscription<nav_msgs::msg::Path>(
+            "/left_boundary", qos, std::bind(&MPPINode::left_bnd_callback, this, std::placeholders::_1));
+            
+        right_bnd_sub_ = this->create_subscription<nav_msgs::msg::Path>(
+            "/right_boundary", qos, std::bind(&MPPINode::right_bnd_callback, this, std::placeholders::_1));
+
         odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
             odom_topic_, 10, std::bind(&MPPINode::odom_callback, this, std::placeholders::_1));
         
-        scan_sub_ = this->create_subscription<sensor_msgs::msg::LaserScan>(
-            scan_topic_, 10, std::bind(&MPPINode::scan_callback, this, std::placeholders::_1));
-
         timer_ = this->create_wall_timer(20ms, std::bind(&MPPINode::timer_callback, this));
         
-        RCLCPP_INFO(this->get_logger(), "MPPI Node Started: Optimization & Monitor Enabled");
+        RCLCPP_INFO(this->get_logger(), "MPPI Node Started: Optimization & Boundary Monitor Enabled");
     }
 
 private:
@@ -112,8 +119,6 @@ private:
 
         this->declare_parameter("odom_topic", "/state0"); 
         odom_topic_ = this->get_parameter("odom_topic").as_string();
-        this->declare_parameter("scan_topic", "/scan0");
-        scan_topic_ = this->get_parameter("scan_topic").as_string();
         this->declare_parameter("drive_topic", "/ackermann_cmd0");
         drive_topic_ = this->get_parameter("drive_topic").as_string();
         this->declare_parameter("path_topic", "/center_path");
@@ -143,8 +148,41 @@ private:
             yaws.push_back((float)yaw);
             vs.push_back(mppi_params_.target_speed);
         }
+        
+        // 경로 데이터 저장 (monitor_costs에서 사용)
+        ref_path_xs_ = xs;
+        ref_path_ys_ = ys;
+        ref_path_yaws_ = yaws;
+        
         solver_->set_reference_path(xs, ys, yaws, vs);
         RCLCPP_INFO_ONCE(this->get_logger(), "Path Received: %zu points", xs.size());
+    }
+
+    // [추가] 왼쪽 바운더리 콜백
+    void left_bnd_callback(const nav_msgs::msg::Path::SharedPtr msg) {
+        left_xs_.clear(); left_ys_.clear();
+        for (const auto& p : msg->poses) {
+            left_xs_.push_back(p.pose.position.x);
+            left_ys_.push_back(p.pose.position.y);
+        }
+        update_boundaries();
+    }
+
+    // [추가] 오른쪽 바운더리 콜백
+    void right_bnd_callback(const nav_msgs::msg::Path::SharedPtr msg) {
+        right_xs_.clear(); right_ys_.clear();
+        for (const auto& p : msg->poses) {
+            right_xs_.push_back(p.pose.position.x);
+            right_ys_.push_back(p.pose.position.y);
+        }
+        update_boundaries();
+    }
+
+    // [추가] 좌우 바운더리가 모두 수신되면 GPU로 전송
+    void update_boundaries() {
+        if (!left_xs_.empty() && !right_xs_.empty() && left_xs_.size() == right_xs_.size()) {
+            solver_->set_boundaries(left_xs_, left_ys_, right_xs_, right_ys_);
+        }
     }
 
     void odom_callback(const nav_msgs::msg::Odometry::SharedPtr msg) {
@@ -159,55 +197,122 @@ private:
         current_state_.yaw = (float)yaw;
         current_state_.v = msg->twist.twist.linear.x;
         current_state_.vy = msg->twist.twist.linear.y;
+        current_state_.ay = 0.0f;
         current_state_.omega = msg->twist.twist.angular.z;
         
         odom_received_ = true;
     }
 
-    void scan_callback(const sensor_msgs::msg::LaserScan::SharedPtr msg) {
-        solver_->set_scan_data(msg->ranges, msg->angle_min, msg->angle_increment);
-        scan_received_ = true;
-    }
-
-    // [추가] 실시간 비용 모니터링 함수
     void monitor_costs() {
         const auto& traj = solver_->get_best_trajectory();
         const auto& controls = solver_->get_optimal_controls();
         
         if (traj.empty() || controls.empty()) return;
 
+        float total_dist_cost = 0.0f;
         float total_vel_cost = 0.0f;
-        float total_lat_cost = 0.0f;
+        float total_heading_cost = 0.0f;
         float total_input_cost = 0.0f;
+        float total_rate_cost = 0.0f;
+        float total_lat_cost = 0.0f;
+        float total_collision_cost = 0.0f;
         
         for (size_t t = 0; t < traj.size(); ++t) {
             const auto& s = traj[t];
             const auto& u = controls[t];
+            const auto& u_prev = (t == 0) ? controls[0] : controls[t-1];
             
-            // 1. 횡G 비용 (Lat Cost)
-            float lat_g = s.v * s.omega;
-            float g_limit = 9.8f * 0.85f;
-            if (std::abs(lat_g) > g_limit) {
-                float violation = std::abs(lat_g) - g_limit;
-                total_lat_cost += mppi_params_.q_lat * (violation * violation);
+            // 1. Distance Cost (경로와의 거리)
+            if (!ref_path_xs_.empty()) {
+                float min_dist_sq = 1e9f;
+                for (size_t i = 0; i < ref_path_xs_.size(); ++i) {
+                    float dx = s.x - ref_path_xs_[i];
+                    float dy = s.y - ref_path_ys_[i];
+                    float dist_sq = dx * dx + dy * dy;
+                    if (dist_sq < min_dist_sq) {
+                        min_dist_sq = dist_sq;
+                    }
+                }
+                total_dist_cost += mppi_params_.q_dist * min_dist_sq;
             }
-
-            // 2. 입력 비용 (Input Cost)
-            total_input_cost += mppi_params_.q_u * (u.steer * u.steer + u.accel * u.accel);
-
-            // 3. 속도 비용 (Velocity Cost)
+            
+            // 2. Velocity Cost
             float v_error = (s.v - mppi_params_.target_speed);
             total_vel_cost += mppi_params_.q_v * (v_error * v_error);
+            
+            // 3. Heading Cost
+            if (!ref_path_yaws_.empty()) {
+                float min_dist_sq = 1e9f;
+                int nearest_idx = 0;
+                for (size_t i = 0; i < ref_path_xs_.size(); ++i) {
+                    float dx = s.x - ref_path_xs_[i];
+                    float dy = s.y - ref_path_ys_[i];
+                    float dist_sq = dx * dx + dy * dy;
+                    if (dist_sq < min_dist_sq) {
+                        min_dist_sq = dist_sq;
+                        nearest_idx = i;
+                    }
+                }
+                float yaw_diff = s.yaw - ref_path_yaws_[nearest_idx];
+                while (yaw_diff > M_PI) yaw_diff -= 2.0f * M_PI;
+                while (yaw_diff < -M_PI) yaw_diff += 2.0f * M_PI;
+                total_heading_cost += mppi_params_.q_heading * (yaw_diff * yaw_diff);
+            }
+            
+            // 4. Input Cost
+            total_input_cost += mppi_params_.q_u * (u.steer * u.steer + u.accel * u.accel);
+            
+            // 5. Rate Cost (제어 변화율)
+            float d_steer = u.steer - u_prev.steer;
+            float d_accel = u.accel - u_prev.accel;
+            total_rate_cost += mppi_params_.q_du * (d_steer * d_steer + d_accel * d_accel);
+            
+            // 6. Lateral Acceleration Cost
+            float lat_accel = std::abs(s.ay);
+            float g_limit = 9.8f * 0.85f;
+            if (lat_accel > g_limit) {
+                float violation = lat_accel - g_limit;
+                total_lat_cost += mppi_params_.q_lat * (violation * violation);
+            }
+            
+            // 7. Collision Cost
+            if (!left_xs_.empty() && !right_xs_.empty()) {
+                float min_bnd_dist = 1e9f;
+                // 왼쪽 바운더리와의 거리
+                for (size_t i = 0; i < left_xs_.size(); ++i) {
+                    float dx = s.x - left_xs_[i];
+                    float dy = s.y - left_ys_[i];
+                    float dist = std::sqrt(dx * dx + dy * dy);
+                    if (dist < min_bnd_dist) min_bnd_dist = dist;
+                }
+                // 오른쪽 바운더리와의 거리
+                for (size_t i = 0; i < right_xs_.size(); ++i) {
+                    float dx = s.x - right_xs_[i];
+                    float dy = s.y - right_ys_[i];
+                    float dist = std::sqrt(dx * dx + dy * dy);
+                    if (dist < min_bnd_dist) min_bnd_dist = dist;
+                }
+                
+                if (min_bnd_dist < mppi_params_.collision_radius) {
+                    float diff = mppi_params_.collision_radius - min_bnd_dist;
+                    total_collision_cost += mppi_params_.q_collision * std::exp(diff * 15.0f);
+                }
+            }
         }
 
-        // 터미널 출력 (디버깅용)
         static int print_count = 0;
         if (print_count++ % 10 == 0) {
-            printf("=== Real-time Cost Monitor ===\n");
-            printf("Vel Cost : %10.2f\n", total_vel_cost);
-            printf("Lat Cost : %10.2f\n", total_lat_cost);
-            printf("InputCost: %10.2f\n", total_input_cost);
-            printf("------------------------------\n");
+            printf("========== Real-time Cost Monitor ==========\n");
+            printf("Dist Cost     : %10.2f (q=%.1f)\n", total_dist_cost, mppi_params_.q_dist);
+            printf("Vel Cost      : %10.2f (q=%.1f)\n", total_vel_cost, mppi_params_.q_v);
+            printf("Heading Cost  : %10.2f (q=%.1f)\n", total_heading_cost, mppi_params_.q_heading);
+            printf("Input Cost    : %10.2f (q=%.1f)\n", total_input_cost, mppi_params_.q_u);
+            printf("Rate Cost     : %10.2f (q=%.1f)\n", total_rate_cost, mppi_params_.q_du);
+            printf("Lat Accel Cost: %10.2f (q=%.1f)\n", total_lat_cost, mppi_params_.q_lat);
+            printf("Collision Cost: %10.2f (q=%.1f)\n", total_collision_cost, mppi_params_.q_collision);
+            printf("TOTAL         : %10.2f\n", total_dist_cost + total_vel_cost + total_heading_cost + 
+                   total_input_cost + total_rate_cost + total_lat_cost + total_collision_cost);
+            printf("============================================\n");
         }
     }
 
@@ -223,12 +328,18 @@ private:
         mppi::Control u = solver_->solve(current_state_);
         
         // 3. 비용 모니터링 (디버깅)
-        // monitor_costs();
+        monitor_costs();
         
         ackermann_msgs::msg::AckermannDriveStamped drive_msg;
         drive_msg.header.stamp = this->now();
         drive_msg.header.frame_id = "base_link";
         drive_msg.drive.steering_angle = u.steer;
+        
+        // 최소 속도 제한: 후진 방지
+        float next_v = current_state_.v + u.accel * mppi_params_.dt;
+        if (next_v <= mppi_params_.min_speed) {
+            u.accel = (mppi_params_.min_speed - current_state_.v) / mppi_params_.dt;
+        }
         drive_msg.drive.acceleration = u.accel;
         
         drive_pub_->publish(drive_msg);
@@ -238,14 +349,14 @@ private:
         std::chrono::duration<double, std::milli> elapsed = end - start;
         
         static int count = 0;
-        if (count++ % 20 == 0) {
+        if (count++ % 10 == 0) {
           RCLCPP_INFO(this->get_logger(), "MPPI: %.2fms | V: %.2f", elapsed.count(), current_state_.v);
         }
     }
 
     void publish_path_visualization() {
         if (!mppi_params_.visualize_candidates) {
-            // ...
+            return;
         }
         
         visualization_msgs::msg::MarkerArray markers;
@@ -255,6 +366,7 @@ private:
             int K = solver_->get_K();
             int T = solver_->get_T();
 
+            // 정상 궤적 (녹색)
             visualization_msgs::msg::Marker traj_marker;
             traj_marker.header.frame_id = "map";
             traj_marker.header.stamp = this->now();
@@ -265,17 +377,61 @@ private:
             traj_marker.scale.x = 0.02; 
             traj_marker.color.r = 0.0; traj_marker.color.g = 1.0; traj_marker.color.b = 0.0; traj_marker.color.a = 0.2;
 
+            // 중단된 궤적 (보라색)
+            visualization_msgs::msg::Marker failed_marker;
+            failed_marker.header.frame_id = "map";
+            failed_marker.header.stamp = this->now();
+            failed_marker.ns = "failed_candidates";
+            failed_marker.id = 2;
+            failed_marker.type = visualization_msgs::msg::Marker::LINE_LIST;
+            failed_marker.action = visualization_msgs::msg::Marker::ADD;
+            failed_marker.scale.x = 0.02;
+            failed_marker.color.r = 1.0; failed_marker.color.g = 0.0; failed_marker.color.b = 1.0; failed_marker.color.a = 0.4;
+
             for (int k = 0; k < K; k += 100) { 
+                bool is_complete = true;
+                int last_valid_t = T - 1;
+                
+                // 궤적이 끝까지 연산되었는지 확인
                 for (int t = 0; t < T - 1; ++t) {
+                    int idx = k * T + t;
+                    int next_idx = k * T + t + 1;
+                    
+                    // NaN, Inf 체크 또는 비정상적인 점프 감지
+                    if (std::isnan(states[next_idx].x) || std::isnan(states[next_idx].y) ||
+                        std::isinf(states[next_idx].x) || std::isinf(states[next_idx].y)) {
+                        is_complete = false;
+                        last_valid_t = t;
+                        break;
+                    }
+                    
+                    // 너무 큰 위치 변화 감지 (시뮬레이션 실패)
+                    float dx = states[next_idx].x - states[idx].x;
+                    float dy = states[next_idx].y - states[idx].y;
+                    float dist = std::sqrt(dx * dx + dy * dy);
+                    if (dist > 5.0f) { // 한 스텝에 10m 이상 이동은 비정상
+                        is_complete = false;
+                        last_valid_t = t;
+                        break;
+                    }
+                }
+                
+                // 적절한 마커에 추가
+                auto& marker = is_complete ? traj_marker : failed_marker;
+                int end_t = is_complete ? (T - 1) : last_valid_t;
+                
+                for (int t = 0; t < end_t; ++t) {
                     int idx = k * T + t;
                     geometry_msgs::msg::Point p1, p2;
                     p1.x = states[idx].x; p1.y = states[idx].y;
                     p2.x = states[idx+1].x; p2.y = states[idx+1].y;
-                    traj_marker.points.push_back(p1);
-                    traj_marker.points.push_back(p2);
+                    marker.points.push_back(p1);
+                    marker.points.push_back(p2);
                 }
             }
+            
             markers.markers.push_back(traj_marker);
+            markers.markers.push_back(failed_marker);
         }
 
         visualization_msgs::msg::Marker best_traj_marker;
@@ -297,6 +453,7 @@ private:
                 best_traj_marker.points.push_back(p1);
                 best_traj_marker.points.push_back(p2);
             }
+
             markers.markers.push_back(best_traj_marker);
         }
         vis_pub_->publish(markers);
@@ -306,16 +463,24 @@ private:
     std::unique_ptr<mppi::MPPISolver> solver_;
     mppi::State current_state_;
 
+    // [추가] 바운더리 저장을 위한 벡터
+    std::vector<float> left_xs_, left_ys_, right_xs_, right_ys_;
+    
+    // [추가] 경로 데이터 저장 (monitor_costs용)
+    std::vector<float> ref_path_xs_, ref_path_ys_, ref_path_yaws_;
+
     rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr path_sub_;
+    // [추가] 바운더리 구독 포인터
+    rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr left_bnd_sub_;
+    rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr right_bnd_sub_;
+
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
-    rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr scan_sub_;
     rclcpp::Publisher<ackermann_msgs::msg::AckermannDriveStamped>::SharedPtr drive_pub_;
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr vis_pub_;
     rclcpp::TimerBase::SharedPtr timer_;
     
-    std::string odom_topic_, scan_topic_, drive_topic_, path_topic_;
+    std::string odom_topic_, drive_topic_, path_topic_;
     bool odom_received_ = false;
-    bool scan_received_ = false;
 };
 
 int main(int argc, char **argv) {

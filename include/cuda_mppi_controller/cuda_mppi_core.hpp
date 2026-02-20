@@ -31,6 +31,7 @@ struct alignas(16) State {
     float vy;
     float omega;
     float ay; // odom_callback 용 추가
+    float slip_angle;
 };
 
 struct alignas(8) Control {
@@ -52,10 +53,7 @@ struct Params {
     // Cost Weights
     float q_dist;
     float q_v;
-    float q_u;
     float q_du;
-    float q_heading;
-    float q_lat;
     float q_collision;
     float collision_radius;
     

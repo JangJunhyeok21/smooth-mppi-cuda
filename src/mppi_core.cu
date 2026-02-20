@@ -52,6 +52,7 @@ namespace mppi
         next_s.vy = vy + dot_vy * p.dt;
         next_s.ay = dot_vy + vx * omega;
         next_s.omega = omega + dot_omega * p.dt;
+        next_s.slip_angle = atan2f(next_s.vy, fabsf(next_s.v) + 1e-5f);
 
         return next_s;
     }
@@ -93,14 +94,14 @@ namespace mppi
         *last_idx = nearest_idx; 
 
         // 1. Reference Tracking Cost
-        float dist_error = min_dist_sq; 
-        float ref_v = p.target_speed;
-        float v_error = (s.v - ref_v) * (s.v - ref_v);
+        float dist_error = min_dist_sq;
 
-        // 2. Heading Cost (하드 제약 제거: 급커브/슬라럼 허용)
-        float path_yaw = ref_yaws[nearest_idx];
-        float yaw_diff = angle_normalize_cuda(s.yaw - path_yaw);
-        float heading_cost = p.q_heading * (yaw_diff * yaw_diff);
+        float vel_cost = 0.0f;
+        // float ref_v = p.target_speed;=
+        // vel_cost=p.q_v * (s.v - ref_v) * (s.v - ref_v);
+
+        // 2. 빠른 속도 보상
+        vel_cost = -p.q_v * (s.v*__cosf(s.yaw - ref_yaws[nearest_idx]));
 
         // 3. Control Input Cost
         float d_steer = u.steer - u_prev.steer;
@@ -108,16 +109,12 @@ namespace mppi
         float rate_cost = p.q_du * (d_steer * d_steer + d_accel * d_accel);
 
 
-        // 5. Boundary Collision Cost (강력한 벽 밀어내기 로직)
-        float obstacle_cost = 0.0f;
+        // 5. Boundary Collision Cost
+        float boundary_cost = 0.0f;
         
-        if (min_bnd_dist < p.collision_radius) {
-            float diff = p.collision_radius - min_bnd_dist;
-            obstacle_cost = p.q_collision * __expf(diff * 15.0f); // 벽에 가까워질수록 기하급수적으로 밀어냄
-        }
+        boundary_cost= p.q_collision * logf(1.0f + expf(-50.0f * (min_bnd_dist - p.collision_radius))); // 바운더리 근접 시 급격히 증가하는 비용
         
-        return p.q_dist * dist_error + p.q_v * v_error + heading_cost + 
-               rate_cost + obstacle_cost;
+        return p.q_dist * dist_error + vel_cost + rate_cost + boundary_cost;
     }
     
     // O(1) 윈도우 기반 바운더리 거리 계산 (슬라럼 대응 윈도우 100 확장)
@@ -132,8 +129,8 @@ namespace mppi
 
         float min_dist_sq = 1e9f;
         
-        // 탐색 창(Window) 확장: 뒤로 20, 앞으로 80칸을 확인하여 깊은 급커브 회피 보장
-        int search_window = 100; 
+        // 탐색 창(Window) 확장: 뒤로 20, 앞으로 280칸을 확인하여 깊은 급커브 회피 보장
+        int search_window = 300; 
         int start_search = current_path_idx - 20;
         
         if (start_search < 0) start_search += bnd_len; 
@@ -181,7 +178,8 @@ namespace mppi
         Control current_action = prev_controls[0]; 
         Control last_u = current_action;
         int local_path_idx = start_path_idx;
-
+        float steer_noise_state = 0.0f; 
+        float accel_noise_state = 0.0f;
         for (int t = 0; t < T; ++t)
         {
             int idx = k * T + t;
@@ -201,6 +199,26 @@ namespace mppi
             current_action.steer += fminf(fmaxf(mean_delta_steer + noise_delta_steer, -p.max_steer_rate * p.dt), p.max_steer_rate * p.dt);    
             current_action.accel += fminf(fmaxf(mean_delta_accel + noise_delta_accel, -p.max_accel_rate * p.dt), p.max_accel_rate * p.dt);
 
+
+            // // ========OU Process SMPPI 노이즈 적용 방식========
+            // // 1. OU Process 기반 Colored Noise 생성 (핵심)
+            // // theta 값이 1.0에 가까울수록 이전 노이즈 성향을 강하게 유지(관성)하여 
+            // // 슬라럼을 위한 크고 굵은 조향 궤적을 탐색해 냅니다. (보통 0.8 ~ 0.9 권장)
+            // float raw_steer_noise = curand_normal(&rng_states[idx]) * p.noise_steer_std;
+            // float raw_accel_noise = curand_normal(&rng_states[idx]) * p.noise_accel_std;
+
+            // steer_noise_state = 0.85f * steer_noise_state + (1.0f - 0.85f) * raw_steer_noise;
+            // accel_noise_state = 0.85f * accel_noise_state + (1.0f - 0.85f) * raw_accel_noise;
+
+            // // 2. 부드럽게 관성을 가진 노이즈를 변화량(dt)에 곱해 적용
+            // float noise_delta_steer = steer_noise_state * p.dt;
+            // float noise_delta_accel = accel_noise_state * p.dt;
+
+            // // 3. Rate Limit 적용 및 누적
+            // current_action.steer += fminf(fmaxf(mean_delta_steer + noise_delta_steer, -p.max_steer_rate * p.dt), p.max_steer_rate * p.dt);    
+            // current_action.accel += fminf(fmaxf(mean_delta_accel + noise_delta_accel, -p.max_accel_rate * p.dt), p.max_accel_rate * p.dt);
+
+
             // 4. 절대 제어값 한계 적용
             Control u_clamped = current_action;
             u_clamped.steer = fminf(fmaxf(u_clamped.steer, -p.max_steer), p.max_steer);
@@ -208,8 +226,8 @@ namespace mppi
 
             // 5. 속도 제한 적용
             float v_next = x.v + u_clamped.accel * p.dt;
-            if (v_next > p.max_speed) u_clamped.accel = (p.max_speed - x.v) / p.dt;
-            else if (v_next < p.min_speed) u_clamped.accel = (p.min_speed - x.v) / p.dt;
+            if (v_next >= p.max_speed && u_clamped.accel > 0.0f) u_clamped.accel = 0.0;
+            else if (v_next <= p.min_speed && u_clamped.accel < 0.0f) u_clamped.accel = 0.0;
 
             current_action = u_clamped; 
 
@@ -217,8 +235,14 @@ namespace mppi
             states[idx] = x;
             controls[idx] = u_clamped; 
 
-            if(fabsf(x.ay) > 9.6f){
-                total_cost = 1.0e9f;
+            // 하드 제약: 횡가속도 초과 시 후보군에서 완전 제외
+            if(fabsf(x.ay) > 9.8f){
+                total_cost = INFINITY;
+                break;
+            }
+
+            if(fabsf(x.slip_angle) > 0.2f){ // 슬립각 0.2rad 이상 시 제약 위반으로 간주
+                total_cost = INFINITY;
                 break;
             }
 
@@ -226,9 +250,9 @@ namespace mppi
             float min_dist = compute_min_boundary_distance(
                 x, left_bnd_xs, left_bnd_ys, right_bnd_xs, right_bnd_ys, bnd_len, local_path_idx);
             
-            // 하드 제약: 충돌 감지 시 즉시 폐기
+            // 하드 제약: 충돌 감지 시 후보군에서 완전 제외
             if (min_dist < p.collision_radius) {
-                total_cost = 1.0e9f;
+                total_cost = INFINITY;
                 break;
             }
 
@@ -356,7 +380,8 @@ namespace mppi
         float min_cost = *min_it;
         best_k_ = static_cast<int>(std::distance(h_costs_.begin(), min_it));
 
-        if (min_cost >= 1.0e8f) { 
+        // 모든 샘플이 제약 조건 위반 시 정지 제어 반환
+        if (std::isinf(min_cost) || min_cost >= 1.0e8f) { 
             Control stop_control = {0.0f, -5.0f};
             std::fill(h_prev_controls_.begin(), h_prev_controls_.end(), stop_control);
             return stop_control;
@@ -364,8 +389,13 @@ namespace mppi
 
         float lambda = params_.lambda; 
         float sum_weights = 0.0f;
+        // 유효한 샘플(제약 조건을 만족하는 샘플)만 가중치 계산에 포함
         for (int k = 0; k < K_; ++k) {
-            h_weights_[k] = expf(-(h_costs_[k] - min_cost) / lambda);
+            if (std::isinf(h_costs_[k]) || h_costs_[k] >= 1.0e8f) {
+                h_weights_[k] = 0.0f;  // 무효 샘플은 가중치 0
+            } else {
+                h_weights_[k] = expf(-(h_costs_[k] - min_cost) / lambda);
+            }
             sum_weights += h_weights_[k];
         }
         if (sum_weights < 1e-6) sum_weights = 1e-6;

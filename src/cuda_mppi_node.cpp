@@ -69,14 +69,8 @@ private:
         mppi_params_.q_dist = this->get_parameter("q_dist").as_double();
         this->declare_parameter("q_v", 2.0);
         mppi_params_.q_v = this->get_parameter("q_v").as_double();
-        this->declare_parameter("q_u", 3.0);
-        mppi_params_.q_u = this->get_parameter("q_u").as_double();
         this->declare_parameter("q_du", 5.0);
         mppi_params_.q_du = this->get_parameter("q_du").as_double();
-        this->declare_parameter("q_heading", 3.0);
-        mppi_params_.q_heading = this->get_parameter("q_heading").as_double();
-        this->declare_parameter("q_lat", 3.0);
-        mppi_params_.q_lat = this->get_parameter("q_lat").as_double();
         this->declare_parameter("q_collision", 3.0);
         mppi_params_.q_collision = this->get_parameter("q_collision").as_double();
         this->declare_parameter("collision_radius", 0.4);
@@ -198,6 +192,7 @@ private:
         current_state_.v = msg->twist.twist.linear.x;
         current_state_.vy = msg->twist.twist.linear.y;
         current_state_.ay = 0.0f;
+        current_state_.slip_angle = atan2(current_state_.vy, fabs(current_state_.v) + 1e-5f);
         current_state_.omega = msg->twist.twist.angular.z;
         
         odom_received_ = true;
@@ -237,30 +232,9 @@ private:
             }
             
             // 2. Velocity Cost
-            float v_error = (s.v - mppi_params_.target_speed);
-            total_vel_cost += mppi_params_.q_v * (v_error * v_error);
-            
-            // 3. Heading Cost
-            if (!ref_path_yaws_.empty()) {
-                float min_dist_sq = 1e9f;
-                int nearest_idx = 0;
-                for (size_t i = 0; i < ref_path_xs_.size(); ++i) {
-                    float dx = s.x - ref_path_xs_[i];
-                    float dy = s.y - ref_path_ys_[i];
-                    float dist_sq = dx * dx + dy * dy;
-                    if (dist_sq < min_dist_sq) {
-                        min_dist_sq = dist_sq;
-                        nearest_idx = i;
-                    }
-                }
-                float yaw_diff = s.yaw - ref_path_yaws_[nearest_idx];
-                while (yaw_diff > M_PI) yaw_diff -= 2.0f * M_PI;
-                while (yaw_diff < -M_PI) yaw_diff += 2.0f * M_PI;
-                total_heading_cost += mppi_params_.q_heading * (yaw_diff * yaw_diff);
-            }
-            
-            // 4. Input Cost
-            total_input_cost += mppi_params_.q_u * (u.steer * u.steer + u.accel * u.accel);
+            // float v_error = (s.v - mppi_params_.target_speed);
+            // total_vel_cost += mppi_params_.q_v * (v_error * v_error);
+            total_vel_cost = -mppi_params_.q_v * s.v;
             
             // 5. Rate Cost (제어 변화율)
             float d_steer = u.steer - u_prev.steer;
@@ -269,10 +243,9 @@ private:
             
             // 6. Lateral Acceleration Cost
             float lat_accel = std::abs(s.ay);
-            float g_limit = 9.8f * 0.85f;
+            float g_limit = 9.8f;
             if (lat_accel > g_limit) {
-                float violation = lat_accel - g_limit;
-                total_lat_cost += mppi_params_.q_lat * (violation * violation);
+                total_lat_cost = 1.0e9f;
             }
             
             // 7. Collision Cost
@@ -305,10 +278,7 @@ private:
             printf("========== Real-time Cost Monitor ==========\n");
             printf("Dist Cost     : %10.2f (q=%.1f)\n", total_dist_cost, mppi_params_.q_dist);
             printf("Vel Cost      : %10.2f (q=%.1f)\n", total_vel_cost, mppi_params_.q_v);
-            printf("Heading Cost  : %10.2f (q=%.1f)\n", total_heading_cost, mppi_params_.q_heading);
-            printf("Input Cost    : %10.2f (q=%.1f)\n", total_input_cost, mppi_params_.q_u);
             printf("Rate Cost     : %10.2f (q=%.1f)\n", total_rate_cost, mppi_params_.q_du);
-            printf("Lat Accel Cost: %10.2f (q=%.1f)\n", total_lat_cost, mppi_params_.q_lat);
             printf("Collision Cost: %10.2f (q=%.1f)\n", total_collision_cost, mppi_params_.q_collision);
             printf("TOTAL         : %10.2f\n", total_dist_cost + total_vel_cost + total_heading_cost + 
                    total_input_cost + total_rate_cost + total_lat_cost + total_collision_cost);
@@ -377,61 +347,16 @@ private:
             traj_marker.scale.x = 0.02; 
             traj_marker.color.r = 0.0; traj_marker.color.g = 1.0; traj_marker.color.b = 0.0; traj_marker.color.a = 0.2;
 
-            // 중단된 궤적 (보라색)
-            visualization_msgs::msg::Marker failed_marker;
-            failed_marker.header.frame_id = "map";
-            failed_marker.header.stamp = this->now();
-            failed_marker.ns = "failed_candidates";
-            failed_marker.id = 2;
-            failed_marker.type = visualization_msgs::msg::Marker::LINE_LIST;
-            failed_marker.action = visualization_msgs::msg::Marker::ADD;
-            failed_marker.scale.x = 0.02;
-            failed_marker.color.r = 1.0; failed_marker.color.g = 0.0; failed_marker.color.b = 1.0; failed_marker.color.a = 0.4;
-
-            for (int k = 0; k < K; k += 100) { 
-                bool is_complete = true;
-                int last_valid_t = T - 1;
-                
-                // 궤적이 끝까지 연산되었는지 확인
-                for (int t = 0; t < T - 1; ++t) {
-                    int idx = k * T + t;
-                    int next_idx = k * T + t + 1;
-                    
-                    // NaN, Inf 체크 또는 비정상적인 점프 감지
-                    if (std::isnan(states[next_idx].x) || std::isnan(states[next_idx].y) ||
-                        std::isinf(states[next_idx].x) || std::isinf(states[next_idx].y)) {
-                        is_complete = false;
-                        last_valid_t = t;
-                        break;
-                    }
-                    
-                    // 너무 큰 위치 변화 감지 (시뮬레이션 실패)
-                    float dx = states[next_idx].x - states[idx].x;
-                    float dy = states[next_idx].y - states[idx].y;
-                    float dist = std::sqrt(dx * dx + dy * dy);
-                    if (dist > 5.0f) { // 한 스텝에 10m 이상 이동은 비정상
-                        is_complete = false;
-                        last_valid_t = t;
-                        break;
-                    }
-                }
-                
-                // 적절한 마커에 추가
-                auto& marker = is_complete ? traj_marker : failed_marker;
-                int end_t = is_complete ? (T - 1) : last_valid_t;
-                
-                for (int t = 0; t < end_t; ++t) {
-                    int idx = k * T + t;
-                    geometry_msgs::msg::Point p1, p2;
-                    p1.x = states[idx].x; p1.y = states[idx].y;
-                    p2.x = states[idx+1].x; p2.y = states[idx+1].y;
-                    marker.points.push_back(p1);
-                    marker.points.push_back(p2);
-                }
+            for (int t = 0; t < T; ++t) {
+                int idx = K * T + t;
+                geometry_msgs::msg::Point p1, p2;
+                p1.x = states[idx].x; p1.y = states[idx].y;
+                p2.x = states[idx+1].x; p2.y = states[idx+1].y;
+                traj_marker.points.push_back(p1);
+                traj_marker.points.push_back(p2);
             }
             
             markers.markers.push_back(traj_marker);
-            markers.markers.push_back(failed_marker);
         }
 
         visualization_msgs::msg::Marker best_traj_marker;

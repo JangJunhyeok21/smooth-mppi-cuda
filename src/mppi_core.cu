@@ -97,7 +97,7 @@ namespace mppi
         float dist_error = min_dist_sq;
 
         float vel_cost = 0.0f;
-        // float ref_v = p.target_speed;=
+        // float ref_v = p.target_speed;
         // vel_cost=p.q_v * (s.v - ref_v) * (s.v - ref_v);
 
         // 2. 빠른 속도 보상

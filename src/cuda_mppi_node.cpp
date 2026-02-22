@@ -65,15 +65,15 @@ private:
         this->declare_parameter("max_speed", 20.0);
         mppi_params_.max_speed = this->get_parameter("max_speed").as_double();
         
-        this->declare_parameter("q_dist", 10.0);
+        this->declare_parameter("q_dist", 0.2);
         mppi_params_.q_dist = this->get_parameter("q_dist").as_double();
-        this->declare_parameter("q_v", 2.0);
+        this->declare_parameter("q_v", 1.8);
         mppi_params_.q_v = this->get_parameter("q_v").as_double();
-        this->declare_parameter("q_du", 5.0);
+        this->declare_parameter("q_du", 0.5);
         mppi_params_.q_du = this->get_parameter("q_du").as_double();
-        this->declare_parameter("q_collision", 3.0);
+        this->declare_parameter("q_collision", 450.0);
         mppi_params_.q_collision = this->get_parameter("q_collision").as_double();
-        this->declare_parameter("collision_radius", 0.4);
+        this->declare_parameter("collision_radius", 0.28);
         mppi_params_.collision_radius = this->get_parameter("collision_radius").as_double();
 
         this->declare_parameter("noise_steer_std", 0.5);
@@ -86,7 +86,7 @@ private:
         this->declare_parameter("max_accel_rate", 1000.0); 
         mppi_params_.max_accel_rate = this->get_parameter("max_accel_rate").as_double();
 
-        this->declare_parameter("lambda", 15.0);
+        this->declare_parameter("lambda", 20.0);
         mppi_params_.lambda = this->get_parameter("lambda").as_double();
         this->declare_parameter("visualize_candidates", true);
         mppi_params_.visualize_candidates = this->get_parameter("visualize_candidates").as_bool();

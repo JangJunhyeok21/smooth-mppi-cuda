@@ -117,7 +117,7 @@ namespace mppi
         return p.q_dist * dist_error + vel_cost + rate_cost + boundary_cost;
     }
     
-    // O(1) 윈도우 기반 바운더리 거리 계산 (슬라럼 대응 윈도우 100 확장)
+    // O(1) 윈도우 기반 바운더리 거리 계산
     __device__ float compute_min_boundary_distance(
         const State &s,
         const float *left_xs, const float *left_ys,
@@ -129,9 +129,9 @@ namespace mppi
 
         float min_dist_sq = 1e9f;
         
-        // 탐색 창(Window) 확장: 뒤로 20, 앞으로 280칸을 확인하여 깊은 급커브 회피 보장
-        int search_window = 300; 
-        int start_search = current_path_idx - 20;
+        // 탐색 창(Window) 확장: 뒤로 30, 앞으로 50칸을 확인
+        int search_window = 80; 
+        int start_search = current_path_idx - 30;
         
         if (start_search < 0) start_search += bnd_len; 
 
@@ -237,12 +237,12 @@ namespace mppi
 
             // 하드 제약: 횡가속도 초과 시 후보군에서 완전 제외
             if(fabsf(x.ay) > 9.8f){
-                total_cost = INFINITY;
+                total_cost += 10000.0f + 1000.0f * (T - t);
                 break;
             }
 
             if(fabsf(x.slip_angle) > 0.2f){ // 슬립각 0.2rad 이상 시 제약 위반으로 간주
-                total_cost = INFINITY;
+                total_cost += 10000.0f + 1000.0f * (T - t);
                 break;
             }
 
@@ -252,7 +252,7 @@ namespace mppi
             
             // 하드 제약: 충돌 감지 시 후보군에서 완전 제외
             if (min_dist < p.collision_radius) {
-                total_cost = INFINITY;
+                total_cost += 10000.0f + 1000.0f * (T - t);
                 break;
             }
 

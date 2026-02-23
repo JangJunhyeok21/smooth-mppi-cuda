@@ -1,6 +1,7 @@
 cmake_minimum_required(VERSION 3.8)
 project(cuda_mppi_controller)
 
+set(CMAKE_BUILD_TYPE Debug)
 set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -70,10 +71,27 @@ target_link_libraries(cuda_mppi_node
   ${CUDA_LIBRARIES}
 )
 
-install(TARGETS cuda_mppi_node cuda_mppi_lib
+# path_publisher 실행 파일
+add_executable(path_publisher
+  src/path_publisher.cpp
+)
+
+target_include_directories(path_publisher PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
+)
+
+ament_target_dependencies(path_publisher
+  rclcpp
+  nav_msgs
+  geometry_msgs
+)
+
+install(TARGETS cuda_mppi_node cuda_mppi_lib path_publisher
   DESTINATION lib/${PROJECT_NAME})
 
-install(DIRECTORY launch config
+install(DIRECTORY launch config data
   DESTINATION share/${PROJECT_NAME})
+  
 
 ament_package()

@@ -1,28 +1,26 @@
 cuda_mppi_controller:
   ros__parameters:
     # --- Limits (User Provided) ---
-    max_steer: 0.507        # rad (약 29도)
+    max_steer: 0.507        # rad (약 40도)
     min_accel: -9.0      # m/s^2
     max_accel: 9.0       # m/s^2
-    min_speed: 0.5        # m/s
-    target_speed: 7.0    # m/s
-    max_speed: 7.0       # m/s
+    min_speed: 0.0        # m/s
+    target_speed: 5.0    # m/s
+    max_speed: 10.0       # m/s
     
     # --- Costs ---
-    q_dist: 7.0
-    q_v: 1.2
-    q_u: 0.03
-    q_du: 4.0
-    q_heading: 4.0
-    q_lat: 7.0
-    q_collision: 2.0
-    collision_radius: 0.3
+    q_dist: 0.0
+    q_v: 10.0
+    q_du: 1.0
+    q_collision: 400.0
+    collision_radius: 0.27
     
     # --- Noise & Tuning ---
-    noise_steer_std: 0.01
-    noise_accel_std: 0.08
-    max_steer_rate: 0.06  # steer_vel_max(4.0) * dt(0.02) = 0.08
-    max_accel_rate: 1.0   # jerk_max(100.0) * dt(0.02) = 2.0
+    # 한번에 얼마까지 변화를 줄까
+    noise_steer_std: 0.5  # rad/s
+    noise_accel_std: 3.0  # m/s^2
+    max_steer_rate: 4.0  # rad/s (약 229도/s)
+    max_accel_rate: 1000.0   # m/s^3
     lambda: 15.0
     visualize_candidates: true
     
@@ -35,11 +33,11 @@ cuda_mppi_controller:
     # Pacejka Coefficients
     B_f: 1.5
     C_f: 1.5
-    D_f: 30.0
+    D_f: 15.0
     
     B_r: 1.5
     C_r: 1.5
-    D_r: 30.0
+    D_r: 15.0
     
     odom_topic: /odom0
     scan_topic: /scan0

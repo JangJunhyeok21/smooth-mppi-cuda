@@ -102,7 +102,7 @@ public:
 private:
     void allocate_cuda_memory();
     void cleanup_cuda_memory();
-    Control compute_optimal_control();
+    Control compute_optimal_control(const State &current_state);
 
     int K_, T_;
     Params params_;

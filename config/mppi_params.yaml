@@ -9,19 +9,19 @@ cuda_mppi_controller:
     max_speed: 10.0       # m/s
     
     # --- Costs ---
-    q_dist: 1.0
-    q_v: 2.0
-    q_du: 1.0
+    q_dist: 0.8
+    q_v: 2.5
+    q_du: 0.5
     q_collision: 450.0
     collision_radius: 0.28
     
     # --- Noise & Tuning ---
     # 한번에 얼마까지 변화를 줄까
-    noise_steer_std: 0.45  # rad/s
+    noise_steer_std: 0.5  # rad/s
     noise_accel_std: 3.0  # m/s^2
     max_steer_rate: 4.0  # rad/s (약 229도/s)
     max_accel_rate: 1000.0   # m/s^3
-    lambda: 15.0
+    lambda: 25.0
     visualize_candidates: true
     
     # --- Dynamic Model Params ---

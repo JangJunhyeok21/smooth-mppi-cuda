@@ -129,8 +129,8 @@ namespace mppi
 
         float min_dist_sq = 1e9f;
         
-        // 탐색 창(Window) 확장: 뒤로 30, 앞으로 50칸을 확인
-        int search_window = 80; 
+        // 탐색 창(Window) 확장: 뒤로 30, 앞으로 150칸을 확인
+        int search_window = 180; 
         int start_search = current_path_idx - 30;
         
         if (start_search < 0) start_search += bnd_len; 
@@ -372,15 +372,61 @@ namespace mppi
         }
         CUDA_CHECK(cudaMemcpy(h_controls_.data(), d_controls_, K_ * T_ * sizeof(Control), cudaMemcpyDeviceToHost));
 
-        return compute_optimal_control();
+        return compute_optimal_control(current_state);
     }
 
-    Control MPPISolver::compute_optimal_control() {
+    State update_dynamics_host(const State &s, const Control &u, const Params &p)
+    {
+        float px = s.x; float py = s.y; float yaw = s.yaw;
+        float vx = s.v; float vy = s.vy; float omega = s.omega;
+        
+        if (vx < 0.1f) {
+            State next_s;
+            float beta = atan2f(p.l_r * tanf(u.steer), p.l_f + p.l_r);
+            next_s.x = px + vx * cosf(yaw + beta) * p.dt;
+            next_s.y = py + vx * sinf(yaw + beta) * p.dt;
+            next_s.yaw = yaw + (vx / p.l_r) * sinf(beta) * p.dt;
+            while (next_s.yaw > M_PI) next_s.yaw -= 2.0f * M_PI;
+            while (next_s.yaw < -M_PI) next_s.yaw += 2.0f * M_PI;
+            next_s.v = vx + u.accel * p.dt;
+            next_s.vy = 0.0f; next_s.omega = 0.0f;
+            return next_s;
+        }
+
+        float alpha_f = u.steer - atan2f(vy + p.l_f * omega, vx);
+        float alpha_r = -atan2f(vy - p.l_r * omega, vx);
+
+        float F_fy = p.D_f * sinf(p.C_f * atanf(p.B_f * alpha_f));
+        float F_ry = p.D_r * sinf(p.C_r * atanf(p.B_r * alpha_r));
+
+        float F_rx = p.mass * u.accel; 
+        float dot_vx = (F_rx - F_fy * sinf(u.steer) + p.mass * vy * omega) / p.mass;
+        float dot_vy = (F_ry + F_fy * cosf(u.steer) - p.mass * vx * omega) / p.mass;
+        float dot_omega = (F_fy * p.l_f * cosf(u.steer) - F_ry * p.l_r) / p.I_z;
+
+        float dot_x = vx * cosf(yaw) - vy * sinf(yaw);
+        float dot_y = vx * sinf(yaw) + vy * cosf(yaw);
+
+        State next_s;
+        next_s.x = px + dot_x * p.dt;
+        next_s.y = py + dot_y * p.dt;
+        next_s.yaw = yaw + omega * p.dt;
+        while(next_s.yaw > M_PI) next_s.yaw -= 2.0f * M_PI;
+        while(next_s.yaw < -M_PI) next_s.yaw += 2.0f * M_PI;
+        next_s.v = vx + dot_vx * p.dt;
+        next_s.vy = vy + dot_vy * p.dt;
+        next_s.ay = dot_vy + vx * omega;
+        next_s.omega = omega + dot_omega * p.dt;
+        next_s.slip_angle = atan2f(next_s.vy, fabsf(next_s.v) + 1e-5f);
+
+        return next_s;
+    }
+
+    Control MPPISolver::compute_optimal_control(const State &current_state) {
         auto min_it = std::min_element(h_costs_.begin(), h_costs_.end());
         float min_cost = *min_it;
         best_k_ = static_cast<int>(std::distance(h_costs_.begin(), min_it));
 
-        // 모든 샘플이 제약 조건 위반 시 정지 제어 반환
         if (std::isinf(min_cost) || min_cost >= 1.0e8f) { 
             Control stop_control = {0.0f, -5.0f};
             std::fill(h_prev_controls_.begin(), h_prev_controls_.end(), stop_control);
@@ -389,10 +435,9 @@ namespace mppi
 
         float lambda = params_.lambda; 
         float sum_weights = 0.0f;
-        // 유효한 샘플(제약 조건을 만족하는 샘플)만 가중치 계산에 포함
         for (int k = 0; k < K_; ++k) {
             if (std::isinf(h_costs_[k]) || h_costs_[k] >= 1.0e8f) {
-                h_weights_[k] = 0.0f;  // 무효 샘플은 가중치 0
+                h_weights_[k] = 0.0f; 
             } else {
                 h_weights_[k] = expf(-(h_costs_[k] - min_cost) / lambda);
             }
@@ -416,13 +461,20 @@ namespace mppi
         for (int t = 0; t < T_ - 1; ++t) h_prev_controls_[t] = weighted_controls[t + 1];
         h_prev_controls_[T_ - 1] = weighted_controls[T_ - 1];
 
+        // 수정된 핵심 부분: 특정 샘플의 노이즈 궤적이 아닌, 가중 평균된 제어로 예상 궤적을 적분
         if (params_.visualize_candidates) {
             best_trajectory_.resize(T_);
-            int base = best_k_ * T_;
-            for (int t = 0; t < T_; ++t) best_trajectory_[t] = h_states_[base + t];
+            State sim_state = current_state; // 현재 상태에서 출발
+            
+            for (int t = 0; t < T_; ++t) {
+                // 부드럽게 산출된 최적 제어값을 사용해 궤적을 앞으로 예측
+                sim_state = update_dynamics_host(sim_state, weighted_controls[t], params_);
+                best_trajectory_[t] = sim_state;
+            }
         }
         return output;
     }
+
     const std::vector<State> &MPPISolver::get_generated_trajectories() const { return h_states_; }
     const std::vector<State> &MPPISolver::get_best_trajectory() const { return best_trajectory_; }
     int MPPISolver::get_best_k() const { return best_k_; }

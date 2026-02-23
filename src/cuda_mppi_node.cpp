@@ -311,6 +311,7 @@ private:
             u.accel = (mppi_params_.min_speed - current_state_.v) / mppi_params_.dt;
         }
         drive_msg.drive.acceleration = u.accel;
+        drive_msg.drive.speed = std::max(current_state_.v + u.accel * mppi_params_.dt, mppi_params_.min_speed);
         
         drive_pub_->publish(drive_msg);
         publish_path_visualization();

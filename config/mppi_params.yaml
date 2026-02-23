@@ -43,3 +43,4 @@ cuda_mppi_controller:
     scan_topic: /scan0
     drive_topic: /ackermann_cmd0
     path_topic: /center_path
+    use_mcl_pose: false

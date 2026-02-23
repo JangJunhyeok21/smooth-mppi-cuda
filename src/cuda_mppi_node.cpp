@@ -5,6 +5,7 @@
 #include "sensor_msgs/msg/laser_scan.hpp"
 #include "visualization_msgs/msg/marker_array.hpp"
 #include "geometry_msgs/msg/point.hpp"
+#include "geometry_msgs/msg/pose_stamped.hpp"
 #include "cuda_mppi_controller/cuda_mppi_core.hpp"
 #include <algorithm>
 #include <cmath>
@@ -17,7 +18,7 @@ public:
         load_parameters();
         validate_parameters();
 
-        solver_ = std::make_unique<mppi::MPPISolver>(10000, 120, mppi_params_);
+        solver_ = std::make_unique<mppi::MPPISolver>(10000, 100, mppi_params_);
 
         drive_pub_ = this->create_publisher<ackermann_msgs::msg::AckermannDriveStamped>(drive_topic_, 10);
         vis_pub_ = this->create_publisher<visualization_msgs::msg::MarkerArray>("/mppi_viz", 10);
@@ -28,25 +29,31 @@ public:
         // [추가] 시뮬레이터와 동일한 QoS(Transient Local) 설정
         auto qos = rclcpp::QoS(rclcpp::KeepLast(1)).reliable().transient_local();
 
-        // [추가] 좌우가 뒤집히는 현상을 방지하기 위해 토픽 이름을 교차해서 구독합니다.
         left_bnd_sub_ = this->create_subscription<nav_msgs::msg::Path>(
             "/left_boundary", qos, std::bind(&MPPINode::left_bnd_callback, this, std::placeholders::_1));
             
         right_bnd_sub_ = this->create_subscription<nav_msgs::msg::Path>(
             "/right_boundary", qos, std::bind(&MPPINode::right_bnd_callback, this, std::placeholders::_1));
 
-        odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
-            odom_topic_, 10, std::bind(&MPPINode::odom_callback, this, std::placeholders::_1));
+        if (use_mcl_pose_) {
+            pose_sub_ = this->create_subscription<geometry_msgs::msg::PoseStamped>(
+                pose_topic_, 10, std::bind(&MPPINode::pose_callback, this, std::placeholders::_1));
+
+            vel_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
+                velocity_topic_, 10, std::bind(&MPPINode::velocity_callback, this, std::placeholders::_1));
+        } else {
+            odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
+                odom_topic_, 10, std::bind(&MPPINode::odom_callback, this, std::placeholders::_1));
+        }
         
-        timer_ = this->create_wall_timer(20ms, std::bind(&MPPINode::timer_callback, this));
+        timer_ = this->create_wall_timer(use_mcl_pose_?40ms:20ms, std::bind(&MPPINode::timer_callback, this));
         
         RCLCPP_INFO(this->get_logger(), "MPPI Node Started: Optimization & Boundary Monitor Enabled");
     }
 
 private:
     void load_parameters() {
-        mppi_params_.dt = 0.02;
-
+        
         this->declare_parameter("max_steer", 4.0);
         mppi_params_.max_steer = this->get_parameter("max_steer").as_double();
         
@@ -75,7 +82,7 @@ private:
         mppi_params_.q_collision = this->get_parameter("q_collision").as_double();
         this->declare_parameter("collision_radius", 0.28);
         mppi_params_.collision_radius = this->get_parameter("collision_radius").as_double();
-
+        
         this->declare_parameter("noise_steer_std", 0.5);
         mppi_params_.noise_steer_std = this->get_parameter("noise_steer_std").as_double();
         this->declare_parameter("noise_accel_std", 5.0); 
@@ -111,12 +118,23 @@ private:
         this->declare_parameter("C_r", 1.5); mppi_params_.C_r = this->get_parameter("C_r").as_double();
         this->declare_parameter("D_r", 30.0); mppi_params_.D_r = this->get_parameter("D_r").as_double();
 
-        this->declare_parameter("odom_topic", "/state0"); 
+        this->declare_parameter("odom_topic", "/odom0"); 
         odom_topic_ = this->get_parameter("odom_topic").as_string();
+        this->declare_parameter("use_mcl_pose", false);
+        use_mcl_pose_ = this->get_parameter("use_mcl_pose").as_bool();
+        this->declare_parameter("pose_topic", "/mcl_pose");
+        pose_topic_ = this->get_parameter("pose_topic").as_string();
+        this->declare_parameter("velocity_topic", "/odom");
+        velocity_topic_ = this->get_parameter("velocity_topic").as_string();
         this->declare_parameter("drive_topic", "/ackermann_cmd0");
         drive_topic_ = this->get_parameter("drive_topic").as_string();
         this->declare_parameter("path_topic", "/center_path");
-        path_topic_ = this->get_parameter("path_topic").as_string();        
+        path_topic_ = this->get_parameter("path_topic").as_string();      
+        if(use_mcl_pose_){  
+            mppi_params_.dt = 0.04;
+        } else {
+            mppi_params_.dt = 0.02;
+        }
     }
 
     void validate_parameters() {
@@ -195,6 +213,37 @@ private:
         current_state_.slip_angle = atan2(current_state_.vy, fabs(current_state_.v) + 1e-5f);
         current_state_.omega = msg->twist.twist.angular.z;
         
+        odom_received_ = true;
+    }
+
+    void pose_callback(const geometry_msgs::msg::PoseStamped::SharedPtr msg) {
+        pose_ = *msg;
+        has_pose_ = true;
+        update_state_from_pose_velocity();
+    }
+
+    void velocity_callback(const nav_msgs::msg::Odometry::SharedPtr msg) {
+        velocity_odom_ = *msg;
+        has_velocity_ = true;
+        update_state_from_pose_velocity();
+    }
+
+    void update_state_from_pose_velocity() {
+        if (!has_pose_ || !has_velocity_) return;
+
+        const auto &p = pose_.pose.position;
+        const auto &q = pose_.pose.orientation;
+        double yaw = atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z));
+
+        current_state_.x = p.x;
+        current_state_.y = p.y;
+        current_state_.yaw = (float)yaw;
+        current_state_.v = velocity_odom_.twist.twist.linear.x;
+        current_state_.vy = velocity_odom_.twist.twist.linear.y;
+        current_state_.ay = 0.0f;
+        current_state_.slip_angle = atan2(current_state_.vy, fabs(current_state_.v) + 1e-5f);
+        current_state_.omega = velocity_odom_.twist.twist.angular.z;
+
         odom_received_ = true;
     }
 
@@ -298,7 +347,7 @@ private:
         mppi::Control u = solver_->solve(current_state_);
         
         // 3. 비용 모니터링 (디버깅)
-        monitor_costs();
+        // monitor_costs();
         
         ackermann_msgs::msg::AckermannDriveStamped drive_msg;
         drive_msg.header.stamp = this->now();
@@ -309,10 +358,13 @@ private:
         float next_v = current_state_.v + u.accel * mppi_params_.dt;
         if (next_v <= mppi_params_.min_speed) {
             u.accel = (mppi_params_.min_speed - current_state_.v) / mppi_params_.dt;
+            next_v = mppi_params_.min_speed;
         }
-        drive_msg.drive.acceleration = u.accel;
-        drive_msg.drive.speed = std::max(current_state_.v + u.accel * mppi_params_.dt, mppi_params_.min_speed);
-        
+        if(use_mcl_pose_){
+            drive_msg.drive.speed = next_v;
+        } else {
+            drive_msg.drive.acceleration = u.accel;
+        }
         drive_pub_->publish(drive_msg);
         publish_path_visualization();
 
@@ -332,33 +384,33 @@ private:
         
         visualization_msgs::msg::MarkerArray markers;
         
-        if (mppi_params_.visualize_candidates) {
-            const auto& states = solver_->get_generated_trajectories();
-            int K = solver_->get_K();
-            int T = solver_->get_T();
+        const auto& states = solver_->get_generated_trajectories();
+        int K = solver_->get_K();
+        int T = solver_->get_T();
 
-            // 정상 궤적 (녹색)
-            visualization_msgs::msg::Marker traj_marker;
-            traj_marker.header.frame_id = "map";
-            traj_marker.header.stamp = this->now();
-            traj_marker.ns = "candidates";
-            traj_marker.id = 0;
-            traj_marker.type = visualization_msgs::msg::Marker::LINE_LIST;
-            traj_marker.action = visualization_msgs::msg::Marker::ADD;
-            traj_marker.scale.x = 0.02; 
-            traj_marker.color.r = 0.0; traj_marker.color.g = 1.0; traj_marker.color.b = 0.0; traj_marker.color.a = 0.2;
+        // 정상 궤적 (녹색)
+        visualization_msgs::msg::Marker traj_marker;
+        traj_marker.header.frame_id = "map";
+        traj_marker.header.stamp = this->now();
+        traj_marker.ns = "candidates";
+        traj_marker.id = 0;
+        traj_marker.type = visualization_msgs::msg::Marker::LINE_LIST;
+        traj_marker.action = visualization_msgs::msg::Marker::ADD;
+        traj_marker.scale.x = 0.02; 
+        traj_marker.color.r = 0.0; traj_marker.color.g = 1.0; traj_marker.color.b = 0.0; traj_marker.color.a = 0.3;
 
-            for (int t = 0; t < T; ++t) {
-                int idx = K * T + t;
+        for (int k = 0; k < K; k += 100) { 
+            for (int t = 1; t < T - 2; ++t) {
+                int idx = k * T + t;
                 geometry_msgs::msg::Point p1, p2;
                 p1.x = states[idx].x; p1.y = states[idx].y;
                 p2.x = states[idx+1].x; p2.y = states[idx+1].y;
                 traj_marker.points.push_back(p1);
                 traj_marker.points.push_back(p2);
             }
-            
-            markers.markers.push_back(traj_marker);
         }
+        markers.markers.push_back(traj_marker);
+        
 
         visualization_msgs::msg::Marker best_traj_marker;
         best_traj_marker.header.frame_id = "map";
@@ -401,11 +453,18 @@ private:
     rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr right_bnd_sub_;
 
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
+    rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr pose_sub_;
+    rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr vel_sub_;
     rclcpp::Publisher<ackermann_msgs::msg::AckermannDriveStamped>::SharedPtr drive_pub_;
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr vis_pub_;
     rclcpp::TimerBase::SharedPtr timer_;
     
-    std::string odom_topic_, drive_topic_, path_topic_;
+    bool use_mcl_pose_{false};
+    bool has_pose_{false};
+    bool has_velocity_{false};
+    geometry_msgs::msg::PoseStamped pose_;
+    nav_msgs::msg::Odometry velocity_odom_;
+    std::string odom_topic_, pose_topic_, velocity_topic_, drive_topic_, path_topic_;
     bool odom_received_ = false;
 };
 

@@ -7,10 +7,13 @@ import os
 
 
 def generate_launch_description():
+    map_name = "map1"
+    is_simulation = True
+
     default_param_file = os.path.join(
         get_package_share_directory("cuda_mppi_controller"),
         "config",
-        "mppi_params.yaml",
+        "params.yaml",
     )
 
     param_file = LaunchConfiguration("param_file")
@@ -19,8 +22,23 @@ def generate_launch_description():
     data_dir = os.path.join(
         get_package_share_directory("cuda_mppi_controller"),
         "data",
-        "map1"
+        map_name,
     )
+    centerline_csv = os.path.join(data_dir, f"{map_name}_centerline.csv")
+
+    if is_simulation:
+        controller_overrides = {
+            "use_mcl_pose": False,
+            "odom_topic": "/odom0",
+            "drive_topic": "/ackermann_cmd0",
+        }
+    else:
+        controller_overrides = {
+            "use_mcl_pose": True,
+            "pose_topic": "/mcl_pose",
+            "velocity_topic": "/odom",
+            "drive_topic": "/ackermann_cmd",
+        }
     
     return LaunchDescription(
         [
@@ -36,9 +54,9 @@ def generate_launch_description():
                 name="path_publisher",
                 output="screen",
                 parameters=[{
-                    "csv_file_path": os.path.join(data_dir, "map1_centerline.csv"),
+                    "csv_file_path": centerline_csv,
                     "frame_id": "map",
-                    "publish_rate": 10.0,
+                    "publish_rate": 1.0,
                 }],
             ),
             # MPPI Controller 노드
@@ -47,7 +65,7 @@ def generate_launch_description():
                 executable="cuda_mppi_node",
                 name="cuda_mppi_controller",
                 output="screen",
-                parameters=[param_file],
+                parameters=[param_file, controller_overrides],
             ),
         ]
     )

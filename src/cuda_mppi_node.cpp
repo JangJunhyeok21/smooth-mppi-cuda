@@ -18,7 +18,7 @@ public:
         load_parameters();
         validate_parameters();
 
-        solver_ = std::make_unique<mppi::MPPISolver>(10000, 100, mppi_params_);
+        solver_ = std::make_unique<mppi::MPPISolver>(10000, 150, mppi_params_);
 
         drive_pub_ = this->create_publisher<ackermann_msgs::msg::AckermannDriveStamped>(drive_topic_, 10);
         vis_pub_ = this->create_publisher<visualization_msgs::msg::MarkerArray>("/mppi_viz", 10);
@@ -78,6 +78,8 @@ private:
         mppi_params_.q_v = this->get_parameter("q_v").as_double();
         this->declare_parameter("q_du", 0.5);
         mppi_params_.q_du = this->get_parameter("q_du").as_double();
+        this->declare_parameter("q_steer", 1.0);
+        mppi_params_.q_steer = this->get_parameter("q_steer").as_double();
         this->declare_parameter("q_collision", 450.0);
         mppi_params_.q_collision = this->get_parameter("q_collision").as_double();
         this->declare_parameter("collision_radius", 0.28);

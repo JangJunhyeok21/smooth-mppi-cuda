@@ -107,14 +107,14 @@ namespace mppi
         float d_steer = u.steer - u_prev.steer;
         float d_accel = u.accel - u_prev.accel;
         float rate_cost = p.q_du * (d_steer * d_steer + d_accel * d_accel);
-
+        float steer_cost = p.q_steer * (u.steer * u.steer);
 
         // 5. Boundary Collision Cost
         float boundary_cost = 0.0f;
         
         boundary_cost= p.q_collision * logf(1.0f + expf(-50.0f * (min_bnd_dist - p.collision_radius))); // 바운더리 근접 시 급격히 증가하는 비용
         
-        return p.q_dist * dist_error + vel_cost + rate_cost + boundary_cost;
+        return p.q_dist * dist_error + vel_cost + rate_cost + steer_cost + boundary_cost;
     }
     
     // O(1) 윈도우 기반 바운더리 거리 계산

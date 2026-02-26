@@ -54,6 +54,7 @@ struct Params {
     float q_dist;
     float q_v;
     float q_du;
+    float q_steer;
     float q_collision;
     float collision_radius;
     

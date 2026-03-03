@@ -13,12 +13,12 @@ cuda_mppi_controller:
     max_speed: 10.0         # m/s
     
     # --- Costs (공통 기본값) ---
-    q_dist: 5.0
-    q_v: 10.0
+    q_dist: 1.5
+    q_v: 2.0
     q_du: 0.8
-    q_steer: 0.0
+    q_steer: 0.3
     q_collision: 400.0
-    collision_radius: 0.2
+    collision_radius: 0.3
     
     # --- Noise & Tuning ---
     noise_steer_std: 0.4  # rad/s
@@ -37,11 +37,11 @@ cuda_mppi_controller:
     # Pacejka Coefficients
     B_f: 1.5
     C_f: 1.5
-    D_f: 15.0
+    D_f: 28.0
     
     B_r: 1.5
     C_r: 1.5
-    D_r: 15.0
+    D_r: 34.0
 
     # --- Topics (공통 키, launch에서 환경별 override) ---
     odom_topic: /odom0

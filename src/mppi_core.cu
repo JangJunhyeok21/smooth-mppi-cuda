@@ -19,7 +19,7 @@ namespace mppi
         float px = s.x; float py = s.y; float yaw = s.yaw;
         float vx = s.v; float vy = s.vy; float omega = s.omega;
         
-        if (vx < 0.1f) {
+        if (vx < 0.5f) {
             State next_s;
             float beta = atanf(p.l_r * tanf(u.steer) / (p.l_f + p.l_r));
             next_s.x = px + vx * __cosf(yaw + beta) * p.dt;
@@ -106,11 +106,13 @@ namespace mppi
         float rate_cost = p.q_du * (d_steer * d_steer + d_accel * d_accel);
         float steer_cost = p.q_steer * (u.steer * u.steer);
 
+        float slip_cost = 500.0f * s.slip_angle * s.slip_angle; // 슬립각에 대한 비용 추가 (0.2rad 이상 시 급격히 증가)
+        
         // 5. Boundary Collision Cost
         float boundary_cost = 0.0f;
-        boundary_cost= p.q_collision * logf(1.0f + expf(-50.0f * (min_bnd_dist - p.collision_radius))); // 바운더리 근접 시 급격히 증가하는 비용
+        boundary_cost= p.q_collision * logf(1.0f + expf(-40.0f * min((min_bnd_dist - p.collision_radius), 1.0e-5f))); // 바운더리 근접 시 급격히 증가하는 비용
         
-        return p.q_dist * dist_error + vel_cost + rate_cost + steer_cost + boundary_cost;
+        return p.q_dist * dist_error + vel_cost + rate_cost + steer_cost + slip_cost + boundary_cost;
     }
     
     // O(1) 윈도우 기반 바운더리 거리 계산
@@ -234,9 +236,9 @@ namespace mppi
                 is_fault = true;
             }
 
-            // if(fabsf(x.slip_angle) > 0.2f){ // 슬립각 0.2rad 이상 시 제약 위반으로 간주
-            //     is_fault = true;
-            // }
+            if(fabsf(x.slip_angle) > 0.2f){ // 슬립각 0.2rad 이상 시 제약 위반으로 간주
+                is_fault = true;
+            }
 
             // 바운더리 기반 최소 거리 확인
             float min_dist = compute_min_boundary_distance(
@@ -249,9 +251,9 @@ namespace mppi
 
             if (is_fault) {
                 total_cost = INFINITY;
+                const Control zero_control = {0.0f, 0.0f};
                 for (int fill_t = t + 1; fill_t < T; ++fill_t) {
                     states[k * T + fill_t] = x;
-                    Control zero_control = {0.0f, 0.0f};
                     controls[k * T + fill_t] = zero_control;
                 }
                 break;

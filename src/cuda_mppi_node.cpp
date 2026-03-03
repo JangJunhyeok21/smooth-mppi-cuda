@@ -54,40 +54,40 @@ public:
 private:
     void load_parameters() {
         
-        this->declare_parameter("max_steer", 4.0);
+        this->declare_parameter("max_steer", 0.507);
         mppi_params_.max_steer = this->get_parameter("max_steer").as_double();
         
-        this->declare_parameter("min_accel", -40.0);
+        this->declare_parameter("min_accel", -9.0);
         mppi_params_.min_accel = this->get_parameter("min_accel").as_double();
         
-        this->declare_parameter("max_accel", 40.0);
+        this->declare_parameter("max_accel", 9.0);
         mppi_params_.max_accel = this->get_parameter("max_accel").as_double();
         
         this->declare_parameter("min_speed", 0.0);
         mppi_params_.min_speed = this->get_parameter("min_speed").as_double();
         
-        this->declare_parameter("target_speed", 10.0);
+        this->declare_parameter("target_speed", 6.0);
         mppi_params_.target_speed = this->get_parameter("target_speed").as_double();
         
-        this->declare_parameter("max_speed", 20.0);
+        this->declare_parameter("max_speed", 10.0);
         mppi_params_.max_speed = this->get_parameter("max_speed").as_double();
         
-        this->declare_parameter("q_dist", 0.2);
+        this->declare_parameter("q_dist", 1.5);
         mppi_params_.q_dist = this->get_parameter("q_dist").as_double();
-        this->declare_parameter("q_v", 1.8);
+        this->declare_parameter("q_v", 2.0);
         mppi_params_.q_v = this->get_parameter("q_v").as_double();
-        this->declare_parameter("q_du", 0.5);
+        this->declare_parameter("q_du", 0.8);
         mppi_params_.q_du = this->get_parameter("q_du").as_double();
-        this->declare_parameter("q_steer", 1.0);
+        this->declare_parameter("q_steer", 0.3);
         mppi_params_.q_steer = this->get_parameter("q_steer").as_double();
-        this->declare_parameter("q_collision", 450.0);
+        this->declare_parameter("q_collision", 400.0);
         mppi_params_.q_collision = this->get_parameter("q_collision").as_double();
         this->declare_parameter("collision_radius", 0.28);
         mppi_params_.collision_radius = this->get_parameter("collision_radius").as_double();
         
-        this->declare_parameter("noise_steer_std", 0.5);
+        this->declare_parameter("noise_steer_std", 0.4);
         mppi_params_.noise_steer_std = this->get_parameter("noise_steer_std").as_double();
-        this->declare_parameter("noise_accel_std", 5.0); 
+        this->declare_parameter("noise_accel_std", 2.0); 
         mppi_params_.noise_accel_std = this->get_parameter("noise_accel_std").as_double();
         
         this->declare_parameter("max_steer_rate", 4.0); 
@@ -95,30 +95,27 @@ private:
         this->declare_parameter("max_accel_rate", 1000.0); 
         mppi_params_.max_accel_rate = this->get_parameter("max_accel_rate").as_double();
 
-        this->declare_parameter("lambda", 20.0);
+        this->declare_parameter("lambda", 10.0);
         mppi_params_.lambda = this->get_parameter("lambda").as_double();
         this->declare_parameter("visualize_candidates", true);
         mppi_params_.visualize_candidates = this->get_parameter("visualize_candidates").as_bool();
 
         this->declare_parameter("mass", 3.5);
         mppi_params_.mass = this->get_parameter("mass").as_double();
-        
         this->declare_parameter("l_f", 0.17);
         mppi_params_.l_f = this->get_parameter("l_f").as_double();
-        
         this->declare_parameter("l_r", 0.17);
         mppi_params_.l_r = this->get_parameter("l_r").as_double();
-        
         this->declare_parameter("I_z", 0.07);
         mppi_params_.I_z = this->get_parameter("I_z").as_double();
         
         this->declare_parameter("B_f", 1.5); mppi_params_.B_f = this->get_parameter("B_f").as_double();
         this->declare_parameter("C_f", 1.5); mppi_params_.C_f = this->get_parameter("C_f").as_double();
-        this->declare_parameter("D_f", 30.0); mppi_params_.D_f = this->get_parameter("D_f").as_double();
+        this->declare_parameter("D_f", 20.0); mppi_params_.D_f = this->get_parameter("D_f").as_double();
         
         this->declare_parameter("B_r", 1.5); mppi_params_.B_r = this->get_parameter("B_r").as_double();
         this->declare_parameter("C_r", 1.5); mppi_params_.C_r = this->get_parameter("C_r").as_double();
-        this->declare_parameter("D_r", 30.0); mppi_params_.D_r = this->get_parameter("D_r").as_double();
+        this->declare_parameter("D_r", 20.0); mppi_params_.D_r = this->get_parameter("D_r").as_double();
 
         this->declare_parameter("odom_topic", "/odom0"); 
         odom_topic_ = this->get_parameter("odom_topic").as_string();

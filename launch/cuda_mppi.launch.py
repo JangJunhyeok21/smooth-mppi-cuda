@@ -7,7 +7,7 @@ import os
 
 
 def generate_launch_description():
-    map_name = "map1"
+    map_name = "icra2025"
     is_simulation = True
 
     default_param_file = os.path.join(

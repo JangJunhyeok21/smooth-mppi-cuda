@@ -208,9 +208,9 @@ private:
         current_state_.yaw = (float)yaw;
         current_state_.v = msg->twist.twist.linear.x;
         current_state_.vy = msg->twist.twist.linear.y;
-        current_state_.ay = 0.0f;
         current_state_.slip_angle = atan2(current_state_.vy, fabs(current_state_.v) + 1e-5f);
         current_state_.omega = msg->twist.twist.angular.z;
+        current_state_.ay = current_state_.v * current_state_.omega; // 간단한 모델에서의 횡가속도 근사
         
         odom_received_ = true;
     }

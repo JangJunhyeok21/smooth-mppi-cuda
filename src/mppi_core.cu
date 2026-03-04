@@ -110,7 +110,8 @@ namespace mppi
         
         // 5. Boundary Collision Cost
         float boundary_cost = 0.0f;
-        boundary_cost= p.q_collision * logf(1.0f + expf(-40.0f * min((min_bnd_dist - p.collision_radius), 1.0e-5f))); // 바운더리 근접 시 급격히 증가하는 비용
+        if (min_bnd_dist < p.collision_radius * 1.5f)                                                                     // 바운더리 근접 시 비용 부과 시작
+            boundary_cost= p.q_collision * logf(1.0f + expf(-40.0f * min((min_bnd_dist - p.collision_radius), 1.0e-5f))); // 바운더리 근접 시 급격히 증가하는 비용
         
         return p.q_dist * dist_error + vel_cost + rate_cost + steer_cost + slip_cost + boundary_cost;
     }
@@ -128,8 +129,8 @@ namespace mppi
         float min_dist_sq = 1e9f;
         
         // 탐색 창(Window) 확장: 뒤로 30, 앞으로 150칸을 확인
-        int search_window = 180; 
-        int start_search = current_path_idx - 30;
+        int search_window = 30; 
+        int start_search = current_path_idx -5;
         
         if (start_search < 0) start_search += bnd_len; 
 
@@ -138,12 +139,12 @@ namespace mppi
             int i = start_search + offset;
             if (i >= bnd_len) i -= bnd_len;
 
-            float dx_l = s.x - left_xs[i];
-            float dy_l = s.y - left_ys[i];
+            float dx_l = s.x - __ldg(&left_xs[i]);
+            float dy_l = s.y - __ldg(&left_ys[i]);
             float dist_sq_l = dx_l * dx_l + dy_l * dy_l;
 
-            float dx_r = s.x - right_xs[i];
-            float dy_r = s.y - right_ys[i];
+            float dx_r = s.x - __ldg(&right_xs[i]);
+            float dy_r = s.y - __ldg(&right_ys[i]);
             float dist_sq_r = dx_r * dx_r + dy_r * dy_r;
 
             if (dist_sq_l < min_dist_sq) min_dist_sq = dist_sq_l;
@@ -232,13 +233,13 @@ namespace mppi
             controls[idx] = u_clamped; 
 
             // 하드 제약: 횡가속도 초과 시 후보군에서 완전 제외
-            if(fabsf(x.ay) > 70.0f){
-                is_fault = true;
-            }
+            // if(fabsf(x.ay) > 70.0f){
+            //     is_fault = true;
+            // }
 
-            if(fabsf(x.slip_angle) > 0.2f){ // 슬립각 0.2rad 이상 시 제약 위반으로 간주
-                is_fault = true;
-            }
+            // if(fabsf(x.slip_angle) > 0.2f){ // 슬립각 0.2rad 이상 시 제약 위반으로 간주
+            //     is_fault = true;
+            // }
 
             // 바운더리 기반 최소 거리 확인
             float min_dist = compute_min_boundary_distance(

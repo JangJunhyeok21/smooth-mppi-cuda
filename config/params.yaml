@@ -14,8 +14,8 @@ cuda_mppi_controller:
     
     # --- Costs (공통 기본값) ---
     q_v: 2.2
-    q_dist: 1.3
-    q_du: 1.2
+    q_dist: 0.5
+    q_du: 1.3
     q_steer: 0.6
     q_collision: 400.0
     collision_radius: 0.3
@@ -41,7 +41,7 @@ cuda_mppi_controller:
     
     B_r: 1.5
     C_r: 1.5
-    D_r: 34.0
+    D_r: 28.0
 
     # --- Topics (공통 키, launch에서 환경별 override) ---
     odom_topic: /odom0

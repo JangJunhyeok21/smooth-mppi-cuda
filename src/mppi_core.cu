@@ -7,14 +7,39 @@
 
 namespace mppi
 {
-    __device__ float angle_normalize_cuda(float angle)
+    // 호스트(CPU)와 디바이스(GPU)에서 각각 최적의 함수로 자동 분기되는 래퍼
+    __host__ __device__ inline float fast_cos(float x) {
+    #ifdef __CUDA_ARCH__
+        return __cosf(x); // GPU: SFU 하드웨어 명령어
+    #else
+        return cosf(x); // CPU: C++ 표준 라이브러리
+    #endif
+    }
+
+    __host__ __device__ inline float fast_sin(float x) {
+    #ifdef __CUDA_ARCH__
+        return __sinf(x);
+    #else
+        return sinf(x);
+    #endif
+    }
+
+    __host__ __device__ inline float fast_exp(float x) {
+    #ifdef __CUDA_ARCH__
+        return __expf(x);
+    #else
+        return expf(x);
+    #endif
+    }
+
+    __host__ __device__ float angle_normalize(float angle)
     {
         while (angle > M_PI) angle -= 2.0f * M_PI;
         while (angle < -M_PI) angle += 2.0f * M_PI;
         return angle;
     }
 
-    __device__ State update_dynamics_cuda(const State &s, const Control &u, const Params &p)
+    __host__ __device__ State update_dynamics(const State &s, const Control &u, const Params &p)
     {
         float px = s.x; float py = s.y; float yaw = s.yaw;
         float vx = s.v; float vy = s.vy; float omega = s.omega;
@@ -22,9 +47,9 @@ namespace mppi
         if (vx < 0.5f) {
             State next_s;
             float beta = atanf(p.l_r * tanf(u.steer) / (p.l_f + p.l_r));
-            next_s.x = px + vx * __cosf(yaw + beta) * p.dt;
-            next_s.y = py + vx * __sinf(yaw + beta) * p.dt;
-            next_s.yaw = angle_normalize_cuda(yaw + (vx / p.l_r) * __sinf(beta) * p.dt);
+            next_s.x = px + vx * fast_cos(yaw + beta) * p.dt;
+            next_s.y = py + vx * fast_sin(yaw + beta) * p.dt;
+            next_s.yaw = angle_normalize(yaw + (vx / p.l_r) * fast_sin(beta) * p.dt);
             next_s.v = vx + u.accel * p.dt;
             next_s.vy = 0.0f; next_s.omega = 0.0f;
             return next_s;
@@ -33,21 +58,21 @@ namespace mppi
         float alpha_f = u.steer - atan2f(vy + p.l_f * omega, vx);
         float alpha_r = -atan2f(vy - p.l_r * omega, vx);
 
-        float F_fy = p.D_f * __sinf(p.C_f * atanf(p.B_f * alpha_f));
-        float F_ry = p.D_r * __sinf(p.C_r * atanf(p.B_r * alpha_r));
+        float F_fy = p.D_f * fast_sin(p.C_f * atanf(p.B_f * alpha_f));
+        float F_ry = p.D_r * fast_sin(p.C_r * atanf(p.B_r * alpha_r));
 
         float F_rx = p.mass * u.accel; 
-        float dot_vx = (F_rx - F_fy * __sinf(u.steer) + p.mass * vy * omega) / p.mass;
-        float dot_vy = (F_ry + F_fy * __cosf(u.steer) - p.mass * vx * omega) / p.mass;
-        float dot_omega = (F_fy * p.l_f * __cosf(u.steer) - F_ry * p.l_r) / p.I_z;
+        float dot_vx = (F_rx - F_fy * fast_sin(u.steer) + p.mass * vy * omega) / p.mass;
+        float dot_vy = (F_ry + F_fy * fast_cos(u.steer) - p.mass * vx * omega) / p.mass;
+        float dot_omega = (F_fy * p.l_f * fast_cos(u.steer) - F_ry * p.l_r) / p.I_z;
 
-        float dot_x = vx * __cosf(yaw) - vy * __sinf(yaw);
-        float dot_y = vx * __sinf(yaw) + vy * __cosf(yaw);
+        float dot_x = vx * fast_cos(yaw) - vy * fast_sin(yaw);
+        float dot_y = vx * fast_sin(yaw) + vy * fast_cos(yaw);
 
         State next_s;
         next_s.x = px + dot_x * p.dt;
         next_s.y = py + dot_y * p.dt;
-        next_s.yaw = angle_normalize_cuda(yaw + omega * p.dt);
+        next_s.yaw = angle_normalize(yaw + omega * p.dt);
         next_s.v = vx + dot_vx * p.dt;
         next_s.vy = vy + dot_vy * p.dt;
         next_s.ay = dot_vy + vx * omega;
@@ -111,7 +136,7 @@ namespace mppi
         // 5. Boundary Collision Cost
         float boundary_cost = 0.0f;
         if (min_bnd_dist < p.collision_radius * 1.5f)                                                                     // 바운더리 근접 시 비용 부과 시작
-            boundary_cost= p.q_collision * logf(1.0f + expf(-40.0f * min((min_bnd_dist - p.collision_radius), 1.0e-5f))); // 바운더리 근접 시 급격히 증가하는 비용
+            boundary_cost= p.q_collision * logf(1.0f + __expf(-40.0f * min((min_bnd_dist - p.collision_radius), 1.0e-5f))); // 바운더리 근접 시 급격히 증가하는 비용
         
         return p.q_dist * dist_error + vel_cost + rate_cost + steer_cost + slip_cost + boundary_cost;
     }
@@ -228,7 +253,7 @@ namespace mppi
 
             current_action = u_clamped; 
 
-            x = update_dynamics_cuda(x, u_clamped, p);
+            x = update_dynamics(x, u_clamped, p);
             states[idx] = x;
             controls[idx] = u_clamped; 
 
@@ -379,52 +404,52 @@ namespace mppi
         return compute_optimal_control(current_state);
     }
 
-    State update_dynamics_host(const State &s, const Control &u, const Params &p)
-    {
-        float px = s.x; float py = s.y; float yaw = s.yaw;
-        float vx = s.v; float vy = s.vy; float omega = s.omega;
+    // State update_dynamics_host(const State &s, const Control &u, const Params &p)
+    // {
+    //     float px = s.x; float py = s.y; float yaw = s.yaw;
+    //     float vx = s.v; float vy = s.vy; float omega = s.omega;
         
-        if (vx < 0.1f) {
-            State next_s;
-            float beta = atan2f(p.l_r * tanf(u.steer), p.l_f + p.l_r);
-            next_s.x = px + vx * cosf(yaw + beta) * p.dt;
-            next_s.y = py + vx * sinf(yaw + beta) * p.dt;
-            next_s.yaw = yaw + (vx / p.l_r) * sinf(beta) * p.dt;
-            while (next_s.yaw > M_PI) next_s.yaw -= 2.0f * M_PI;
-            while (next_s.yaw < -M_PI) next_s.yaw += 2.0f * M_PI;
-            next_s.v = vx + u.accel * p.dt;
-            next_s.vy = 0.0f; next_s.omega = 0.0f;
-            return next_s;
-        }
+    //     if (vx < 0.1f) {
+    //         State next_s;
+    //         float beta = atan2f(p.l_r * tanf(u.steer), p.l_f + p.l_r);
+    //         next_s.x = px + vx * cosf(yaw + beta) * p.dt;
+    //         next_s.y = py + vx * sinf(yaw + beta) * p.dt;
+    //         next_s.yaw = yaw + (vx / p.l_r) * sinf(beta) * p.dt;
+    //         while (next_s.yaw > M_PI) next_s.yaw -= 2.0f * M_PI;
+    //         while (next_s.yaw < -M_PI) next_s.yaw += 2.0f * M_PI;
+    //         next_s.v = vx + u.accel * p.dt;
+    //         next_s.vy = 0.0f; next_s.omega = 0.0f;
+    //         return next_s;
+    //     }
 
-        float alpha_f = u.steer - atan2f(vy + p.l_f * omega, vx);
-        float alpha_r = -atan2f(vy - p.l_r * omega, vx);
+    //     float alpha_f = u.steer - atan2f(vy + p.l_f * omega, vx);
+    //     float alpha_r = -atan2f(vy - p.l_r * omega, vx);
 
-        float F_fy = p.D_f * sinf(p.C_f * atanf(p.B_f * alpha_f));
-        float F_ry = p.D_r * sinf(p.C_r * atanf(p.B_r * alpha_r));
+    //     float F_fy = p.D_f * sinf(p.C_f * atanf(p.B_f * alpha_f));
+    //     float F_ry = p.D_r * sinf(p.C_r * atanf(p.B_r * alpha_r));
 
-        float F_rx = p.mass * u.accel; 
-        float dot_vx = (F_rx - F_fy * sinf(u.steer) + p.mass * vy * omega) / p.mass;
-        float dot_vy = (F_ry + F_fy * cosf(u.steer) - p.mass * vx * omega) / p.mass;
-        float dot_omega = (F_fy * p.l_f * cosf(u.steer) - F_ry * p.l_r) / p.I_z;
+    //     float F_rx = p.mass * u.accel; 
+    //     float dot_vx = (F_rx - F_fy * sinf(u.steer) + p.mass * vy * omega) / p.mass;
+    //     float dot_vy = (F_ry + F_fy * cosf(u.steer) - p.mass * vx * omega) / p.mass;
+    //     float dot_omega = (F_fy * p.l_f * cosf(u.steer) - F_ry * p.l_r) / p.I_z;
 
-        float dot_x = vx * cosf(yaw) - vy * sinf(yaw);
-        float dot_y = vx * sinf(yaw) + vy * cosf(yaw);
+    //     float dot_x = vx * cosf(yaw) - vy * sinf(yaw);
+    //     float dot_y = vx * sinf(yaw) + vy * cosf(yaw);
 
-        State next_s;
-        next_s.x = px + dot_x * p.dt;
-        next_s.y = py + dot_y * p.dt;
-        next_s.yaw = yaw + omega * p.dt;
-        while(next_s.yaw > M_PI) next_s.yaw -= 2.0f * M_PI;
-        while(next_s.yaw < -M_PI) next_s.yaw += 2.0f * M_PI;
-        next_s.v = vx + dot_vx * p.dt;
-        next_s.vy = vy + dot_vy * p.dt;
-        next_s.ay = dot_vy + vx * omega;
-        next_s.omega = omega + dot_omega * p.dt;
-        next_s.slip_angle = atan2f(next_s.vy, fabsf(next_s.v) + 1e-5f);
+    //     State next_s;
+    //     next_s.x = px + dot_x * p.dt;
+    //     next_s.y = py + dot_y * p.dt;
+    //     next_s.yaw = yaw + omega * p.dt;
+    //     while(next_s.yaw > M_PI) next_s.yaw -= 2.0f * M_PI;
+    //     while(next_s.yaw < -M_PI) next_s.yaw += 2.0f * M_PI;
+    //     next_s.v = vx + dot_vx * p.dt;
+    //     next_s.vy = vy + dot_vy * p.dt;
+    //     next_s.ay = dot_vy + vx * omega;
+    //     next_s.omega = omega + dot_omega * p.dt;
+    //     next_s.slip_angle = atan2f(next_s.vy, fabsf(next_s.v) + 1e-5f);
 
-        return next_s;
-    }
+    //     return next_s;
+    // }
 
     Control MPPISolver::compute_optimal_control(const State &current_state) {
         auto min_it = std::min_element(h_costs_.begin(), h_costs_.end());
@@ -443,7 +468,7 @@ namespace mppi
             if (std::isinf(h_costs_[k]) || h_costs_[k] >= 1.0e6f) {
                 h_weights_[k] = 0.0f; 
             } else {
-                h_weights_[k] = expf(-(h_costs_[k] - min_cost) / lambda);
+                h_weights_[k] = fast_exp(-(h_costs_[k] - min_cost) / lambda);
             }
             sum_weights += h_weights_[k];
         }
@@ -472,7 +497,7 @@ namespace mppi
             
             for (int t = 0; t < T_; ++t) {
                 // 부드럽게 산출된 최적 제어값을 사용해 궤적을 앞으로 예측
-                sim_state = update_dynamics_host(sim_state, weighted_controls[t], params_);
+                sim_state = update_dynamics(sim_state, weighted_controls[t], params_);
                 best_trajectory_[t] = sim_state;
             }
         }
@@ -483,6 +508,7 @@ namespace mppi
     const std::vector<State> &MPPISolver::get_best_trajectory() const { return best_trajectory_; }
     int MPPISolver::get_best_k() const { return best_k_; }
     const std::vector<Control>& MPPISolver::get_optimal_controls() const { return optimal_controls_; }
+    const std::vector<float>& MPPISolver::get_costs() const { return h_costs_; }
     int MPPISolver::get_K() const { return K_; }
     int MPPISolver::get_T() const { return T_; }
 }

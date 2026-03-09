@@ -95,6 +95,7 @@ public:
     const std::vector<State>& get_generated_trajectories() const;
     const std::vector<State>& get_best_trajectory() const;
     const std::vector<Control>& get_optimal_controls() const;
+    const std::vector<float>& get_costs() const;
     
     int get_best_k() const;
     int get_K() const;

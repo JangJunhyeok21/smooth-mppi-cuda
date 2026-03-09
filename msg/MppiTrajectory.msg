@@ -1,0 +1,13 @@
+std_msgs/Header header
+float32[] x
+float32[] y
+float32[] yaw
+float32[] v
+float32[] steer
+float32[] accel
+float32 dist_cost
+float32 vel_cost
+float32 rate_cost
+float32 steer_cost
+float32 slip_cost
+float32 boundary_cost

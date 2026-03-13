@@ -128,17 +128,33 @@ namespace mppi
         // 3. Control Input Cost
         float d_steer = u.steer - u_prev.steer;
         float d_accel = u.accel - u_prev.accel;
-        float rate_cost = p.q_du * (d_steer * d_steer + d_accel * d_accel);
+        float steer_rate_cost = p.q_du * 2.0f * (d_steer * d_steer);
+        float accel_rate_cost = p.q_du * fabsf(d_accel);
         float steer_cost = p.q_steer * (u.steer * u.steer);
 
-        float slip_cost = 500.0f * s.slip_angle * s.slip_angle; // 슬립각에 대한 비용 추가 (0.2rad 이상 시 급격히 증가)
+        // float slip_cost = 500.0f * s.slip_angle * s.slip_angle; // 슬립각에 대한 비용 추가 (0.2rad 이상 시 급격히 증가)
         
-        // 5. Boundary Collision Cost
+        // 5. Boundary Collision Cost (원형 그릇 형태 적용)
         float boundary_cost = 0.0f;
-        if (min_bnd_dist < p.collision_radius * 1.5f)                                                                     // 바운더리 근접 시 비용 부과 시작
-            boundary_cost= p.q_collision * logf(1.0f + __expf(-40.0f * min((min_bnd_dist - p.collision_radius), 1.0e-5f))); // 바운더리 근접 시 급격히 증가하는 비용
-        
-        return p.q_dist * dist_error + vel_cost + rate_cost + steer_cost + slip_cost + boundary_cost;
+        // 여유 공간 설정: 물리적 충돌 반경 + 0.4m (트랙 폭에 따라 튜닝 필요)
+        float safe_dist = p.collision_radius + 0.4f;
+
+        if (min_bnd_dist < safe_dist) {
+            // (1) 부드러운 벽면 (Soft Bowl Margin): 거리가 가까워질수록 2차 함수로 비용 증가
+            float penetration = safe_dist - min_bnd_dist;
+            float soft_cost = 150.0f * (penetration * penetration); // 150.0f는 튜닝 계수
+
+            // (2) 충돌 방어벽 (Hard Barrier): 물리적 충돌 반경 근접 시 기존의 절벽 비용 부과
+            float hard_cost = 0.0f;
+            if (min_bnd_dist < p.collision_radius * 1.2f) {
+                float diff = min_bnd_dist - p.collision_radius;
+                float capped = fminf(diff, 1.0e-5f);
+                hard_cost = p.q_collision * logf(1.0f + __expf(-40.0f * capped));
+            }
+
+            boundary_cost = soft_cost + hard_cost;
+        }
+        return p.q_dist * dist_error + vel_cost + steer_rate_cost + accel_rate_cost + steer_cost + /*slip_cost*/ + boundary_cost;
     }
     
     // O(1) 윈도우 기반 바운더리 거리 계산
@@ -229,16 +245,15 @@ namespace mppi
             // // 1. OU Process 기반 Colored Noise 생성 (핵심)
             // // theta 값이 1.0에 가까울수록 이전 노이즈 성향을 강하게 유지(관성)하여 
             // // 슬라럼을 위한 크고 굵은 조향 궤적을 탐색해 냅니다. (보통 0.8 ~ 0.9 권장)
-            // float raw_steer_noise = curand_normal(&rng_states[idx]) * p.noise_steer_std;
-            // float raw_accel_noise = curand_normal(&rng_states[idx]) * p.noise_accel_std;
-            // steer_noise_state = 0.85f * steer_noise_state + (1.0f - 0.85f) * raw_steer_noise;
-            // accel_noise_state = 0.85f * accel_noise_state + (1.0f - 0.85f) * raw_accel_noise;
-            // // 2. 부드럽게 관성을 가진 노이즈를 변화량(dt)에 곱해 적용
-            // float noise_delta_steer = steer_noise_state * p.dt;
-            // float noise_delta_accel = accel_noise_state * p.dt;
+            // float raw_steer_noise = curand_normal(&rng_states[idx]) * p.noise_steer_std * p.dt;
+            // float raw_accel_noise = curand_normal(&rng_states[idx]) * p.noise_accel_std * p.dt;
+            
+            // steer_noise_state = 0.9f * steer_noise_state + (1.0f - 0.9f) * raw_steer_noise;
+            // accel_noise_state = 0.9f * accel_noise_state + (1.0f - 0.9f) * raw_accel_noise;
+
             // // 3. Rate Limit 적용 및 누적
-            // current_action.steer += fminf(fmaxf(mean_delta_steer + noise_delta_steer, -p.max_steer_rate * p.dt), p.max_steer_rate * p.dt);    
-            // current_action.accel += fminf(fmaxf(mean_delta_accel + noise_delta_accel, -p.max_accel_rate * p.dt), p.max_accel_rate * p.dt);
+            // current_action.steer += fminf(fmaxf(mean_delta_steer + steer_noise_state, -p.max_steer_rate * p.dt), p.max_steer_rate * p.dt);    
+            // current_action.accel += fminf(fmaxf(mean_delta_accel + accel_noise_state, -p.max_accel_rate * p.dt), p.max_accel_rate * p.dt);
 
 
             // 4. 절대 제어값 한계 적용
@@ -258,9 +273,9 @@ namespace mppi
             controls[idx] = u_clamped; 
 
             // 하드 제약: 횡가속도 초과 시 후보군에서 완전 제외
-            // if(fabsf(x.ay) > 70.0f){
-            //     is_fault = true;
-            // }
+            if(fabsf(x.ay) > 9.8f){
+                is_fault = true;
+            }
 
             // if(fabsf(x.slip_angle) > 0.2f){ // 슬립각 0.2rad 이상 시 제약 위반으로 간주
             //     is_fault = true;
@@ -490,16 +505,13 @@ namespace mppi
         for (int t = 0; t < T_ - 1; ++t) h_prev_controls_[t] = weighted_controls[t + 1];
         h_prev_controls_[T_ - 1] = weighted_controls[T_ - 1];
 
-        // 수정된 핵심 부분: 특정 샘플의 노이즈 궤적이 아닌, 가중 평균된 제어로 예상 궤적을 적분
-        if (params_.visualize_candidates) {
-            best_trajectory_.resize(T_);
-            State sim_state = current_state; // 현재 상태에서 출발
-            
-            for (int t = 0; t < T_; ++t) {
-                // 부드럽게 산출된 최적 제어값을 사용해 궤적을 앞으로 예측
-                sim_state = update_dynamics(sim_state, weighted_controls[t], params_);
-                best_trajectory_[t] = sim_state;
-            }
+        // 가중 평균된 제어로 예상 궤적을 적분
+        best_trajectory_.resize(T_);
+        State sim_state = current_state; // 현재 상태에서 출발
+
+        for (int t = 0; t < T_; ++t) {
+            sim_state = update_dynamics(sim_state, weighted_controls[t], params_);
+            best_trajectory_[t] = sim_state;
         }
         return output;
     }

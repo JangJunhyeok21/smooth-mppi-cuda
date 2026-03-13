@@ -14,9 +14,9 @@ cuda_mppi_controller:
     
     # --- Costs (공통 기본값) ---
     q_v: 2.2
-    q_dist: 0.5
-    q_du: 1.3
-    q_steer: 0.6
+    q_dist: 0.0
+    q_du: 2.0
+    q_steer: 1.0
     q_collision: 400.0
     collision_radius: 0.3
     
@@ -25,7 +25,7 @@ cuda_mppi_controller:
     noise_accel_std: 2.0  # m/s^2
     max_steer_rate: 4.0   # rad/s
     max_accel_rate: 1000.0   # m/s^3
-    lambda: 10.0
+    lambda: 15.0
     visualize_candidates: true
     
     # --- Dynamic Model Params ---

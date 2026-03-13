@@ -106,19 +106,21 @@ private:
         }
 
         // yaw 계산 (CSV에 없는 경우)
-        for (size_t i = 0; i < xs.size(); ++i) {
-            if (i == 0 && xs.size() > 1) {
-                double dx = xs[1] - xs[0];
-                double dy = ys[1] - ys[0];
-                psis[0] = std::atan2(dy, dx);
-            } else if (i > 0) {
-                double dx = xs[i] - xs[i-1];
-                double dy = ys[i] - ys[i-1];
-                double norm = std::hypot(dx, dy);
-                if (norm > 1e-6) {
-                    psis[i] = std::atan2(dy, dx);
-                } else {
-                    psis[i] = psis[i-1];
+        if(ipsi < 0){
+            for (size_t i = 0; i < xs.size(); ++i) {
+                if (i == 0 && xs.size() > 1) {
+                    double dx = xs[1] - xs[0];
+                    double dy = ys[1] - ys[0];
+                    psis[0] = std::atan2(dy, dx);
+                } else if (i > 0) {
+                    double dx = xs[i] - xs[i-1];
+                    double dy = ys[i] - ys[i-1];
+                    double norm = std::hypot(dx, dy);
+                    if (norm > 1e-6) {
+                        psis[i] = std::atan2(dy, dx);
+                    } else {
+                        psis[i] = psis[i-1];
+                    }
                 }
             }
         }

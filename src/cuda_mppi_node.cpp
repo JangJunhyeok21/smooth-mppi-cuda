@@ -87,21 +87,15 @@ private:
         return std::sqrt(min_dist_sq);
     }
 
-    int update_nearest_index(const mppi::State &s, int start_idx) {
+    int update_nearest_index(const mppi::State &s) {
         if (ref_path_xs_.empty()) return 0;
 
         int path_len = static_cast<int>(ref_path_xs_.size());
-        int search_window = 50;
-        int nearest_idx = -1;
+        int nearest_idx = 0;
         float min_dist_sq = 1e9f;
 
-        if (start_idx >= path_len) start_idx %= path_len;
-        if (start_idx < 0) start_idx = 0;
-
-        for (int offset = 0; offset < search_window; ++offset) {
-            int i = start_idx + offset;
-            if (i >= path_len) i -= path_len;
-
+        // 제어기(mppi_core.cu)의 CPU 단 전역 탐색과 완전히 동일한 알고리즘
+        for (int i = 0; i < path_len; ++i) {
             float dx = s.x - ref_path_xs_[i];
             float dy = s.y - ref_path_ys_[i];
             float dist_sq = dx * dx + dy * dy;
@@ -112,7 +106,6 @@ private:
             }
         }
 
-        if (nearest_idx == -1) nearest_idx = start_idx;
         return nearest_idx;
     }
 
@@ -120,46 +113,63 @@ private:
         const std::vector<mppi::State> &best_traj,
         const std::vector<mppi::Control> &optimal_controls,
         cuda_mppi_controller::msg::MppiTrajectory &msg) {
+        
         if (best_traj.empty() || optimal_controls.empty() || ref_path_xs_.empty() || ref_path_yaws_.empty()) {
             return;
         }
 
-        int local_path_idx = update_nearest_index(best_traj[0], 0);
+        int t_idx = (best_traj.size() > 1 && optimal_controls.size() > 1) ? 1 : 0;
+        const auto &s = best_traj[t_idx];
+        const auto &u = optimal_controls[t_idx];
+        const auto &u_prev = (t_idx == 0) ? optimal_controls[0] : optimal_controls[t_idx - 1];
 
-        const auto &s = best_traj[1];
-        const auto &u = optimal_controls[1];
-        const auto &u_prev = optimal_controls[0];
-
-        local_path_idx = update_nearest_index(s, local_path_idx);
+        // 차량의 상태(s)를 기준으로 전체 맵에서 가장 가까운 인덱스 추출
+        int local_path_idx = update_nearest_index(s);
 
         float dx = s.x - ref_path_xs_[local_path_idx];
         float dy = s.y - ref_path_ys_[local_path_idx];
         float dist_error = dx * dx + dy * dy;
 
+        // GPU에서 사용하는 것과 완벽히 동일한 인덱스의 yaw 값 참조
         float vel_cost = -mppi_params_.q_v * (s.v * std::cos(s.yaw - ref_path_yaws_[local_path_idx]));
 
         float d_steer = u.steer - u_prev.steer;
         float d_accel = u.accel - u_prev.accel;
-        float rate_cost = mppi_params_.q_du * (d_steer * d_steer + d_accel * d_accel);
+        float steer_rate_cost = mppi_params_.q_du * 2.0f * (d_steer * d_steer);
+        float accel_rate_cost = mppi_params_.q_du * std::fabs(d_accel);
         float steer_cost = mppi_params_.q_steer * (u.steer * u.steer);
 
         float slip_cost = 500.0f * s.slip_angle * s.slip_angle;
 
         float min_bnd_dist = compute_min_boundary_distance(s, local_path_idx);
+        // 기존 boundary_cost 계산 코드 삭제 후 아래로 교체
         float boundary_cost = 0.0f;
-        if (min_bnd_dist < mppi_params_.collision_radius * 1.5f) {
-            float diff = min_bnd_dist - mppi_params_.collision_radius;
-            float capped = std::min(diff, 1.0e-5f);
-            boundary_cost = mppi_params_.q_collision * std::log(1.0f + std::exp(-40.0f * capped));
+        float safe_dist = mppi_params_.collision_radius + 0.4f;
+
+        if (min_bnd_dist < safe_dist) {
+            float penetration = safe_dist - min_bnd_dist;
+            float soft_cost = 150.0f * (penetration * penetration);
+
+            float hard_cost = 0.0f;
+            if (min_bnd_dist < mppi_params_.collision_radius * 1.2f) {
+                float diff = min_bnd_dist - mppi_params_.collision_radius;
+                float capped = std::min(diff, 1.0e-5f);
+                hard_cost = mppi_params_.q_collision * std::log(1.0f + std::exp(-40.0f * capped));
+            }
+            boundary_cost = soft_cost + hard_cost;
         }
 
         msg.dist_cost= mppi_params_.q_dist * dist_error;
         msg.vel_cost = vel_cost;
-        msg.rate_cost = rate_cost;
+        msg.steer_rate_cost = steer_rate_cost;
+        msg.accel_rate_cost = accel_rate_cost;
         msg.steer_cost = steer_cost;
         msg.slip_cost = slip_cost;
-        msg.boundary_cost = boundary_cost;      
+        msg.boundary_cost = boundary_cost;    
+        msg.yaw = s.yaw;
+        msg.ref_yaw = ref_path_yaws_[local_path_idx];  
     }
+
     void load_parameters() {
         this->declare_parameter("max_steer", 0.507);
         mppi_params_.max_steer = this->get_parameter("max_steer").as_double();
@@ -404,18 +414,10 @@ private:
             int T = solver_->get_T();
             
             // 데이터 삽입 속도 최적화를 위한 메모리 사전 할당
-            msg.x.reserve(T); 
-            msg.y.reserve(T); 
-            msg.yaw.reserve(T); 
-            msg.v.reserve(T);
             msg.steer.reserve(T); 
             msg.accel.reserve(T);
 
             for (int t = 0; t < T; ++t) {
-                msg.x.push_back(best_traj[t].x);
-                msg.y.push_back(best_traj[t].y);
-                msg.yaw.push_back(best_traj[t].yaw);
-                msg.v.push_back(best_traj[t].v);
                 msg.steer.push_back(optimal_controls[t].steer);
                 msg.accel.push_back(optimal_controls[t].accel);
             }

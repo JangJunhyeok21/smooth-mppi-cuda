@@ -8,7 +8,7 @@
 #include "geometry_msgs/msg/pose_stamped.hpp"
 #include "cuda_mppi_controller/cuda_mppi_core.hpp"
 // [추가] 커스텀 메시지 헤더 포함
-#include "cuda_mppi_controller/msg/mppi_trajectory.hpp"
+#include "smppi_controller/msg/mppi_trajectory.hpp"
 #include <algorithm>
 #include <cmath>
 
@@ -26,7 +26,7 @@ public:
         vis_pub_ = this->create_publisher<visualization_msgs::msg::MarkerArray>("/mppi_viz", 50);
         
         // [추가] MPPI 최적 궤적 퍼블리셔 초기화
-        traj_pub_ = this->create_publisher<cuda_mppi_controller::msg::MppiTrajectory>("/mppi_optimal_trajectory", 10);
+        traj_pub_ = this->create_publisher<smppi_controller::msg::MppiTrajectory>("/mppi_optimal_trajectory", 10);
 
         path_sub_ = this->create_subscription<nav_msgs::msg::Path>(
             path_topic_, 1, std::bind(&MPPINode::path_callback, this, std::placeholders::_1));
@@ -112,7 +112,7 @@ private:
     void append_best_traj_costs(
         const std::vector<mppi::State> &best_traj,
         const std::vector<mppi::Control> &optimal_controls,
-        cuda_mppi_controller::msg::MppiTrajectory &msg) {
+        smppi_controller::msg::MppiTrajectory &msg) {
         
         if (best_traj.empty() || optimal_controls.empty() || ref_path_xs_.empty() || ref_path_yaws_.empty()) {
             return;
@@ -407,7 +407,7 @@ private:
         const auto& optimal_controls = solver_->get_optimal_controls();
 
         if (!best_traj.empty() && !optimal_controls.empty()) {
-            cuda_mppi_controller::msg::MppiTrajectory msg;
+            smppi_controller::msg::MppiTrajectory msg;
             msg.header.stamp = this->now();
             msg.header.frame_id = "map";
 
@@ -517,7 +517,7 @@ private:
     rclcpp::Publisher<ackermann_msgs::msg::AckermannDriveStamped>::SharedPtr drive_pub_;
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr vis_pub_;
     // [추가] 커스텀 메시지 퍼블리셔 포인터
-    rclcpp::Publisher<cuda_mppi_controller::msg::MppiTrajectory>::SharedPtr traj_pub_;
+    rclcpp::Publisher<smppi_controller::msg::MppiTrajectory>::SharedPtr traj_pub_;
     
     rclcpp::TimerBase::SharedPtr timer_;
     

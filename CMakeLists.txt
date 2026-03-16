@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.8)
-project(cuda_mppi_controller)
+project(smppi_controller)
 
 # [수정 1] GPU 연산 속도를 위해 반드시 Release 모드 사용
 set(CMAKE_BUILD_TYPE Release) 
@@ -32,33 +32,33 @@ find_package(std_msgs REQUIRED)
 find_package(CUDA REQUIRED)
 
 # 라이브러리 생성 (.cpp 대신 .cu 포함)
-add_library(cuda_mppi_lib
+add_library(smppi_lib
   src/mppi_core.cu
 )
 
 # GCC line directive 경고 억제 및 고속 수학 함수 적용
-target_compile_options(cuda_mppi_lib PRIVATE
+target_compile_options(smppi_lib PRIVATE
   $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CXX_COMPILER_ID:Clang>>:-Xcompiler=-Wno-gnu-line-directive>
   $<$<COMPILE_LANGUAGE:CUDA>:--use_fast_math>
 )
 
 # 헤더 경로 설정
-target_include_directories(cuda_mppi_lib PUBLIC
+target_include_directories(smppi_lib PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
   ${CUDA_INCLUDE_DIRS}
 )
 
 # 실행 파일 생성
-add_executable(cuda_mppi_node
-  src/cuda_mppi_node.cpp
+add_executable(smppi_node
+  src/smppi_node.cpp
 )
 
-target_compile_options(cuda_mppi_node PRIVATE
+target_compile_options(smppi_node PRIVATE
   $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CXX_COMPILER_ID:Clang>>:-Xcompiler=-Wno-gnu-line-directive>
 )
 
-target_include_directories(cuda_mppi_node PUBLIC
+target_include_directories(smppi_node PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
 )
@@ -71,9 +71,9 @@ rosidl_generate_interfaces(${PROJECT_NAME}
 
 # [수정 3 적용] 기본 C++ typesupport만 연결
 rosidl_get_typesupport_target(cpp_typesupport_target ${PROJECT_NAME} "rosidl_typesupport_cpp")
-target_link_libraries(cuda_mppi_node "${cpp_typesupport_target}")
+target_link_libraries(smppi_node "${cpp_typesupport_target}")
 
-ament_target_dependencies(cuda_mppi_node
+ament_target_dependencies(smppi_node
   rclcpp
   ackermann_msgs
   nav_msgs
@@ -82,8 +82,8 @@ ament_target_dependencies(cuda_mppi_node
 )
 
 # 라이브러리 링크 (CUDA 링크)
-target_link_libraries(cuda_mppi_node
-  cuda_mppi_lib
+target_link_libraries(smppi_node
+  smppi_lib
   ${CUDA_LIBRARIES}
 )
 
@@ -103,7 +103,7 @@ ament_target_dependencies(path_publisher
   geometry_msgs
 )
 
-install(TARGETS cuda_mppi_node cuda_mppi_lib path_publisher
+install(TARGETS smppi_node smppi_lib path_publisher
   DESTINATION lib/${PROJECT_NAME})
 
 install(DIRECTORY launch config data msg

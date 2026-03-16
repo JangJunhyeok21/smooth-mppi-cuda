@@ -132,7 +132,12 @@ namespace mppi
         float accel_rate_cost = p.q_du * fabsf(d_accel);
         float steer_cost = p.q_steer * (u.steer * u.steer);
 
-        // float slip_cost = 500.0f * s.slip_angle * s.slip_angle; // 슬립각에 대한 비용 추가 (0.2rad 이상 시 급격히 증가)
+        float lat_g_cost = 0.0f;
+        float ay_abs = fabsf(s.ay);
+        if (ay_abs >= 9.5f) {
+            float excess = ay_abs - 9.5f;
+            lat_g_cost = p.q_lat_g * (__expf(-4.0f * excess));
+        }
         
         // 5. Boundary Collision Cost (원형 그릇 형태 적용)
         float boundary_cost = 0.0f;
@@ -154,7 +159,7 @@ namespace mppi
 
             boundary_cost = soft_cost + hard_cost;
         }
-        return p.q_dist * dist_error + vel_cost + steer_rate_cost + accel_rate_cost + steer_cost + /*slip_cost*/ + boundary_cost;
+        return p.q_dist * dist_error + vel_cost + steer_rate_cost + accel_rate_cost + steer_cost + lat_g_cost + boundary_cost;
     }
     
     // O(1) 윈도우 기반 바운더리 거리 계산
@@ -291,7 +296,7 @@ namespace mppi
             }
 
             if (is_fault) {
-                total_cost = INFINITY;
+                total_cost = 1.0e7f;
                 const Control zero_control = {0.0f, 0.0f};
                 for (int fill_t = t + 1; fill_t < T; ++fill_t) {
                     states[k * T + fill_t] = x;
@@ -418,53 +423,6 @@ namespace mppi
 
         return compute_optimal_control(current_state);
     }
-
-    // State update_dynamics_host(const State &s, const Control &u, const Params &p)
-    // {
-    //     float px = s.x; float py = s.y; float yaw = s.yaw;
-    //     float vx = s.v; float vy = s.vy; float omega = s.omega;
-        
-    //     if (vx < 0.1f) {
-    //         State next_s;
-    //         float beta = atan2f(p.l_r * tanf(u.steer), p.l_f + p.l_r);
-    //         next_s.x = px + vx * cosf(yaw + beta) * p.dt;
-    //         next_s.y = py + vx * sinf(yaw + beta) * p.dt;
-    //         next_s.yaw = yaw + (vx / p.l_r) * sinf(beta) * p.dt;
-    //         while (next_s.yaw > M_PI) next_s.yaw -= 2.0f * M_PI;
-    //         while (next_s.yaw < -M_PI) next_s.yaw += 2.0f * M_PI;
-    //         next_s.v = vx + u.accel * p.dt;
-    //         next_s.vy = 0.0f; next_s.omega = 0.0f;
-    //         return next_s;
-    //     }
-
-    //     float alpha_f = u.steer - atan2f(vy + p.l_f * omega, vx);
-    //     float alpha_r = -atan2f(vy - p.l_r * omega, vx);
-
-    //     float F_fy = p.D_f * sinf(p.C_f * atanf(p.B_f * alpha_f));
-    //     float F_ry = p.D_r * sinf(p.C_r * atanf(p.B_r * alpha_r));
-
-    //     float F_rx = p.mass * u.accel; 
-    //     float dot_vx = (F_rx - F_fy * sinf(u.steer) + p.mass * vy * omega) / p.mass;
-    //     float dot_vy = (F_ry + F_fy * cosf(u.steer) - p.mass * vx * omega) / p.mass;
-    //     float dot_omega = (F_fy * p.l_f * cosf(u.steer) - F_ry * p.l_r) / p.I_z;
-
-    //     float dot_x = vx * cosf(yaw) - vy * sinf(yaw);
-    //     float dot_y = vx * sinf(yaw) + vy * cosf(yaw);
-
-    //     State next_s;
-    //     next_s.x = px + dot_x * p.dt;
-    //     next_s.y = py + dot_y * p.dt;
-    //     next_s.yaw = yaw + omega * p.dt;
-    //     while(next_s.yaw > M_PI) next_s.yaw -= 2.0f * M_PI;
-    //     while(next_s.yaw < -M_PI) next_s.yaw += 2.0f * M_PI;
-    //     next_s.v = vx + dot_vx * p.dt;
-    //     next_s.vy = vy + dot_vy * p.dt;
-    //     next_s.ay = dot_vy + vx * omega;
-    //     next_s.omega = omega + dot_omega * p.dt;
-    //     next_s.slip_angle = atan2f(next_s.vy, fabsf(next_s.v) + 1e-5f);
-
-    //     return next_s;
-    // }
 
     Control MPPISolver::compute_optimal_control(const State &current_state) {
         auto min_it = std::min_element(h_costs_.begin(), h_costs_.end());

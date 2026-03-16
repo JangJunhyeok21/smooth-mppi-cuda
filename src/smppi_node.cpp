@@ -8,7 +8,7 @@
 #include "geometry_msgs/msg/pose_stamped.hpp"
 #include "cuda_mppi_controller/cuda_mppi_core.hpp"
 // [추가] 커스텀 메시지 헤더 포함
-#include "smppi_controller/msg/mppi_trajectory.hpp"
+#include "smppi_cuda_controller/msg/mppi_trajectory.hpp"
 #include <algorithm>
 #include <cmath>
 
@@ -16,7 +16,7 @@ using namespace std::chrono_literals;
 
 class MPPINode : public rclcpp::Node {
 public:
-    MPPINode() : Node("mppi_controller") {
+    MPPINode() : Node("smppi_controller") {
         load_parameters();
         validate_parameters();
 
@@ -26,7 +26,7 @@ public:
         vis_pub_ = this->create_publisher<visualization_msgs::msg::MarkerArray>("/mppi_viz", 50);
         
         // [추가] MPPI 최적 궤적 퍼블리셔 초기화
-        traj_pub_ = this->create_publisher<smppi_controller::msg::MppiTrajectory>("/mppi_optimal_trajectory", 10);
+        traj_pub_ = this->create_publisher<smppi_cuda_controller::msg::MppiTrajectory>("/mppi_optimal_trajectory", 10);
 
         path_sub_ = this->create_subscription<nav_msgs::msg::Path>(
             path_topic_, 1, std::bind(&MPPINode::path_callback, this, std::placeholders::_1));
@@ -112,7 +112,7 @@ private:
     void append_best_traj_costs(
         const std::vector<mppi::State> &best_traj,
         const std::vector<mppi::Control> &optimal_controls,
-        smppi_controller::msg::MppiTrajectory &msg) {
+        smppi_cuda_controller::msg::MppiTrajectory &msg) {
         
         if (best_traj.empty() || optimal_controls.empty() || ref_path_xs_.empty() || ref_path_yaws_.empty()) {
             return;
@@ -138,8 +138,13 @@ private:
         float steer_rate_cost = mppi_params_.q_du * 2.0f * (d_steer * d_steer);
         float accel_rate_cost = mppi_params_.q_du * std::fabs(d_accel);
         float steer_cost = mppi_params_.q_steer * (u.steer * u.steer);
-
-        float slip_cost = 500.0f * s.slip_angle * s.slip_angle;
+        
+        float lat_g_cost = 0.0f;
+        float ay_abs = fabsf(s.ay);
+        if (ay_abs >= 9.5f) {
+            float excess = ay_abs - 9.5f;
+            lat_g_cost = mppi_params_.q_lat_g * (expf(-4.0f * excess));
+        }
 
         float min_bnd_dist = compute_min_boundary_distance(s, local_path_idx);
         // 기존 boundary_cost 계산 코드 삭제 후 아래로 교체
@@ -164,7 +169,7 @@ private:
         msg.steer_rate_cost = steer_rate_cost;
         msg.accel_rate_cost = accel_rate_cost;
         msg.steer_cost = steer_cost;
-        msg.slip_cost = slip_cost;
+        msg.slip_cost = lat_g_cost;
         msg.boundary_cost = boundary_cost;    
         msg.yaw = s.yaw;
         msg.ref_yaw = ref_path_yaws_[local_path_idx];  
@@ -199,6 +204,8 @@ private:
         mppi_params_.q_steer = this->get_parameter("q_steer").as_double();
         this->declare_parameter("q_collision", 400.0);
         mppi_params_.q_collision = this->get_parameter("q_collision").as_double();
+        this->declare_parameter("q_lat_g", 200.0);
+        mppi_params_.q_lat_g = this->get_parameter("q_lat_g").as_double();
         this->declare_parameter("collision_radius", 0.28);
         mppi_params_.collision_radius = this->get_parameter("collision_radius").as_double();
         
@@ -407,7 +414,7 @@ private:
         const auto& optimal_controls = solver_->get_optimal_controls();
 
         if (!best_traj.empty() && !optimal_controls.empty()) {
-            smppi_controller::msg::MppiTrajectory msg;
+            smppi_cuda_controller::msg::MppiTrajectory msg;
             msg.header.stamp = this->now();
             msg.header.frame_id = "map";
 
@@ -517,7 +524,7 @@ private:
     rclcpp::Publisher<ackermann_msgs::msg::AckermannDriveStamped>::SharedPtr drive_pub_;
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr vis_pub_;
     // [추가] 커스텀 메시지 퍼블리셔 포인터
-    rclcpp::Publisher<smppi_controller::msg::MppiTrajectory>::SharedPtr traj_pub_;
+    rclcpp::Publisher<smppi_cuda_controller::msg::MppiTrajectory>::SharedPtr traj_pub_;
     
     rclcpp::TimerBase::SharedPtr timer_;
     

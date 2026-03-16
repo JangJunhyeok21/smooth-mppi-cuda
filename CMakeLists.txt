@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.8)
-project(smppi_controller)
+project(smppi_cuda_controller)
 
 # [수정 1] GPU 연산 속도를 위해 반드시 Release 모드 사용
 set(CMAKE_BUILD_TYPE Release) 

@@ -7,11 +7,11 @@ import os
 
 
 def generate_launch_description():
-    map_name = "icra2025"
+    map_name = "map1"
     is_simulation = True
 
     default_param_file = os.path.join(
-        get_package_share_directory("cuda_mppi_controller"),
+        get_package_share_directory("smppi_cuda_controller"),
         "config",
         "params.yaml",
     )
@@ -20,7 +20,7 @@ def generate_launch_description():
 
     # 데이터 경로
     data_dir = os.path.join(
-        get_package_share_directory("cuda_mppi_controller"),
+        get_package_share_directory("smppi_cuda_controller"),
         "data",
         map_name,
     )
@@ -49,7 +49,7 @@ def generate_launch_description():
             ),
             # Path Publisher 노드
             Node(
-                package="cuda_mppi_controller",
+                package="smppi_cuda_controller",
                 executable="path_publisher",
                 name="path_publisher",
                 output="screen",
@@ -61,9 +61,9 @@ def generate_launch_description():
             ),
             # MPPI Controller 노드
             Node(
-                package="cuda_mppi_controller",
-                executable="cuda_mppi_node",
-                name="cuda_mppi_controller",
+                package="smppi_cuda_controller",
+                executable="smppi_node",
+                name="smppi_controller",
                 output="screen",
                 parameters=[param_file, controller_overrides],
             ),

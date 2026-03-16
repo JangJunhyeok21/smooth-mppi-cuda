@@ -56,6 +56,7 @@ struct Params {
     float q_du;
     float q_steer;
     float q_collision;
+    float q_lat_g;
     float collision_radius;
     
     // Noise & Tuning

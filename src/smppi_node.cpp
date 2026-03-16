@@ -138,12 +138,12 @@ private:
         float steer_rate_cost = mppi_params_.q_du * 2.0f * (d_steer * d_steer);
         float accel_rate_cost = mppi_params_.q_du * std::fabs(d_accel);
         float steer_cost = mppi_params_.q_steer * (u.steer * u.steer);
-        
+
         float lat_g_cost = 0.0f;
         float ay_abs = fabsf(s.ay);
         if (ay_abs >= 9.5f) {
             float excess = ay_abs - 9.5f;
-            lat_g_cost = mppi_params_.q_lat_g * (expf(-4.0f * excess));
+            lat_g_cost = mppi_params_.q_lat_g * (expf(-3.0f * excess));
         }
 
         float min_bnd_dist = compute_min_boundary_distance(s, local_path_idx);

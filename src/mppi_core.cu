@@ -136,7 +136,7 @@ namespace mppi
         float ay_abs = fabsf(s.ay);
         if (ay_abs >= 9.5f) {
             float excess = ay_abs - 9.5f;
-            lat_g_cost = p.q_lat_g * (__expf(-4.0f * excess));
+            lat_g_cost = p.q_lat_g * (__expf(-3.0f * excess));
         }
         
         // 5. Boundary Collision Cost (원형 그릇 형태 적용)
@@ -151,7 +151,7 @@ namespace mppi
 
             // (2) 충돌 방어벽 (Hard Barrier): 물리적 충돌 반경 근접 시 기존의 절벽 비용 부과
             float hard_cost = 0.0f;
-            if (min_bnd_dist < p.collision_radius * 1.2f) {
+            if (min_bnd_dist < p.collision_radius * 1.5f) {
                 float diff = min_bnd_dist - p.collision_radius;
                 float capped = fminf(diff, 1.0e-5f);
                 hard_cost = p.q_collision * logf(1.0f + __expf(-40.0f * capped));
@@ -278,7 +278,7 @@ namespace mppi
             controls[idx] = u_clamped; 
 
             // 하드 제약: 횡가속도 초과 시 후보군에서 완전 제외
-            if(fabsf(x.ay) > 9.8f){
+            if(fabsf(x.ay) > 60.0f){
                 is_fault = true;
             }
 
@@ -295,15 +295,15 @@ namespace mppi
                 is_fault = true;
             }
 
-            if (is_fault) {
-                total_cost = 1.0e7f;
-                const Control zero_control = {0.0f, 0.0f};
-                for (int fill_t = t + 1; fill_t < T; ++fill_t) {
-                    states[k * T + fill_t] = x;
-                    controls[k * T + fill_t] = zero_control;
-                }
-                break;
-            }
+            // if (is_fault) {
+            //     total_cost = 1.0e7f;
+            //     const Control zero_control = {0.0f, 0.0f};
+            //     for (int fill_t = t + 1; fill_t < T; ++fill_t) {
+            //         states[k * T + fill_t] = x;
+            //         controls[k * T + fill_t] = zero_control;
+            //     }
+            //     break;
+            // }
 
             if (path_len > 0)
             {

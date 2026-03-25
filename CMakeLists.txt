@@ -10,6 +10,8 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_CUDA_STANDARD 14)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 set(CMAKE_CUDA_EXTENSIONS OFF)
+# 현재 빌드 환경(랩탑)의 GPU 아키텍처를 자동 감지하여 컴파일
+set(CMAKE_CUDA_ARCHITECTURES "native")
 
 # CUDA 언어 활성화
 enable_language(CUDA)

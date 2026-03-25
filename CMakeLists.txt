@@ -31,7 +31,7 @@ find_package(rosidl_default_generators REQUIRED)
 find_package(std_msgs REQUIRED)
 
 # CUDA 라이브러리 찾기
-find_package(CUDA REQUIRED)
+find_package(CUDAToolkit REQUIRED)
 
 # 라이브러리 생성 (.cpp 대신 .cu 포함)
 add_library(smppi_lib

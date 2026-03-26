@@ -7,7 +7,6 @@
 #include "geometry_msgs/msg/point.hpp"
 #include "geometry_msgs/msg/pose_stamped.hpp"
 #include "cuda_mppi_controller/cuda_mppi_core.hpp"
-// [추가] 커스텀 메시지 헤더 포함
 #include "smppi_cuda_controller/msg/mppi_trajectory.hpp"
 #include <algorithm>
 #include <cmath>
@@ -24,21 +23,19 @@ public:
 
         drive_pub_ = this->create_publisher<ackermann_msgs::msg::AckermannDriveStamped>(drive_topic_, 10);
         vis_pub_ = this->create_publisher<visualization_msgs::msg::MarkerArray>("/mppi_viz", 50);
-        
-        // [추가] MPPI 최적 궤적 퍼블리셔 초기화
         traj_pub_ = this->create_publisher<smppi_cuda_controller::msg::MppiTrajectory>("/mppi_optimal_trajectory", 10);
 
         path_sub_ = this->create_subscription<nav_msgs::msg::Path>(
             path_topic_, 1, std::bind(&MPPINode::path_callback, this, std::placeholders::_1));
         
-        // 시뮬레이터와 동일한 QoS(Transient Local) 설정
         auto qos = rclcpp::QoS(rclcpp::KeepLast(1)).reliable().transient_local();
 
+        // 🚨 바운더리 토픽 이름 변경
         left_bnd_sub_ = this->create_subscription<nav_msgs::msg::Path>(
-            "/left_boundary", qos, std::bind(&MPPINode::left_bnd_callback, this, std::placeholders::_1));
+            "/mppi_left_boundary", qos, std::bind(&MPPINode::left_bnd_callback, this, std::placeholders::_1));
             
         right_bnd_sub_ = this->create_subscription<nav_msgs::msg::Path>(
-            "/right_boundary", qos, std::bind(&MPPINode::right_bnd_callback, this, std::placeholders::_1));
+            "/mppi_right_boundary", qos, std::bind(&MPPINode::right_bnd_callback, this, std::placeholders::_1));
 
         if (use_mcl_pose_) {
             pose_sub_ = this->create_subscription<geometry_msgs::msg::PoseStamped>(
@@ -94,7 +91,6 @@ private:
         int nearest_idx = 0;
         float min_dist_sq = 1e9f;
 
-        // 제어기(mppi_core.cu)의 CPU 단 전역 탐색과 완전히 동일한 알고리즘
         for (int i = 0; i < path_len; ++i) {
             float dx = s.x - ref_path_xs_[i];
             float dy = s.y - ref_path_ys_[i];
@@ -123,15 +119,17 @@ private:
         const auto &u = optimal_controls[t_idx];
         const auto &u_prev = (t_idx == 0) ? optimal_controls[0] : optimal_controls[t_idx - 1];
 
-        // 차량의 상태(s)를 기준으로 전체 맵에서 가장 가까운 인덱스 추출
         int local_path_idx = update_nearest_index(s);
 
         float dx = s.x - ref_path_xs_[local_path_idx];
         float dy = s.y - ref_path_ys_[local_path_idx];
         float dist_error = dx * dx + dy * dy;
 
-        // GPU에서 사용하는 것과 완벽히 동일한 인덱스의 yaw 값 참조
-        float vel_cost = -mppi_params_.q_v * (s.v * std::cos(s.yaw - ref_path_yaws_[local_path_idx]));
+        float overspeed_cost = 0.0f;
+        float speed_error = s.v - ref_path_vs_[local_path_idx];
+        if(speed_error > 0.0f) {
+            overspeed_cost = mppi_params_.q_v * (speed_error * speed_error);
+        }
 
         float d_steer = u.steer - u_prev.steer;
         float d_accel = u.accel - u_prev.accel;
@@ -147,7 +145,6 @@ private:
         }
 
         float min_bnd_dist = compute_min_boundary_distance(s, local_path_idx);
-        // 기존 boundary_cost 계산 코드 삭제 후 아래로 교체
         float boundary_cost = 0.0f;
         float safe_dist = mppi_params_.collision_radius + 0.4f;
 
@@ -165,7 +162,7 @@ private:
         }
 
         msg.dist_cost= mppi_params_.q_dist * dist_error;
-        msg.vel_cost = vel_cost;
+        msg.vel_cost = overspeed_cost; 
         msg.steer_rate_cost = steer_rate_cost;
         msg.accel_rate_cost = accel_rate_cost;
         msg.steer_cost = steer_cost;
@@ -176,62 +173,35 @@ private:
     }
 
     void load_parameters() {
-        this->declare_parameter("max_steer", 0.507);
-        mppi_params_.max_steer = this->get_parameter("max_steer").as_double();
+        this->declare_parameter("max_steer", 0.507); mppi_params_.max_steer = this->get_parameter("max_steer").as_double();
+        this->declare_parameter("min_accel", -9.0); mppi_params_.min_accel = this->get_parameter("min_accel").as_double();
+        this->declare_parameter("max_accel", 9.0); mppi_params_.max_accel = this->get_parameter("max_accel").as_double();
+        this->declare_parameter("min_speed", 0.0); mppi_params_.min_speed = this->get_parameter("min_speed").as_double();
+        this->declare_parameter("target_speed", 6.0); mppi_params_.target_speed = this->get_parameter("target_speed").as_double();
+        this->declare_parameter("max_speed", 10.0); mppi_params_.max_speed = this->get_parameter("max_speed").as_double();
         
-        this->declare_parameter("min_accel", -9.0);
-        mppi_params_.min_accel = this->get_parameter("min_accel").as_double();
+        this->declare_parameter("q_dist", 1.5); mppi_params_.q_dist = this->get_parameter("q_dist").as_double();
+        this->declare_parameter("q_v", 2.0); mppi_params_.q_v = this->get_parameter("q_v").as_double();
+        this->declare_parameter("q_du", 0.8); mppi_params_.q_du = this->get_parameter("q_du").as_double();
+        this->declare_parameter("q_steer", 0.3); mppi_params_.q_steer = this->get_parameter("q_steer").as_double();
+        this->declare_parameter("q_collision", 400.0); mppi_params_.q_collision = this->get_parameter("q_collision").as_double();
+        this->declare_parameter("q_lat_g", 200.0); mppi_params_.q_lat_g = this->get_parameter("q_lat_g").as_double();
+        this->declare_parameter("collision_radius", 0.28); mppi_params_.collision_radius = this->get_parameter("collision_radius").as_double();
         
-        this->declare_parameter("max_accel", 9.0);
-        mppi_params_.max_accel = this->get_parameter("max_accel").as_double();
+        this->declare_parameter("car_radius", 0.15); mppi_params_.car_radius = this->get_parameter("car_radius").as_double();
+        this->declare_parameter("q_obs", 50.0); mppi_params_.q_obs = this->get_parameter("q_obs").as_double();
         
-        this->declare_parameter("min_speed", 0.0);
-        mppi_params_.min_speed = this->get_parameter("min_speed").as_double();
-        
-        this->declare_parameter("target_speed", 6.0);
-        mppi_params_.target_speed = this->get_parameter("target_speed").as_double();
-        
-        this->declare_parameter("max_speed", 10.0);
-        mppi_params_.max_speed = this->get_parameter("max_speed").as_double();
-        
-        this->declare_parameter("q_dist", 1.5);
-        mppi_params_.q_dist = this->get_parameter("q_dist").as_double();
-        this->declare_parameter("q_v", 2.0);
-        mppi_params_.q_v = this->get_parameter("q_v").as_double();
-        this->declare_parameter("q_du", 0.8);
-        mppi_params_.q_du = this->get_parameter("q_du").as_double();
-        this->declare_parameter("q_steer", 0.3);
-        mppi_params_.q_steer = this->get_parameter("q_steer").as_double();
-        this->declare_parameter("q_collision", 400.0);
-        mppi_params_.q_collision = this->get_parameter("q_collision").as_double();
-        this->declare_parameter("q_lat_g", 200.0);
-        mppi_params_.q_lat_g = this->get_parameter("q_lat_g").as_double();
-        this->declare_parameter("collision_radius", 0.28);
-        mppi_params_.collision_radius = this->get_parameter("collision_radius").as_double();
-        
-        this->declare_parameter("noise_steer_std", 0.4);
-        mppi_params_.noise_steer_std = this->get_parameter("noise_steer_std").as_double();
-        this->declare_parameter("noise_accel_std", 2.0); 
-        mppi_params_.noise_accel_std = this->get_parameter("noise_accel_std").as_double();
-        
-        this->declare_parameter("max_steer_rate", 4.0); 
-        mppi_params_.max_steer_rate = this->get_parameter("max_steer_rate").as_double();
-        this->declare_parameter("max_accel_rate", 1000.0); 
-        mppi_params_.max_accel_rate = this->get_parameter("max_accel_rate").as_double();
+        this->declare_parameter("noise_steer_std", 0.4); mppi_params_.noise_steer_std = this->get_parameter("noise_steer_std").as_double();
+        this->declare_parameter("noise_accel_std", 2.0); mppi_params_.noise_accel_std = this->get_parameter("noise_accel_std").as_double();
+        this->declare_parameter("max_steer_rate", 4.0); mppi_params_.max_steer_rate = this->get_parameter("max_steer_rate").as_double();
+        this->declare_parameter("max_accel_rate", 1000.0); mppi_params_.max_accel_rate = this->get_parameter("max_accel_rate").as_double();
+        this->declare_parameter("lambda", 10.0); mppi_params_.lambda = this->get_parameter("lambda").as_double();
+        this->declare_parameter("visualize_candidates", true); mppi_params_.visualize_candidates = this->get_parameter("visualize_candidates").as_bool();
 
-        this->declare_parameter("lambda", 10.0);
-        mppi_params_.lambda = this->get_parameter("lambda").as_double();
-        this->declare_parameter("visualize_candidates", true);
-        mppi_params_.visualize_candidates = this->get_parameter("visualize_candidates").as_bool();
-
-        this->declare_parameter("mass", 3.5);
-        mppi_params_.mass = this->get_parameter("mass").as_double();
-        this->declare_parameter("l_f", 0.17);
-        mppi_params_.l_f = this->get_parameter("l_f").as_double();
-        this->declare_parameter("l_r", 0.17);
-        mppi_params_.l_r = this->get_parameter("l_r").as_double();
-        this->declare_parameter("I_z", 0.07);
-        mppi_params_.I_z = this->get_parameter("I_z").as_double();
+        this->declare_parameter("mass", 3.5); mppi_params_.mass = this->get_parameter("mass").as_double();
+        this->declare_parameter("l_f", 0.17); mppi_params_.l_f = this->get_parameter("l_f").as_double();
+        this->declare_parameter("l_r", 0.17); mppi_params_.l_r = this->get_parameter("l_r").as_double();
+        this->declare_parameter("I_z", 0.07); mppi_params_.I_z = this->get_parameter("I_z").as_double();
         
         this->declare_parameter("B_f", 1.5); mppi_params_.B_f = this->get_parameter("B_f").as_double();
         this->declare_parameter("C_f", 1.5); mppi_params_.C_f = this->get_parameter("C_f").as_double();
@@ -241,23 +211,19 @@ private:
         this->declare_parameter("C_r", 1.5); mppi_params_.C_r = this->get_parameter("C_r").as_double();
         this->declare_parameter("D_r", 20.0); mppi_params_.D_r = this->get_parameter("D_r").as_double();
 
-        this->declare_parameter("odom_topic", "/odom0"); 
-        odom_topic_ = this->get_parameter("odom_topic").as_string();
-        this->declare_parameter("use_mcl_pose", false);
-        use_mcl_pose_ = this->get_parameter("use_mcl_pose").as_bool();
-        this->declare_parameter("pose_topic", "/mcl_pose");
-        pose_topic_ = this->get_parameter("pose_topic").as_string();
-        this->declare_parameter("velocity_topic", "/odom");
-        velocity_topic_ = this->get_parameter("velocity_topic").as_string();
-        this->declare_parameter("drive_topic", "/ackermann_cmd0");
-        drive_topic_ = this->get_parameter("drive_topic").as_string();
-        this->declare_parameter("path_topic", "/center_path");
-        path_topic_ = this->get_parameter("path_topic").as_string();      
-        if(use_mcl_pose_){  
-            mppi_params_.dt = 0.04;
-        } else {
-            mppi_params_.dt = 0.02;
-        }
+        this->declare_parameter("odom_topic", "/odom0"); odom_topic_ = this->get_parameter("odom_topic").as_string();
+        this->declare_parameter("use_mcl_pose", false); use_mcl_pose_ = this->get_parameter("use_mcl_pose").as_bool();
+        this->declare_parameter("pose_topic", "/mcl_pose"); pose_topic_ = this->get_parameter("pose_topic").as_string();
+        this->declare_parameter("velocity_topic", "/odom"); velocity_topic_ = this->get_parameter("velocity_topic").as_string();
+        this->declare_parameter("drive_topic", "/ackermann_cmd0"); drive_topic_ = this->get_parameter("drive_topic").as_string();
+        
+        // 🚨 타겟 경로 토픽 이름 변경
+        this->declare_parameter("path_topic", "/mppi_target_path"); path_topic_ = this->get_parameter("path_topic").as_string();      
+        
+        if(use_mcl_pose_){ mppi_params_.dt = 0.04; } 
+        else { mppi_params_.dt = 0.02; }
+
+        mppi_params_.num_obstacles = 0; 
     }
 
     void validate_parameters() {
@@ -266,8 +232,15 @@ private:
         if (mppi_params_.collision_radius < 0.0f) mppi_params_.collision_radius = std::abs(mppi_params_.collision_radius);
     }
 
+    // 🚨 단일 수신(Latch) 처리를 위한 플래그 추가
+    bool path_received_{false};
+    bool left_bnd_received_{false};
+    bool right_bnd_received_{false};
+
     void path_callback(const nav_msgs::msg::Path::SharedPtr msg) {
-        if (msg->poses.empty()) return;
+        // 이미 받았거나 비어있으면 무시 (GPU 병목 원천 차단)
+        if (path_received_ || msg->poses.empty()) return;
+        
         std::vector<float> xs, ys, yaws, vs;
         xs.reserve(msg->poses.size()); ys.reserve(msg->poses.size());
         yaws.reserve(msg->poses.size()); vs.reserve(msg->poses.size());
@@ -281,33 +254,45 @@ private:
             double qw = pose_stamped.pose.orientation.w;
             double yaw = atan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz));
             yaws.push_back((float)yaw);
-            vs.push_back(mppi_params_.target_speed);
+
+            float ref_v = (float)pose_stamped.pose.position.z;
+            if (ref_v <= 0.1f) ref_v = mppi_params_.target_speed; 
+            vs.push_back(ref_v);
         }
         
         ref_path_xs_ = xs;
         ref_path_ys_ = ys;
         ref_path_yaws_ = yaws;
+        ref_path_vs_ = vs; 
         
         solver_->set_reference_path(xs, ys, yaws, vs);
-        RCLCPP_INFO_ONCE(this->get_logger(), "Path Received: %zu points", xs.size());
+        RCLCPP_INFO_ONCE(this->get_logger(), "Path Received with Variable Velocity: %zu points", xs.size());
+        
+        path_received_ = true; // 수신 완료 플래그 켜기
     }
 
     void left_bnd_callback(const nav_msgs::msg::Path::SharedPtr msg) {
+        if (left_bnd_received_ || msg->poses.empty()) return;
+
         left_xs_.clear(); left_ys_.clear();
         for (const auto& p : msg->poses) {
             left_xs_.push_back(p.pose.position.x);
             left_ys_.push_back(p.pose.position.y);
         }
         update_boundaries();
+        left_bnd_received_ = true;
     }
 
     void right_bnd_callback(const nav_msgs::msg::Path::SharedPtr msg) {
+        if (right_bnd_received_ || msg->poses.empty()) return;
+
         right_xs_.clear(); right_ys_.clear();
         for (const auto& p : msg->poses) {
             right_xs_.push_back(p.pose.position.x);
             right_ys_.push_back(p.pose.position.y);
         }
         update_boundaries();
+        right_bnd_received_ = true;
     }
 
     void update_boundaries() {
@@ -374,7 +359,6 @@ private:
         
         auto start = std::chrono::high_resolution_clock::now();
 
-        // MPPI 실행
         mppi::Control u = solver_->solve(current_state_);
         
         ackermann_msgs::msg::AckermannDriveStamped drive_msg;
@@ -382,7 +366,6 @@ private:
         drive_msg.header.frame_id = "base_link";
         drive_msg.drive.steering_angle = u.steer;
         
-        // 최소 속도 제한: 후진 방지
         float next_v = current_state_.v + u.accel * mppi_params_.dt;
         if (next_v <= mppi_params_.min_speed) {
             u.accel = (mppi_params_.min_speed - current_state_.v) / mppi_params_.dt;
@@ -395,7 +378,6 @@ private:
         }
         drive_pub_->publish(drive_msg);
         
-        // [추가] 시각화 및 최적 궤적 데이터 퍼블리시
         publish_path_visualization();
         publish_mppi_trajectory();
 
@@ -408,7 +390,6 @@ private:
         }
     }
 
-    // [추가] 최적 호라이즌 데이터를 Custom Message로 퍼블리시하는 함수
     void publish_mppi_trajectory() {
         const auto& best_traj = solver_->get_best_trajectory();
         const auto& optimal_controls = solver_->get_optimal_controls();
@@ -420,7 +401,6 @@ private:
 
             int T = solver_->get_T();
             
-            // 데이터 삽입 속도 최적화를 위한 메모리 사전 할당
             msg.steer.reserve(T); 
             msg.accel.reserve(T);
 
@@ -447,7 +427,6 @@ private:
         int K = solver_->get_K();
         int T = solver_->get_T();
 
-        // 정상 궤적 (녹색)
         visualization_msgs::msg::Marker traj_marker;
         traj_marker.header.frame_id = "map";
         traj_marker.header.stamp = this->now();
@@ -480,7 +459,6 @@ private:
         }
         markers.markers.push_back(traj_marker);
         
-
         visualization_msgs::msg::Marker best_traj_marker;
         best_traj_marker.header.frame_id = "map";
         best_traj_marker.header.stamp = this->now();
@@ -511,7 +489,7 @@ private:
     mppi::State current_state_;
 
     std::vector<float> left_xs_, left_ys_, right_xs_, right_ys_;
-    std::vector<float> ref_path_xs_, ref_path_ys_, ref_path_yaws_;
+    std::vector<float> ref_path_xs_, ref_path_ys_, ref_path_yaws_, ref_path_vs_;
 
     rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr path_sub_;
     rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr left_bnd_sub_;
@@ -523,7 +501,6 @@ private:
     
     rclcpp::Publisher<ackermann_msgs::msg::AckermannDriveStamped>::SharedPtr drive_pub_;
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr vis_pub_;
-    // [추가] 커스텀 메시지 퍼블리셔 포인터
     rclcpp::Publisher<smppi_cuda_controller::msg::MppiTrajectory>::SharedPtr traj_pub_;
     
     rclcpp::TimerBase::SharedPtr timer_;

@@ -21,6 +21,8 @@
         } \
     } while (0)
 
+#define MAX_OBS 20 // 처리 가능한 최대 장애물 개수
+
 namespace mppi {
 
 struct alignas(16) State {
@@ -30,7 +32,7 @@ struct alignas(16) State {
     float v;
     float vy;
     float omega;
-    float ay; // odom_callback 용 추가
+    float ay; 
     float slip_angle;
 };
 
@@ -58,6 +60,13 @@ struct Params {
     float q_collision;
     float q_lat_g;
     float collision_radius;
+    
+    // Obstacle Avoidance Params
+    int num_obstacles;
+    float obs_x[MAX_OBS];
+    float obs_y[MAX_OBS];
+    float car_radius;
+    float q_obs;
     
     // Noise & Tuning
     float noise_steer_std;

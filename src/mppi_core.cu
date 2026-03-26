@@ -7,12 +7,11 @@
 
 namespace mppi
 {
-    // 호스트(CPU)와 디바이스(GPU)에서 각각 최적의 함수로 자동 분기되는 래퍼
     __host__ __device__ inline float fast_cos(float x) {
     #ifdef __CUDA_ARCH__
-        return __cosf(x); // GPU: SFU 하드웨어 명령어
+        return __cosf(x); 
     #else
-        return cosf(x); // CPU: C++ 표준 라이브러리
+        return cosf(x); 
     #endif
     }
 
@@ -121,17 +120,24 @@ namespace mppi
         // 1. Reference Tracking Cost
         float dist_error = min_dist_sq;
 
-        float vel_cost = 0.0f;
-        // 2. 빠른 속도 보상
-        vel_cost = -p.q_v * (s.v*__cosf(s.yaw - ref_yaws[nearest_idx]));
+        // 2. 공격적 속도 보상 (무조건 빠르게 가도록 유도하여 거북이 주행 방지)
+        float vel_cost = -p.q_v * (s.v * fast_cos(s.yaw - ref_yaws[nearest_idx]));
 
-        // 3. Control Input Cost
+        // 3. 오버스피드 방지 패널티 (곡률 기반 한계 속도인 ref_vs를 넘었을 때만 브레이크 강제)
+        float overspeed_cost = 0.0f;
+        if (s.v > ref_vs[nearest_idx]) {
+            float excess = s.v - ref_vs[nearest_idx];
+            overspeed_cost = p.q_v * 20.0f * (excess * excess); // 20.0f는 브레이킹 강도 튜닝 계수
+        }
+
+        // 4. Control Input Cost
         float d_steer = u.steer - u_prev.steer;
         float d_accel = u.accel - u_prev.accel;
         float steer_rate_cost = p.q_du * 2.0f * (d_steer * d_steer);
         float accel_rate_cost = p.q_du * fabsf(d_accel);
         float steer_cost = p.q_steer * (u.steer * u.steer);
 
+        // 5. Lateral G / Slip Cost
         float lat_g_cost = 0.0f;
         float ay_abs = fabsf(s.ay);
         if (ay_abs >= 9.5f) {
@@ -139,17 +145,14 @@ namespace mppi
             lat_g_cost = p.q_lat_g * (__expf(-4.0f * excess));
         }
         
-        // 5. Boundary Collision Cost (원형 그릇 형태 적용)
+        // 6. Boundary Collision Cost
         float boundary_cost = 0.0f;
-        // 여유 공간 설정: 물리적 충돌 반경 + 0.4m (트랙 폭에 따라 튜닝 필요)
         float safe_dist = p.collision_radius + 0.4f;
 
         if (min_bnd_dist < safe_dist) {
-            // (1) 부드러운 벽면 (Soft Bowl Margin): 거리가 가까워질수록 2차 함수로 비용 증가
             float penetration = safe_dist - min_bnd_dist;
-            float soft_cost = 150.0f * (penetration * penetration); // 150.0f는 튜닝 계수
+            float soft_cost = 150.0f * (penetration * penetration); 
 
-            // (2) 충돌 방어벽 (Hard Barrier): 물리적 충돌 반경 근접 시 기존의 절벽 비용 부과
             float hard_cost = 0.0f;
             if (min_bnd_dist < p.collision_radius * 1.2f) {
                 float diff = min_bnd_dist - p.collision_radius;
@@ -159,10 +162,22 @@ namespace mppi
 
             boundary_cost = soft_cost + hard_cost;
         }
-        return p.q_dist * dist_error + vel_cost + steer_rate_cost + accel_rate_cost + steer_cost + lat_g_cost + boundary_cost;
+
+        // 7. Obstacle Cost
+        float obs_cost = 0.0f;
+        for (int i = 0; i < p.num_obstacles; ++i) {
+            float dx = s.x - p.obs_x[i];
+            float dy = s.y - p.obs_y[i];
+            float dist = sqrtf(dx * dx + dy * dy);
+            float safe_margin = 1.5f; 
+            if (dist < safe_margin) {
+                obs_cost += p.q_obs / (dist - p.car_radius + 1e-3f); 
+            }
+        }
+
+        return p.q_dist * dist_error + vel_cost + overspeed_cost + steer_rate_cost + accel_rate_cost + steer_cost + lat_g_cost + boundary_cost + obs_cost;
     }
     
-    // O(1) 윈도우 기반 바운더리 거리 계산
     __device__ float compute_min_boundary_distance(
         const State &s,
         const float *left_xs, const float *left_ys,
@@ -174,9 +189,8 @@ namespace mppi
 
         float min_dist_sq = 1e9f;
         
-        // 탐색 창(Window) 확장: 뒤로 30, 앞으로 150칸을 확인
         int search_window = 30; 
-        int start_search = current_path_idx -5;
+        int start_search = current_path_idx - 5;
         
         if (start_search < 0) start_search += bnd_len; 
 
@@ -223,9 +237,9 @@ namespace mppi
         Control current_action = prev_controls[0]; 
         Control last_u = current_action;
         int local_path_idx = start_path_idx;
-        float steer_noise_state = 0.0f; 
-        float accel_noise_state = 0.0f;
+        int initial_path_idx = start_path_idx; 
         bool is_fault = false;
+
         for (int t = 0; t < T; ++t)
         {
             int idx = k * T + t;
@@ -233,39 +247,18 @@ namespace mppi
             Control u_mean_curr = prev_controls[t];
             Control u_mean_prev = (t == 0) ? prev_controls[0] : prev_controls[t-1];
             
-            // 1. Mean Trajectory의 '틱당 변화량(Delta)' 산출
-            float mean_delta_steer = u_mean_curr.steer - u_mean_prev.steer;  // [rad]
-            float mean_delta_accel = u_mean_curr.accel - u_mean_prev.accel;  // [m/s^2]
+            float mean_delta_steer = u_mean_curr.steer - u_mean_prev.steer;  
+            float mean_delta_accel = u_mean_curr.accel - u_mean_prev.accel;  
 
-            // 2. 파라미터(시간 단위)에 dt를 곱해 '틱당 노이즈 변화량(Delta)' 산출
-            float noise_delta_steer = curand_normal(&rng_states[idx]) * p.noise_steer_std * p.dt;   // [rad]
-            float noise_delta_accel = curand_normal(&rng_states[idx]) * p.noise_accel_std * p.dt;   // [m/s^2]
+            float noise_delta_steer = curand_normal(&rng_states[idx]) * p.noise_steer_std * p.dt;   
+            float noise_delta_accel = curand_normal(&rng_states[idx]) * p.noise_accel_std * p.dt;   
 
-            // 3. 물리적 모터/구동계 한계(rate * dt)를 적용하여 클램핑 후 적분(+=)
             current_action.steer += fminf(fmaxf(mean_delta_steer + noise_delta_steer, -p.max_steer_rate * p.dt), p.max_steer_rate * p.dt);    
             current_action.accel += fminf(fmaxf(mean_delta_accel + noise_delta_accel, -p.max_accel_rate * p.dt), p.max_accel_rate * p.dt);
 
-
-            // // ========OU Process SMPPI 노이즈 적용 방식========
-            // // 1. OU Process 기반 Colored Noise 생성 (핵심)
-            // // theta 값이 1.0에 가까울수록 이전 노이즈 성향을 강하게 유지(관성)하여 
-            // // 슬라럼을 위한 크고 굵은 조향 궤적을 탐색해 냅니다. (보통 0.8 ~ 0.9 권장)
-            // float raw_steer_noise = curand_normal(&rng_states[idx]) * p.noise_steer_std * p.dt;
-            // float raw_accel_noise = curand_normal(&rng_states[idx]) * p.noise_accel_std * p.dt;
-            
-            // steer_noise_state = 0.9f * steer_noise_state + (1.0f - 0.9f) * raw_steer_noise;
-            // accel_noise_state = 0.9f * accel_noise_state + (1.0f - 0.9f) * raw_accel_noise;
-
-            // // 3. Rate Limit 적용 및 누적
-            // current_action.steer += fminf(fmaxf(mean_delta_steer + steer_noise_state, -p.max_steer_rate * p.dt), p.max_steer_rate * p.dt);    
-            // current_action.accel += fminf(fmaxf(mean_delta_accel + accel_noise_state, -p.max_accel_rate * p.dt), p.max_accel_rate * p.dt);
-
-
-            // 4. 절대 제어값 한계 적용
             Control u_clamped = current_action;
             u_clamped.steer = fminf(fmaxf(u_clamped.steer, -p.max_steer), p.max_steer);
             
-            // 5. 속도 제한 적용
             float v_next = x.v + u_clamped.accel * p.dt;
             if (v_next >= p.max_speed && u_clamped.accel > 0.0f) u_clamped.accel = 0.0;
             else if (v_next <= p.min_speed + 0.1f && u_clamped.accel < 0.0f) u_clamped.accel = 0.0;
@@ -277,26 +270,32 @@ namespace mppi
             states[idx] = x;
             controls[idx] = u_clamped; 
 
-            // 하드 제약: 횡가속도 초과 시 후보군에서 완전 제외
             if(fabsf(x.ay) > 9.8f){
                 is_fault = true;
             }
 
-            // if(fabsf(x.slip_angle) > 0.2f){ // 슬립각 0.2rad 이상 시 제약 위반으로 간주
-            //     is_fault = true;
-            // }
-
-            // 바운더리 기반 최소 거리 확인
             float min_dist = compute_min_boundary_distance(
                 x, left_bnd_xs, left_bnd_ys, right_bnd_xs, right_bnd_ys, bnd_len, local_path_idx);
             
-            // 하드 제약: 충돌 감지 시 후보군에서 완전 제외
             if (min_dist < p.collision_radius) {
                 is_fault = true;
             }
 
+            // 🚨 핵심 수정부 1: 생존 비례 보상 (수학적 붕괴 방지)
             if (is_fault) {
-                total_cost = 1.0e7f;
+                // 기본 패널티를 10000으로 낮추고, 오래 버틸수록 패널티를 50씩 대폭 깎아줍니다.
+                // 이로 인해 어차피 박을 상황이면 풀브레이킹+조향으로 1틱이라도 더 버티는 샘플의 가중치가 높아집니다.
+                total_cost += 10000.0f - (float)t * 50.0f; 
+                
+                // 충돌했더라도, 그때까지 더 멀리 전진했다면 보상을 줍니다.
+                if (path_len > 0) {
+                    int progress = local_path_idx - initial_path_idx;
+                    if (progress < -path_len / 2) progress += path_len; 
+                    int max_possible_progress = T + 10; 
+                    progress = max(0, min(progress, max_possible_progress));
+                    total_cost -= p.q_v * (float)progress * 5.0f; 
+                }
+
                 const Control zero_control = {0.0f, 0.0f};
                 for (int fill_t = t + 1; fill_t < T; ++fill_t) {
                     states[k * T + fill_t] = x;
@@ -311,6 +310,17 @@ namespace mppi
                     x, ref_xs, ref_ys, ref_yaws, ref_vs, path_len,
                     u_clamped, last_u, p, min_dist, &local_path_idx); 
             }
+
+            // 🚨 핵심 수정부 2: 종점 진행도 강력 보상 (속도 향상 유도)
+            if (t == T - 1 && path_len > 0) {
+                int progress = local_path_idx - initial_path_idx;
+                if (progress < -path_len / 2) progress += path_len; 
+                int max_possible_progress = T + 10; 
+                progress = max(0, min(progress, max_possible_progress));
+                // 무사히 완주한 경우 진행 칸수에 비례해 엄청난 보상을 주어 공격적 가속을 유도
+                total_cost -= p.q_v * (float)progress * 10.0f; 
+            }
+
             last_u = u_clamped;
         }
         costs[k] = total_cost;
@@ -336,7 +346,6 @@ namespace mppi
         CUDA_CHECK(cudaMalloc(&d_costs_, K_ * sizeof(float)));
         CUDA_CHECK(cudaMalloc(&d_rng_states_, K_ * T_ * sizeof(curandState)));
         
-        // 메모리 한계 확장: 최대 10000개 포인트 처리 가능
         int max_path = 10000;
         CUDA_CHECK(cudaMalloc(&d_ref_xs_, max_path * sizeof(float)));
         CUDA_CHECK(cudaMalloc(&d_ref_ys_, max_path * sizeof(float)));
@@ -368,7 +377,7 @@ namespace mppi
                                         const std::vector<float> &yaws, const std::vector<float> &vs) {
         h_ref_xs_ = xs; h_ref_ys_ = ys; 
         ref_path_len_ = xs.size();
-        if (ref_path_len_ > 10000) ref_path_len_ = 10000; // 메모리 제한 10000 적용
+        if (ref_path_len_ > 10000) ref_path_len_ = 10000; 
         if (ref_path_len_ > 0) {
             CUDA_CHECK(cudaMemcpy(d_ref_xs_, xs.data(), ref_path_len_ * sizeof(float), cudaMemcpyHostToDevice));
             CUDA_CHECK(cudaMemcpy(d_ref_ys_, ys.data(), ref_path_len_ * sizeof(float), cudaMemcpyHostToDevice));
@@ -380,7 +389,7 @@ namespace mppi
     void MPPISolver::set_boundaries(const std::vector<float>& left_xs, const std::vector<float>& left_ys,
                                     const std::vector<float>& right_xs, const std::vector<float>& right_ys) {
         bnd_len_ = left_xs.size();
-        if (bnd_len_ > 10000) bnd_len_ = 10000; // 메모리 제한 10000 적용
+        if (bnd_len_ > 10000) bnd_len_ = 10000; 
         if (bnd_len_ > 0) {
             CUDA_CHECK(cudaMemcpy(d_left_bnd_xs_, left_xs.data(), bnd_len_ * sizeof(float), cudaMemcpyHostToDevice));
             CUDA_CHECK(cudaMemcpy(d_left_bnd_ys_, left_ys.data(), bnd_len_ * sizeof(float), cudaMemcpyHostToDevice));
@@ -438,7 +447,7 @@ namespace mppi
         float lambda = params_.lambda; 
         float sum_weights = 0.0f;
         for (int k = 0; k < K_; ++k) {
-            if (std::isinf(h_costs_[k]) || h_costs_[k] >= 1.0e6f) {
+            if (std::isinf(h_costs_[k])) {
                 h_weights_[k] = 0.0f; 
             } else {
                 h_weights_[k] = fast_exp(-(h_costs_[k] - min_cost) / lambda);
@@ -463,9 +472,8 @@ namespace mppi
         for (int t = 0; t < T_ - 1; ++t) h_prev_controls_[t] = weighted_controls[t + 1];
         h_prev_controls_[T_ - 1] = weighted_controls[T_ - 1];
 
-        // 가중 평균된 제어로 예상 궤적을 적분
         best_trajectory_.resize(T_);
-        State sim_state = current_state; // 현재 상태에서 출발
+        State sim_state = current_state; 
 
         for (int t = 0; t < T_; ++t) {
             sim_state = update_dynamics(sim_state, weighted_controls[t], params_);

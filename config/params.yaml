@@ -1,9 +1,5 @@
 cuda_mppi_controller:
   ros__parameters:
-    # 단일 통합 설정 파일
-    # - 시뮬레이션/실차 분기는 launch/cuda_mppi.launch.py 의 is_simulation 값으로 처리
-    # - 여기 값은 공통 기본값이며 필요 시 launch의 override가 우선 적용됨
-
     # --- Limits ---
     max_steer: 0.507        # rad
     min_accel: -9.0         # m/s^2
@@ -21,11 +17,15 @@ cuda_mppi_controller:
     q_lat_g: 200.0
     collision_radius: 0.3
     
+    # --- Obstacle Avoidance Params ---
+    car_radius: 0.15
+    q_obs: 50.0
+    
     # --- Noise & Tuning ---
-    noise_steer_std: 0.4  # rad/s
-    noise_accel_std: 2.0  # m/s^2
-    max_steer_rate: 4.0   # rad/s
-    max_accel_rate: 1000.0   # m/s^3
+    noise_steer_std: 0.4    # rad/s
+    noise_accel_std: 2.0    # m/s^2
+    max_steer_rate: 4.0     # rad/s
+    max_accel_rate: 1000.0  # m/s^3
     lambda: 15.0
     visualize_candidates: true
     
@@ -44,10 +44,10 @@ cuda_mppi_controller:
     C_r: 1.5
     D_r: 28.0
 
-    # --- Topics (공통 키, launch에서 환경별 override) ---
+    # --- Topics (공통 키) ---
     odom_topic: /odom0
     pose_topic: /mcl_pose
     velocity_topic: /odom
     drive_topic: /ackermann_cmd0
-    path_topic: /center_path
+    path_topic: /mppi_target_path
     use_mcl_pose: false

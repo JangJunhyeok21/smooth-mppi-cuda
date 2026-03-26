@@ -16,10 +16,19 @@ public:
         declare_parameter<std::string>("csv_file_path", "");
         declare_parameter<std::string>("frame_id", "map");
         declare_parameter<double>("publish_rate", 10.0);
+        
+        declare_parameter<double>("max_speed", 10.0);   
+        declare_parameter<double>("max_lat_g", 14.0);   
+        declare_parameter<double>("max_decel", 8.0);    
+        declare_parameter<double>("max_accel", 6.0);    
 
         get_parameter("csv_file_path", csv_path_);
         get_parameter("frame_id", frame_id_);
         get_parameter("publish_rate", publish_rate_);
+        get_parameter("max_speed", max_speed_);
+        get_parameter("max_lat_g", max_lat_g_);
+        get_parameter("max_decel", max_decel_);
+        get_parameter("max_accel", max_accel_);
 
         if (csv_path_.empty()) {
             RCLCPP_WARN(get_logger(), "csv_file_path not set, using default");
@@ -27,9 +36,10 @@ public:
         }
 
         auto qos = rclcpp::QoS(rclcpp::KeepLast(1)).reliable().transient_local();
-        path_center_pub_ = create_publisher<nav_msgs::msg::Path>("/center_path", qos);
-        path_left_pub_ = create_publisher<nav_msgs::msg::Path>("/left_boundary", qos);
-        path_right_pub_ = create_publisher<nav_msgs::msg::Path>("/right_boundary", qos);
+        // 🚨 토픽 이름 분리 (시뮬레이터 충돌 방지)
+        path_center_pub_ = create_publisher<nav_msgs::msg::Path>("/mppi_target_path", qos);
+        path_left_pub_ = create_publisher<nav_msgs::msg::Path>("/mppi_left_boundary", qos);
+        path_right_pub_ = create_publisher<nav_msgs::msg::Path>("/mppi_right_boundary", qos);
 
         timer_ = create_wall_timer(
             std::chrono::milliseconds((int)(1000.0 / publish_rate_)),
@@ -51,7 +61,6 @@ private:
         std::string line;
         std::vector<std::string> headers;
         
-        // 헤더 파싱
         if (!std::getline(file, line)) {
             RCLCPP_WARN(get_logger(), "CSV file is empty");
             return;
@@ -63,7 +72,6 @@ private:
             std::transform(h.begin(), h.end(), h.begin(), ::tolower);
         }
 
-        // 컬럼 인덱스 찾기
         int ix = findColumn(headers, {"x_m", "x", "x_map"});
         int iy = findColumn(headers, {"y_m", "y", "y_map"});
         int ipsi = findColumn(headers, {"psi_rad", "psi", "yaw", "heading_rad"});
@@ -78,13 +86,11 @@ private:
 
         std::vector<double> xs, ys, psis, lefts, rights;
 
-        // 데이터 파싱
         while (std::getline(file, line)) {
             line = trim(line);
             if (line.empty() || line[0] == '#') continue;
 
             auto cols = splitCSV(line);
-            
             double x, y, psi = 0.0, left = 0.0, right = 0.0;
             
             if (!tryParse(cols, ix, x) || !tryParse(cols, iy, y)) continue;
@@ -105,7 +111,6 @@ private:
             return;
         }
 
-        // yaw 계산 (CSV에 없는 경우)
         if(ipsi < 0){
             for (size_t i = 0; i < xs.size(); ++i) {
                 if (i == 0 && xs.size() > 1) {
@@ -125,7 +130,6 @@ private:
             }
         }
 
-        // yaw unwrap (±π 점프 제거)
         for (size_t i = 1; i < psis.size(); ++i) {
             double diff = psis[i] - psis[i-1];
             while (diff > M_PI) diff -= 2*M_PI;
@@ -133,10 +137,69 @@ private:
             psis[i] = psis[i-1] + diff;
         }
 
-        // Path 생성
-        buildPath(xs, ys, psis, lefts, rights, path_center_, path_left_, path_right_);
+        std::vector<double> vs(xs.size(), 0.0);
+        generateVelocityProfile(xs, ys, psis, vs);
+
+        buildPath(xs, ys, psis, lefts, rights, vs, path_center_, path_left_, path_right_);
 
         RCLCPP_INFO(get_logger(), "Loaded %zu waypoints from %s", xs.size(), csv_path_.c_str());
+    }
+
+    void generateVelocityProfile(const std::vector<double>& xs, const std::vector<double>& ys, const std::vector<double>& psis, std::vector<double>& vs)
+    {
+        int N = xs.size();
+        std::vector<double> kappas(N, 0.0);
+
+        for (int i = 0; i < N; ++i) {
+            int next = (i + 1) % N;
+            double dx = xs[next] - xs[i];
+            double dy = ys[next] - ys[i];
+            double ds = std::hypot(dx, dy);
+
+            if (ds > 1e-6 && ds < 2.0) { 
+                double diff = psis[next] - psis[i];
+                while (diff > M_PI) diff -= 2*M_PI;
+                while (diff < -M_PI) diff += 2*M_PI;
+                kappas[i] = std::abs(diff / ds);
+            }
+        }
+
+        int window = 3;
+        std::vector<double> smooth_kappas(N, 0.0);
+        for(int i=0; i<N; ++i) {
+            double sum = 0;
+            for(int j=-window; j<=window; ++j) {
+                sum += kappas[(i + j + N) % N];
+            }
+            smooth_kappas[i] = sum / (2 * window + 1);
+        }
+
+        for (int i = 0; i < N; ++i) {
+            vs[i] = std::sqrt(max_lat_g_ / (smooth_kappas[i] + 1e-5));
+            if (vs[i] > max_speed_) vs[i] = max_speed_;
+        }
+
+        for (int iter = 0; iter < 2; ++iter) {
+            for (int i = N - 1; i >= 0; --i) {
+                int next = (i + 1) % N;
+                double ds = std::hypot(xs[next] - xs[i], ys[next] - ys[i]);
+                if (ds > 2.0) continue; 
+                
+                double v_allowable = std::sqrt(vs[next]*vs[next] + 2.0 * max_decel_ * ds);
+                if (v_allowable < vs[i]) vs[i] = v_allowable;
+            }
+        }
+
+        for (int iter = 0; iter < 2; ++iter) {
+            for (int i = 0; i < N; ++i) {
+                int prev = (i - 1 + N) % N;
+                double ds = std::hypot(xs[i] - xs[prev], ys[i] - ys[prev]);
+                if (ds > 2.0) continue; 
+                
+                double v_allowable = std::sqrt(vs[prev]*vs[prev] + 2.0 * max_accel_ * ds);
+                if (v_allowable < vs[i]) vs[i] = v_allowable;
+            }
+        }
     }
 
     void buildPath(
@@ -145,6 +208,7 @@ private:
         const std::vector<double> &psis,
         const std::vector<double> &lefts,
         const std::vector<double> &rights,
+        const std::vector<double> &vs,
         nav_msgs::msg::Path &pc,
         nav_msgs::msg::Path &pl,
         nav_msgs::msg::Path &pr)
@@ -159,22 +223,19 @@ private:
 
         for (size_t i = 0; i < xs.size(); ++i) {
             double psi = psis[i];
-            // 좌측 법선: (-sin(psi), cos(psi))
             double nx = -std::sin(psi);
             double ny = std::cos(psi);
 
-            // center
             geometry_msgs::msg::PoseStamped c;
             c.header.frame_id = frame_id_;
             c.pose.position.x = xs[i];
             c.pose.position.y = ys[i];
-            c.pose.position.z = 0.0;
+            c.pose.position.z = vs[i]; // Z축에 가변 목표 속도 전달
             double half_yaw = psi * 0.5;
             c.pose.orientation.z = std::sin(half_yaw);
             c.pose.orientation.w = std::cos(half_yaw);
             pc.poses.push_back(c);
 
-            // left boundary
             geometry_msgs::msg::PoseStamped l;
             l.header.frame_id = frame_id_;
             l.pose.position.x = xs[i] + nx * lefts[i];
@@ -183,7 +244,6 @@ private:
             l.pose.orientation = c.pose.orientation;
             pl.poses.push_back(l);
 
-            // right boundary
             geometry_msgs::msg::PoseStamped r;
             r.header.frame_id = frame_id_;
             r.pose.position.x = xs[i] - nx * rights[i];
@@ -208,15 +268,12 @@ private:
         path_right_pub_->publish(path_right_);
     }
 
-    // 유틸리티 함수들
     std::string trim(const std::string &s)
     {
         auto start = s.begin();
         while (start != s.end() && std::isspace(*start)) ++start;
-        
         auto end = s.end();
         do { --end; } while (std::distance(start, end) > 0 && std::isspace(*end));
-        
         return std::string(start, end + 1);
     }
 
@@ -255,7 +312,6 @@ private:
         }
     }
 
-    // 멤버
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_center_pub_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_left_pub_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_right_pub_;
@@ -263,6 +319,7 @@ private:
 
     std::string csv_path_, frame_id_;
     double publish_rate_;
+    double max_speed_, max_lat_g_, max_decel_, max_accel_;
 
     nav_msgs::msg::Path path_center_, path_left_, path_right_;
 };

@@ -37,7 +37,7 @@ def generate_launch_description():
             "use_mcl_pose": True,
             "pose_topic": "/mcl_pose",
             "velocity_topic": "/odom",
-            "drive_topic": "/ackermann_cmd",
+            "drive_topic": "/drive",
         }
     
     return LaunchDescription(

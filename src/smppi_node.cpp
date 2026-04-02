@@ -361,21 +361,22 @@ private:
 
         mppi::Control u = solver_->solve(current_state_);
         
-        ackermann_msgs::msg::AckermannDriveStamped drive_msg;
-        drive_msg.header.stamp = this->now();
-        drive_msg.header.frame_id = "base_link";
-        drive_msg.drive.steering_angle = u.steer;
-        
         float next_v = current_state_.v + u.accel * mppi_params_.dt;
         if (next_v <= mppi_params_.min_speed) {
             u.accel = (mppi_params_.min_speed - current_state_.v) / mppi_params_.dt;
             next_v = mppi_params_.min_speed;
+        }else if (next_v >= mppi_params_.max_speed) {
+            u.accel = (mppi_params_.max_speed - current_state_.v) / mppi_params_.dt;
+            next_v = mppi_params_.max_speed;
         }
-        if(use_mcl_pose_){
-            drive_msg.drive.speed = next_v;
-        } else {
-            drive_msg.drive.acceleration = u.accel;
-        }
+        ackermann_msgs::msg::AckermannDriveStamped drive_msg;
+        drive_msg.header.stamp = this->now();
+        drive_msg.header.frame_id = "base_link";
+        drive_msg.drive.steering_angle = u.steer;
+        drive_msg.drive.steering_angle_velocity = 1.0;
+        drive_msg.drive.speed = next_v;
+        drive_msg.drive.acceleration = u.accel;
+    
         drive_pub_->publish(drive_msg);
         
         publish_path_visualization();

@@ -17,8 +17,8 @@ public:
         declare_parameter<std::string>("frame_id", "map");
         declare_parameter<double>("publish_rate", 10.0);
         
-        declare_parameter<double>("max_speed", 10.0);   
-        declare_parameter<double>("max_lat_g", 14.0);   
+        declare_parameter<double>("max_speed", 5.0);   
+        declare_parameter<double>("max_lat_g", 7.0);   
         declare_parameter<double>("max_decel", 8.0);    
         declare_parameter<double>("max_accel", 6.0);    
 

@@ -5,7 +5,6 @@ from launch_ros.actions import Node
 from ament_index_python.packages import get_package_share_directory
 import os
 
-
 def generate_launch_description():
     map_name = "map1"
     is_simulation = True
@@ -53,7 +52,8 @@ def generate_launch_description():
                 executable="path_publisher",
                 name="path_publisher",
                 output="screen",
-                parameters=[{
+                # 🚨 수정: param_file을 리스트에 추가하여 yaml 설정을 읽도록 함
+                parameters=[param_file, {
                     "csv_file_path": centerline_csv,
                     "frame_id": "map",
                     "publish_rate": 1.0,

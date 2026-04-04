@@ -126,7 +126,7 @@ namespace mppi
         // 3. 오버스피드 방지 패널티 (곡률 기반 한계 속도인 ref_vs를 넘었을 때만 브레이크 강제)
         float overspeed_cost = 0.0f;
         if (s.v > ref_vs[nearest_idx]) {
-            float excess = s.v - ref_vs[nearest_idx];
+            float excess = s.v - ref_vs[nearest_idx] * 0.9f;
             overspeed_cost = p.q_v * 20.0f * (excess * excess); // 20.0f는 브레이킹 강도 튜닝 계수
         }
 
@@ -151,7 +151,7 @@ namespace mppi
 
         if (min_bnd_dist < safe_dist) {
             float penetration = safe_dist - min_bnd_dist;
-            float soft_cost = 150.0f * (penetration * penetration); 
+            float soft_cost = 1000.0f * (penetration * penetration); 
 
             float hard_cost = 0.0f;
             if (min_bnd_dist < p.collision_radius * 1.2f) {

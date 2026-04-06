@@ -4,7 +4,7 @@
     max_steer: 0.507        # rad
     min_accel: -9.0         # m/s^2
     max_accel: 9.0          # m/s^2
-    min_speed: 0.0          # m/s
+    min_speed: 1.0          # m/s
     target_speed: 6.0       # m/s
     max_speed: 15.0         # m/s
     

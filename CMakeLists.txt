@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.8)
-project(smppi_cuda_controller)
+project(smppi_cuda_controller LANGUAGES C CXX CUDA)
 
 # [수정 1] GPU 연산 속도를 위해 반드시 Release 모드 사용
 set(CMAKE_BUILD_TYPE Release) 
@@ -10,8 +10,16 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_CUDA_STANDARD 14)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 set(CMAKE_CUDA_EXTENSIONS OFF)
-# 현재 빌드 환경(랩탑)의 GPU 아키텍처를 자동 감지하여 컴파일
-set(CMAKE_CUDA_ARCHITECTURES "native")
+
+# 1. 아키텍처 자동 감지 및 분기 로직
+# Jetson 환경(ARM64)인지 데스크톱(x86_64)인지 프로세서 종류로 판단합니다.
+if(CMAKE_HOST_SYSTEM_PROCESSOR MATCHES "aarch64")
+    message(STATUS "Detected ARM64 architecture (Assuming Jetson Orin Nano).")
+    set(CMAKE_CUDA_ARCHITECTURES "87") # Jetson Orin Nano
+else()
+    message(STATUS "Detected x86_64 architecture (Assuming ThinkPad).")
+    set(CMAKE_CUDA_ARCHITECTURES "86;89") # Ampere, Ada Lovelace
+endif()
 
 # CUDA 언어 활성화
 enable_language(CUDA)

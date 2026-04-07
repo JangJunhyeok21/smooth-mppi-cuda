@@ -15,13 +15,17 @@ import signal
 class MPPIOptimizer(Node):
     def __init__(self):
         super().__init__('mppi_optimizer')
+
+        os.makedirs('result', exist_ok=True)
         
         # 1. 테스트할 파라미터 범위 설정 (Grid Search)
         self.q_v_list = [1.8, 1.9, 2.0, 2.1, 2.2]  # 속도 비용 가중치
         self.q_dist_list = [1.3, 1.4, 1.5, 1.6, 1.7]  # 중심선 거리 비용 가중치
         self.q_du_list = [0.0, 0.4, 0.8, 1.2]  # 조작 변화량 비용 가중치
         self.q_steer_list = [0.0, 0.3, 0.6, 0.9]  # 조향각 비용 가중치
-        self.param_combinations = list(itertools.product(self.q_v_list, self.q_dist_list, self.q_du_list, self.q_steer_list))
+        self.q_lat_g_list = [50.0, 100.0, 150.0, 200.0, 250.0, 300.0]  # 횡방향 가속도 비용 가중치 (추가)
+        self.q_collision_list = [100.0, 200.0, 300.0]  # 충돌 비용 가중치
+        self.param_combinations = list(itertools.product(self.q_v_list, self.q_dist_list, self.q_du_list, self.q_steer_list, self.q_lat_g_list, self.q_collision_list))
         
         # ROS 2 통신 설정
         self.odom_sub = self.create_subscription(Odometry, '/odom0', self.odom_callback, 10)
@@ -98,7 +102,7 @@ class MPPIOptimizer(Node):
         self.reset_pending = True
         self.reset_deadline = time.time() + 1.0
 
-    def start_mppi_node(self, q_v, q_dist, q_du, q_steer):
+    def start_mppi_node(self, q_v, q_dist, q_du, q_steer, q_lat_g, q_collision):
         """서브프로세스로 파라미터를 주입하여 C++ 제어기 노드 실행"""
         cmd = [
             "ros2", "run", "cuda_mppi_controller", "cuda_mppi_node",
@@ -106,9 +110,11 @@ class MPPIOptimizer(Node):
             "-p", f"q_v:={q_v}",
             "-p", f"q_dist:={q_dist}",
             "-p", f"q_du:={q_du}",
-            "-p", f"q_steer:={q_steer}"
+            "-p", f"q_steer:={q_steer}",
+            "-p", f"q_lat_g:={q_lat_g}",
+            "-p", f"q_collision:={q_collision}"
         ]
-        self.get_logger().info(f"Starting Node with q_v={q_v}, q_dist={q_dist}, q_du={q_du}, q_steer={q_steer}")
+        self.get_logger().info(f"Starting Node with q_v={q_v}, q_dist={q_dist}, q_du={q_du}, q_steer={q_steer}, q_lat_g={q_lat_g}, q_collision={q_collision}")
         log_path = f"result/mppi_node_run_{self.current_run + 1}.log"
         self.mppi_log_file = open(log_path, "w")
         self.mppi_process = subprocess.Popen(
@@ -153,8 +159,8 @@ class MPPIOptimizer(Node):
             if time.time() < self.reset_deadline:
                 return
             self.reset_pending = False
-            q_v, q_dist, q_du, q_steer = self.param_combinations[self.current_run]
-            self.start_mppi_node(q_v, q_dist, q_du, q_steer)
+            q_v, q_dist, q_du, q_steer, q_lat_g, q_collision = self.param_combinations[self.current_run]
+            self.start_mppi_node(q_v, q_dist, q_du, q_steer, q_lat_g, q_collision)
 
         else:
             # 주행 모니터링
@@ -175,7 +181,7 @@ class MPPIOptimizer(Node):
                 self.stop_mppi_node()
                 
                 status = "Finished" if is_lap_done else ("Crashed" if is_crashed else "Timeout")
-                q_v, q_dist, q_du, q_steer = self.param_combinations[self.current_run]
+                q_v, q_dist, q_du, q_steer, q_lat_g, q_collision = self.param_combinations[self.current_run]
                 
                 # 결과 저장
                 self.results.append({
@@ -183,6 +189,8 @@ class MPPIOptimizer(Node):
                     'q_dist': q_dist,
                     'q_du': q_du,
                     'q_steer': q_steer,
+                    'q_lat_g': q_lat_g,
+                    'q_collision': q_collision,
                     'status': status,
                     'lap_time': elapsed_time if is_lap_done else 999.0,
                     'max_distance': self.max_distance
@@ -195,7 +203,7 @@ class MPPIOptimizer(Node):
         with open('result/mppi_optimization_results.csv', 'w', newline='') as f:
             writer = csv.DictWriter(
                 f,
-                fieldnames=['q_v', 'q_dist', 'q_du', 'q_steer', 'status', 'lap_time', 'max_distance']
+                fieldnames=['q_v', 'q_dist', 'q_du', 'q_steer', 'q_lat_g', 'q_collision', 'status', 'lap_time', 'max_distance']
             )
             writer.writeheader()
             writer.writerows(self.results)

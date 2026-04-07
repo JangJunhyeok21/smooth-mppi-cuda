@@ -142,7 +142,7 @@ namespace mppi
         float ay_abs = fabsf(s.ay);
         if (ay_abs >= 9.5f) {
             float excess = ay_abs - 9.5f;
-            lat_g_cost = p.q_lat_g * (__expf(-4.0f * excess));
+            lat_g_cost = p.q_lat_g * (__expf(-3.0f * excess));
         }
         
         // 6. Boundary Collision Cost
@@ -154,7 +154,7 @@ namespace mppi
             float soft_cost = 150.0f * (penetration * penetration); 
 
             float hard_cost = 0.0f;
-            if (min_bnd_dist < p.collision_radius * 1.2f) {
+            if (min_bnd_dist < p.collision_radius * 1.5f) {
                 float diff = min_bnd_dist - p.collision_radius;
                 float capped = fminf(diff, 1.0e-5f);
                 hard_cost = p.q_collision * logf(1.0f + __expf(-40.0f * capped));

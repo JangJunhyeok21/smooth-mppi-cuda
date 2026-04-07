@@ -1,0 +1,12 @@
+.vscode/
+build/
+log/
+install/
+*.log
+*.tmp
+*.bak
+*.swp
+*.swo
+*.DS_Store
+*.idea/
+*.iml

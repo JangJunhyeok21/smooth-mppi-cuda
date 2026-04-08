@@ -13,12 +13,12 @@
     max_decel: 9.0          # 코너 진입 전 브레이킹 한계 감속도
     
     # --- Costs (공통 기본값) ---
-    q_v: 1.3
+    q_v: 1.5
     q_dist: 0.0
-    q_du: 0.5
+    q_du: 1.0
     q_steer: 0.3
     q_collision: 200.0
-    q_lat_g: 100.0
+    q_lat_g: 150.0
     collision_radius: 0.18
     
     # --- Obstacle Avoidance Params ---

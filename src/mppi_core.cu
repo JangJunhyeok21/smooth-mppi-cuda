@@ -43,7 +43,7 @@ namespace mppi
         float px = s.x; float py = s.y; float yaw = s.yaw;
         float vx = s.v; float vy = s.vy; float omega = s.omega;
         
-        if (vx < 0.5f) {
+        if (vx < 1.0f) {
             State next_s;
             float beta = atanf(p.l_r * tanf(u.steer) / (p.l_f + p.l_r));
             next_s.x = px + vx * fast_cos(yaw + beta) * p.dt;

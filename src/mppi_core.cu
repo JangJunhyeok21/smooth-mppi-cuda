@@ -93,7 +93,7 @@ namespace mppi
         int nearest_idx = -1;
 
         int start_search = *last_idx; 
-        int search_window = 50; 
+        int search_window = 30; 
         
         if (start_search >= path_len) start_search %= path_len;
         if (start_search < 0) start_search = 0;
@@ -189,7 +189,7 @@ namespace mppi
 
         float min_dist_sq = 1e9f;
         
-        int search_window = 30; 
+        int search_window = 20; 
         int start_search = current_path_idx - 5;
         
         if (start_search < 0) start_search += bnd_len; 

@@ -378,9 +378,12 @@ private:
         drive_msg.drive.acceleration = u.accel;
     
         drive_pub_->publish(drive_msg);
-        
-        publish_path_visualization();
-        publish_mppi_trajectory();
+
+        if (mppi_params_.visualize_candidates)
+        {
+            publish_path_visualization();
+            publish_mppi_trajectory();
+        }
 
         auto end = std::chrono::high_resolution_clock::now();
         std::chrono::duration<double, std::milli> elapsed = end - start;

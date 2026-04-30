@@ -41,9 +41,9 @@ def generate_launch_description():
             "pose_topic": "/mcl_pose",
             "velocity_topic": "/odom",
             "drive_topic": "/drive",
-            "num_samples": 5000,             # 🚨 Jetson Nano 최적화 (5000개)
+            "num_samples": 8000,             # 🚨 Jetson Nano 최적화 (5000개)
             "publish_debug_info": False,     # 🚨 디버그 토픽 발행 스킵
-            "visualize_candidates": False,   # 🚨 GPU 연산 결과(h_states)의 호스트 복사 원천 차단
+            "visualize_candidates": True,   # 🚨 GPU 연산 결과(h_states)의 호스트 복사 원천 차단
         }
     
     return LaunchDescription(

@@ -19,7 +19,7 @@ public:
         load_parameters();
         validate_parameters();
 
-        solver_ = std::make_unique<mppi::MPPISolver>(10000, 150, mppi_params_);
+        solver_ = std::make_unique<mppi::MPPISolver>(num_samples_, 100, mppi_params_);
 
         drive_pub_ = this->create_publisher<ackermann_msgs::msg::AckermannDriveStamped>(drive_topic_, 10);
         vis_pub_ = this->create_publisher<visualization_msgs::msg::MarkerArray>("/mppi_viz", 50);
@@ -48,7 +48,7 @@ public:
                 odom_topic_, 10, std::bind(&MPPINode::odom_callback, this, std::placeholders::_1));
         }
         
-        timer_ = this->create_wall_timer(use_mcl_pose_?40ms:20ms, std::bind(&MPPINode::timer_callback, this));
+        timer_ = this->create_wall_timer(25ms, std::bind(&MPPINode::timer_callback, this));
         
         RCLCPP_INFO(this->get_logger(), "MPPI Node Started: Optimization & Boundary Monitor Enabled");
     }
@@ -173,6 +173,7 @@ private:
     }
 
     void load_parameters() {
+        this->declare_parameter("num_samples", 8000); num_samples_ = this->get_parameter("num_samples").as_int();
         this->declare_parameter("max_steer", 0.507); mppi_params_.max_steer = this->get_parameter("max_steer").as_double();
         this->declare_parameter("min_accel", -9.0); mppi_params_.min_accel = this->get_parameter("min_accel").as_double();
         this->declare_parameter("max_accel", 9.0); mppi_params_.max_accel = this->get_parameter("max_accel").as_double();
@@ -488,6 +489,7 @@ private:
         vis_pub_->publish(markers);
     }
 
+    std::int16_t num_samples_;
     mppi::Params mppi_params_;
     std::unique_ptr<mppi::MPPISolver> solver_;
     mppi::State current_state_;

@@ -13,7 +13,7 @@ class PathPublisher : public rclcpp::Node
 public:
     PathPublisher() : Node("path_publisher")
     {
-        declare_parameter<std::string>("csv_file_path", "icra2025_centerline.csv");
+        declare_parameter<std::string>("csv_file_path", "/home/a/capstone_ws/src/control/smppi_cuda_controller/data/map1/map1_centerline.csv");
         declare_parameter<std::string>("frame_id", "map");
         declare_parameter<double>("publish_rate", 10.0);
         
@@ -32,7 +32,7 @@ public:
 
         if (csv_path_.empty()) {
             RCLCPP_WARN(get_logger(), "csv_file_path not set, using default");
-            csv_path_ = "icra2025_centerline.csv";
+            csv_path_ = "map1_centerline.csv";
         }
 
         auto qos = rclcpp::QoS(rclcpp::KeepLast(1)).reliable().transient_local();

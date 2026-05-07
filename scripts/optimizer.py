@@ -58,10 +58,10 @@ class MPPIOptimizer(Node):
         self.mppi_log_file = None
 
         # 시작 포즈 및 완료 판정 기준
-        self.start_x = -14.6
-        self.start_y = -4.83
-        self.start_yaw = 1.570796
-        self.min_lap_distance = 5.0
+        self.start_x = 0.0
+        self.start_y = 0.0
+        self.start_yaw = 0.0
+        self.min_lap_distance = 1.0
 
         self.reset_pending = False
         self.reset_deadline = 0.0

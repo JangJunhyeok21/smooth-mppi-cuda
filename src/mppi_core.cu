@@ -43,7 +43,7 @@ namespace mppi
         float px = s.x; float py = s.y; float yaw = s.yaw;
         float vx = s.v; float vy = s.vy; float omega = s.omega;
         
-        if (vx < 0.5f) {
+        if (vx < 0.8f) {
             State next_s;
             float beta = atanf(p.l_r * tanf(u.steer) / (p.l_f + p.l_r));
             next_s.x = px + vx * fast_cos(yaw + beta) * p.dt;
@@ -125,22 +125,20 @@ namespace mppi
 
         // 3. 오버스피드 방지 패널티 (곡률 기반 한계 속도인 ref_vs를 넘었을 때만 브레이크 강제)
         float overspeed_cost = 0.0f;
-        if (s.v > ref_vs[nearest_idx]) {
-            float excess = s.v - ref_vs[nearest_idx] * 0.9f;
-            overspeed_cost = p.q_v * 20.0f * (excess * excess); // 20.0f는 브레이킹 강도 튜닝 계수
-        }
+        // if (s.v > ref_vs[nearest_idx]) {
+        //     float excess = s.v - ref_vs[nearest_idx] * 0.9f;
+        //     overspeed_cost = p.q_v * 20.0f * (excess * excess); // 20.0f는 브레이킹 강도 튜닝 계수
+        // }
 
         // 4. Control Input Cost
         float d_steer = u.steer - u_prev.steer;
-        float d_accel = u.accel - u_prev.accel;
-        float steer_rate_cost = p.q_du * 2.0f * (d_steer * d_steer);
-        float accel_rate_cost = p.q_du * fabsf(d_accel);
+        float d_accel = u.accel - u_prev.accel; 
         float steer_cost = p.q_steer * (u.steer * u.steer);
 
         // 5. Lateral G / Slip Cost
         float lat_g_cost = 0.0f;
         float ay_abs = fabsf(s.ay);
-        if (ay_abs >= 9.5f) {
+        if (ay_abs >= 11.5f) {  // 1.17g
             float excess = ay_abs - 9.5f;
             lat_g_cost = p.q_lat_g * (__expf(-3.0f * excess));
         }
@@ -175,43 +173,64 @@ namespace mppi
             }
         }
 
-        return p.q_dist * dist_error + vel_cost + overspeed_cost + steer_rate_cost + accel_rate_cost + steer_cost + lat_g_cost + boundary_cost + obs_cost;
+        return p.q_dist * dist_error + vel_cost + overspeed_cost + steer_cost + lat_g_cost + boundary_cost + obs_cost;
     }
     
+    // [수정된 함수] O(N) 바운더리 탐색을 대체하는 O(1) 횡방향 오차 기반 거리 연산
     __device__ float compute_min_boundary_distance(
         const State &s,
+        const float *ref_xs, const float *ref_ys, const float *ref_yaws,
         const float *left_xs, const float *left_ys,
         const float *right_xs, const float *right_ys,
-        int bnd_len,
-        int current_path_idx) 
+        int path_len, int current_path_idx, int *nearest_idx_out) 
     {
-        if (left_xs == nullptr || right_xs == nullptr || bnd_len <= 0) return 1e9f;
+        if (ref_xs == nullptr || left_xs == nullptr || path_len <= 0) return 1e9f;
 
+        // 1. 이전 인덱스 근처에서 가장 가까운 중심점(Reference) 탐색
         float min_dist_sq = 1e9f;
-        
-        int search_window = 20; 
-        int start_search = current_path_idx - 5;
-        
-        if (start_search < 0) start_search += bnd_len; 
+        int nearest_idx = current_path_idx;
+        int search_window = 30;
+        int start_search = current_path_idx;
 
-        for (int offset = 0; offset < search_window; ++offset)
-        {
+        if (start_search >= path_len) start_search %= path_len;
+        if (start_search < 0) start_search = 0;
+
+        for (int offset = 0; offset < search_window; ++offset) {
             int i = start_search + offset;
-            if (i >= bnd_len) i -= bnd_len;
-
-            float dx_l = s.x - __ldg(&left_xs[i]);
-            float dy_l = s.y - __ldg(&left_ys[i]);
-            float dist_sq_l = dx_l * dx_l + dy_l * dy_l;
-
-            float dx_r = s.x - __ldg(&right_xs[i]);
-            float dy_r = s.y - __ldg(&right_ys[i]);
-            float dist_sq_r = dx_r * dx_r + dy_r * dy_r;
-
-            if (dist_sq_l < min_dist_sq) min_dist_sq = dist_sq_l;
-            if (dist_sq_r < min_dist_sq) min_dist_sq = dist_sq_r;
+            if (i >= path_len) i -= path_len;
+            
+            float dx = s.x - ref_xs[i];
+            float dy = s.y - ref_ys[i];
+            float dist_sq = dx * dx + dy * dy;
+            if (dist_sq < min_dist_sq) {
+                min_dist_sq = dist_sq;
+                nearest_idx = i;
+            }
         }
+        
+        // 찾은 인덱스를 외부로 반환하여 compute_cost_cuda의 탐색 속도도 높임
+        if (nearest_idx_out != nullptr) *nearest_idx_out = nearest_idx;
 
-        return sqrtf(min_dist_sq);
+        // 2. 중심선 기준 법선 벡터를 통한 횡방향 편차(e_y) 도출
+        float dx = s.x - ref_xs[nearest_idx];
+        float dy = s.y - ref_ys[nearest_idx];
+        float ref_yaw = ref_yaws[nearest_idx];
+        
+        float nx = -fast_sin(ref_yaw);
+        float ny = fast_cos(ref_yaw);
+        float e_y = dx * nx + dy * ny;
+
+        // 3. 해당 지점의 실제 좌우 도로 폭 연산
+        float dx_l = left_xs[nearest_idx] - ref_xs[nearest_idx];
+        float dy_l = left_ys[nearest_idx] - ref_ys[nearest_idx];
+        float w_left = sqrtf(dx_l * dx_l + dy_l * dy_l);
+
+        float dx_r = right_xs[nearest_idx] - ref_xs[nearest_idx];
+        float dy_r = right_ys[nearest_idx] - ref_ys[nearest_idx];
+        float w_right = sqrtf(dx_r * dx_r + dy_r * dy_r);
+
+        // 4. 차량에서 양쪽 바운더리까지의 최단 거리 반환
+        return fminf(w_left - e_y, w_right + e_y);
     }
 
     __global__ void init_rng_kernel(curandState *states, long seed, int K, int T)
@@ -239,6 +258,11 @@ namespace mppi
         int local_path_idx = start_path_idx;
         int initial_path_idx = start_path_idx; 
         bool is_fault = false;
+        
+        float x_steer_prev1 = 0.0f, x_steer_prev2 = 0.0f;
+        float y_steer_prev1 = 0.0f, y_steer_prev2 = 0.0f;
+        float x_accel_prev1 = 0.0f, x_accel_prev2 = 0.0f;
+        float y_accel_prev1 = 0.0f, y_accel_prev2 = 0.0f;
 
         for (int t = 0; t < T; ++t)
         {
@@ -250,8 +274,29 @@ namespace mppi
             float mean_delta_steer = u_mean_curr.steer - u_mean_prev.steer;  
             float mean_delta_accel = u_mean_curr.accel - u_mean_prev.accel;  
 
-            float noise_delta_steer = curand_normal(&rng_states[idx]) * p.noise_steer_std * p.dt;   
-            float noise_delta_accel = curand_normal(&rng_states[idx]) * p.noise_accel_std * p.dt;   
+            // 1. Raw 백색 잡음 생성 (dt를 곱하지 않음)
+            float raw_steer_noise = curand_normal(&rng_states[idx]) * p.noise_steer_std;
+            float raw_accel_noise = curand_normal(&rng_states[idx]) * p.noise_accel_std;
+
+            // 2. 2차 버터워스 필터링 (IIR 차분 방정식)
+            float filtered_steer = p.filter_coeffs.b0 * raw_steer_noise 
+                                + p.filter_coeffs.b1 * x_steer_prev1 + p.filter_coeffs.b2 * x_steer_prev2
+                                - p.filter_coeffs.a1 * y_steer_prev1 - p.filter_coeffs.a2 * y_steer_prev2;
+            
+            float filtered_accel = p.filter_coeffs.b0 * raw_accel_noise 
+                                + p.filter_coeffs.b1 * x_accel_prev1 + p.filter_coeffs.b2 * x_accel_prev2
+                                - p.filter_coeffs.a1 * y_accel_prev1 - p.filter_coeffs.a2 * y_accel_prev2;
+
+            // 3. 레지스터 상태 한 칸씩 시프트 (다음 루프를 위함)
+            x_steer_prev2 = x_steer_prev1; x_steer_prev1 = raw_steer_noise;
+            y_steer_prev2 = y_steer_prev1; y_steer_prev1 = filtered_steer;
+
+            x_accel_prev2 = x_accel_prev1; x_accel_prev1 = raw_accel_noise;
+            y_accel_prev2 = y_accel_prev1; y_accel_prev1 = filtered_accel;
+
+            // 4. 부드러워진 노이즈에 dt를 곱해 최종 변화량 산출
+            float noise_delta_steer = filtered_steer * p.dt;   
+            float noise_delta_accel = filtered_accel * p.dt;  
 
             current_action.steer += fminf(fmaxf(mean_delta_steer + noise_delta_steer, -p.max_steer_rate * p.dt), p.max_steer_rate * p.dt);    
             current_action.accel += fminf(fmaxf(mean_delta_accel + noise_delta_accel, -p.max_accel_rate * p.dt), p.max_accel_rate * p.dt);
@@ -270,18 +315,17 @@ namespace mppi
             states[idx] = x;
             controls[idx] = u_clamped; 
 
-            if(fabsf(x.ay) > 9.8f){
+            if(fabsf(x.ay) > 12.74f){   //1.3g
                 is_fault = true;
             }
 
             float min_dist = compute_min_boundary_distance(
-                x, left_bnd_xs, left_bnd_ys, right_bnd_xs, right_bnd_ys, bnd_len, local_path_idx);
+                x, ref_xs, ref_ys, ref_yaws, left_bnd_xs, left_bnd_ys, right_bnd_xs, right_bnd_ys, path_len, local_path_idx, &local_path_idx);
             
             if (min_dist < p.collision_radius) {
                 is_fault = true;
             }
 
-            // 🚨 핵심 수정부 1: 생존 비례 보상 (수학적 붕괴 방지)
             if (is_fault) {
                 // 기본 패널티를 10000으로 낮추고, 오래 버틸수록 패널티를 50씩 대폭 깎아줍니다.
                 // 이로 인해 어차피 박을 상황이면 풀브레이킹+조향으로 1틱이라도 더 버티는 샘플의 가중치가 높아집니다.
@@ -327,8 +371,23 @@ namespace mppi
     }
 
     // --- Host Functions ---
+    __host__ ButterworthCoeffs compute_butterworth_coeffs(float fc, float dt) {
+        ButterworthCoeffs coeffs;
+        float fs = 1.0f / dt;
+        float w0 = tanf(M_PI * fc / fs);
+        float K = sqrtf(2.0f) * w0;
+        float D = 1.0f + K + w0 * w0;
+
+        coeffs.b0 = (w0 * w0) / D;
+        coeffs.b1 = 2.0f * coeffs.b0;
+        coeffs.b2 = coeffs.b0;
+        coeffs.a1 = 2.0f * (w0 * w0 - 1.0f) / D;
+        coeffs.a2 = (1.0f - K + w0 * w0) / D;
+        return coeffs;
+    }
 
     MPPISolver::MPPISolver(int K, int T, Params params) : K_(K), T_(T), params_(params) {
+        params_.filter_coeffs = compute_butterworth_coeffs(3.0f, params_.dt);
         h_states_.resize(K * T);
         h_controls_.resize(K * T);
         h_prev_controls_.resize(T, {0.0f, 0.0f});
@@ -371,7 +430,10 @@ namespace mppi
         cudaFree(d_right_bnd_xs_); cudaFree(d_right_bnd_ys_);
     }
 
-    void MPPISolver::update_params(Params p) { params_ = p; }
+    void MPPISolver::update_params(Params p) { 
+        params_ = p; 
+        params_.filter_coeffs = compute_butterworth_coeffs(3.0f, params_.dt);
+    }   
 
     void MPPISolver::set_reference_path(const std::vector<float> &xs, const std::vector<float> &ys,
                                         const std::vector<float> &yaws, const std::vector<float> &vs) {

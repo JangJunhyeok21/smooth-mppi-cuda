@@ -55,33 +55,30 @@ public:
 
 private:
     float compute_min_boundary_distance(const mppi::State &s, int current_path_idx) {
-        if (left_xs_.empty() || right_xs_.empty() || left_xs_.size() != right_xs_.size()) {
+        if (left_xs_.empty() || right_xs_.empty() || left_xs_.size() != right_xs_.size() || ref_path_xs_.empty()) {
             return 1e9f;
         }
 
-        float min_dist_sq = 1e9f;
-        int bnd_len = static_cast<int>(left_xs_.size());
-        int search_window = 30;
-        int start_search = current_path_idx - 5;
-        if (start_search < 0) start_search += bnd_len;
+        // current_path_idx는 이미 append_best_traj_costs에서 update_nearest_index(s)를 통해 구해진 가장 가까운 인덱스입니다.
+        float dx = s.x - ref_path_xs_[current_path_idx];
+        float dy = s.y - ref_path_ys_[current_path_idx];
+        float ref_yaw = ref_path_yaws_[current_path_idx];
 
-        for (int offset = 0; offset < search_window; ++offset) {
-            int i = start_search + offset;
-            if (i >= bnd_len) i -= bnd_len;
+        // 법선 벡터 내적을 통한 횡방향 편차
+        float nx = -std::sin(ref_yaw);
+        float ny = std::cos(ref_yaw);
+        float e_y = dx * nx + dy * ny;
 
-            float dx_l = s.x - left_xs_[i];
-            float dy_l = s.y - left_ys_[i];
-            float dist_sq_l = dx_l * dx_l + dy_l * dy_l;
+        // 실제 좌우 도로 폭
+        float dx_l = left_xs_[current_path_idx] - ref_path_xs_[current_path_idx];
+        float dy_l = left_ys_[current_path_idx] - ref_path_ys_[current_path_idx];
+        float w_left = std::hypot(dx_l, dy_l);
 
-            float dx_r = s.x - right_xs_[i];
-            float dy_r = s.y - right_ys_[i];
-            float dist_sq_r = dx_r * dx_r + dy_r * dy_r;
+        float dx_r = right_xs_[current_path_idx] - ref_path_xs_[current_path_idx];
+        float dy_r = right_ys_[current_path_idx] - ref_path_ys_[current_path_idx];
+        float w_right = std::hypot(dx_r, dy_r);
 
-            if (dist_sq_l < min_dist_sq) min_dist_sq = dist_sq_l;
-            if (dist_sq_r < min_dist_sq) min_dist_sq = dist_sq_r;
-        }
-
-        return std::sqrt(min_dist_sq);
+        return std::min(w_left - e_y, w_right + e_y);
     }
 
     int update_nearest_index(const mppi::State &s) {
@@ -187,30 +184,30 @@ private:
         this->declare_parameter("q_steer", 0.3); mppi_params_.q_steer = this->get_parameter("q_steer").as_double();
         this->declare_parameter("q_collision", 400.0); mppi_params_.q_collision = this->get_parameter("q_collision").as_double();
         this->declare_parameter("q_lat_g", 200.0); mppi_params_.q_lat_g = this->get_parameter("q_lat_g").as_double();
-        this->declare_parameter("collision_radius", 0.28); mppi_params_.collision_radius = this->get_parameter("collision_radius").as_double();
+        this->declare_parameter("collision_radius", 0.19); mppi_params_.collision_radius = this->get_parameter("collision_radius").as_double();
         
         this->declare_parameter("car_radius", 0.15); mppi_params_.car_radius = this->get_parameter("car_radius").as_double();
         this->declare_parameter("q_obs", 50.0); mppi_params_.q_obs = this->get_parameter("q_obs").as_double();
         
         this->declare_parameter("noise_steer_std", 0.4); mppi_params_.noise_steer_std = this->get_parameter("noise_steer_std").as_double();
         this->declare_parameter("noise_accel_std", 2.0); mppi_params_.noise_accel_std = this->get_parameter("noise_accel_std").as_double();
-        this->declare_parameter("max_steer_rate", 4.0); mppi_params_.max_steer_rate = this->get_parameter("max_steer_rate").as_double();
+        this->declare_parameter("max_steer_rate", 0.5236); mppi_params_.max_steer_rate = this->get_parameter("max_steer_rate").as_double();
         this->declare_parameter("max_accel_rate", 1000.0); mppi_params_.max_accel_rate = this->get_parameter("max_accel_rate").as_double();
         this->declare_parameter("lambda", 10.0); mppi_params_.lambda = this->get_parameter("lambda").as_double();
         this->declare_parameter("visualize_candidates", true); mppi_params_.visualize_candidates = this->get_parameter("visualize_candidates").as_bool();
 
-        this->declare_parameter("mass", 3.5); mppi_params_.mass = this->get_parameter("mass").as_double();
-        this->declare_parameter("l_f", 0.17); mppi_params_.l_f = this->get_parameter("l_f").as_double();
-        this->declare_parameter("l_r", 0.17); mppi_params_.l_r = this->get_parameter("l_r").as_double();
-        this->declare_parameter("I_z", 0.07); mppi_params_.I_z = this->get_parameter("I_z").as_double();
+        this->declare_parameter("mass", 3.74); mppi_params_.mass = this->get_parameter("mass").as_double();
+        this->declare_parameter("l_f", 0.163); mppi_params_.l_f = this->get_parameter("l_f").as_double();
+        this->declare_parameter("l_r", 0.162); mppi_params_.l_r = this->get_parameter("l_r").as_double();
+        this->declare_parameter("I_z", 0.04712); mppi_params_.I_z = this->get_parameter("I_z").as_double();
         
-        this->declare_parameter("B_f", 1.5); mppi_params_.B_f = this->get_parameter("B_f").as_double();
+        this->declare_parameter("B_f", 14.0); mppi_params_.B_f = this->get_parameter("B_f").as_double();
         this->declare_parameter("C_f", 1.5); mppi_params_.C_f = this->get_parameter("C_f").as_double();
-        this->declare_parameter("D_f", 20.0); mppi_params_.D_f = this->get_parameter("D_f").as_double();
+        this->declare_parameter("D_f", 19.0); mppi_params_.D_f = this->get_parameter("D_f").as_double();
         
-        this->declare_parameter("B_r", 1.5); mppi_params_.B_r = this->get_parameter("B_r").as_double();
+        this->declare_parameter("B_r", 14.0); mppi_params_.B_r = this->get_parameter("B_r").as_double();
         this->declare_parameter("C_r", 1.5); mppi_params_.C_r = this->get_parameter("C_r").as_double();
-        this->declare_parameter("D_r", 20.0); mppi_params_.D_r = this->get_parameter("D_r").as_double();
+        this->declare_parameter("D_r", 17.0); mppi_params_.D_r = this->get_parameter("D_r").as_double();
 
         this->declare_parameter("odom_topic", "/odom0"); odom_topic_ = this->get_parameter("odom_topic").as_string();
         this->declare_parameter("use_mcl_pose", false); use_mcl_pose_ = this->get_parameter("use_mcl_pose").as_bool();

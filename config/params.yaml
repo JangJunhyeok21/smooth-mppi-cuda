@@ -13,10 +13,10 @@
     max_decel: 9.0          # 코너 진입 전 브레이킹 한계 감속도
     
     # --- Costs (공통 기본값) ---
-    q_v: 1.2
-    q_dist: 0.2
-    q_du: 1.0
-    q_steer: 0.3
+    q_v: 1.7
+    q_dist: 0.1
+    q_du: 0.7
+    q_steer: 0.7
     q_collision: 100.0
     q_lat_g: 150.0
     collision_radius: 0.19
@@ -27,8 +27,8 @@
     
     # --- Noise & Tuning ---
     noise_steer_std: 0.4    # rad/s
-    noise_accel_std: 2.0    # m/s^2
-    max_steer_rate: 0.5236     # rad/s
+    noise_accel_std: 2.0    # m/s^3
+    max_steer_rate: 8.0     # rad/s
     max_accel_rate: 1000.0  # m/s^3
     lambda: 10.0
     visualize_candidates: true

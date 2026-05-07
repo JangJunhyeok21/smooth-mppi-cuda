@@ -25,6 +25,10 @@
 
 namespace mppi {
 
+struct alignas(16) ButterworthCoeffs {
+    float b0, b1, b2, a1, a2;
+};
+
 struct alignas(16) State {
     float x;
     float y;
@@ -85,6 +89,8 @@ struct Params {
     // Pacejka
     float B_f, C_f, D_f;
     float B_r, C_r, D_r;
+
+    ButterworthCoeffs filter_coeffs;
 };
 
 class MPPISolver {

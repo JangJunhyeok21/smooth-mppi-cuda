@@ -6,7 +6,7 @@ from ament_index_python.packages import get_package_share_directory
 import os
 
 def generate_launch_description():
-    map_name = "icra2025"
+    map_name = "map1"
     
     #이 변수를 False로 바꾸면 Jetson Nano 최적화 모드(실차)로 진입합니다.
     is_simulation = True

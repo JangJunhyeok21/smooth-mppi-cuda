@@ -21,7 +21,7 @@
         } \
     } while (0)
 
-#define MAX_OBS 20 // 처리 가능한 최대 장애물 개수
+#define MAX_OBS 5 // 처리 가능한 최대 장애물 개수
 
 namespace mppi {
 

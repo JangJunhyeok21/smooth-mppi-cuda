@@ -19,7 +19,7 @@ public:
         load_parameters();
         validate_parameters();
 
-        solver_ = std::make_unique<mppi::MPPISolver>(num_samples_, 100, mppi_params_);
+        solver_ = std::make_unique<mppi::MPPISolver>(num_samples_, 50, mppi_params_);
 
         drive_pub_ = this->create_publisher<ackermann_msgs::msg::AckermannDriveStamped>(drive_topic_, 10);
         vis_pub_ = this->create_publisher<visualization_msgs::msg::MarkerArray>("/mppi_viz", 50);
@@ -48,7 +48,7 @@ public:
                 odom_topic_, 10, std::bind(&MPPINode::odom_callback, this, std::placeholders::_1));
         }
         
-        timer_ = this->create_wall_timer(25ms, std::bind(&MPPINode::timer_callback, this));
+        timer_ = this->create_wall_timer(35ms, std::bind(&MPPINode::timer_callback, this));
         
         RCLCPP_INFO(this->get_logger(), "MPPI Node Started: Optimization & Boundary Monitor Enabled");
     }
@@ -218,9 +218,7 @@ private:
         // 🚨 타겟 경로 토픽 이름 변경
         this->declare_parameter("path_topic", "/mppi_target_path"); path_topic_ = this->get_parameter("path_topic").as_string();      
         
-        if(use_mcl_pose_){ mppi_params_.dt = 0.04; } 
-        else { mppi_params_.dt = 0.02; }
-
+        mppi_params_.dt = 0.035;
         mppi_params_.num_obstacles = 0; 
     }
 
@@ -230,7 +228,7 @@ private:
         if (mppi_params_.collision_radius < 0.0f) mppi_params_.collision_radius = std::abs(mppi_params_.collision_radius);
     }
 
-    // 🚨 단일 수신(Latch) 처리를 위한 플래그 추가
+    // 단일 수신(Latch) 처리를 위한 플래그 추가
     bool path_received_{false};
     bool left_bnd_received_{false};
     bool right_bnd_received_{false};
@@ -332,6 +330,12 @@ private:
 
     void update_state_from_pose_velocity() {
         if (!has_pose_ || !has_velocity_) return;
+        
+        double time_diff = fabs(rclcpp::Time(pose_.header.stamp).seconds() - rclcpp::Time(velocity_odom_.header.stamp).seconds());
+        if (time_diff > 0.05) {
+            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000, "Pose and Velocity are out of sync!");
+            // 필요하다면 return; 으로 튕겨내거나 Extrapolation(외삽) 수행
+        }
 
         const auto &p = pose_.pose.position;
         const auto &q = pose_.pose.orientation;
@@ -342,9 +346,9 @@ private:
         current_state_.yaw = (float)yaw;
         current_state_.v = velocity_odom_.twist.twist.linear.x;
         current_state_.vy = velocity_odom_.twist.twist.linear.y;
-        current_state_.ay = 0.0f;
         current_state_.slip_angle = atan2(current_state_.vy, fabs(current_state_.v) + 1e-5f);
         current_state_.omega = velocity_odom_.twist.twist.angular.z;
+        current_state_.ay = current_state_.v * current_state_.omega;
 
         odom_received_ = true;
     }
@@ -429,6 +433,7 @@ private:
         int K = solver_->get_K();
         int T = solver_->get_T();
 
+        // 1. 후보 궤적 (Candidate Trajectories) 설정
         visualization_msgs::msg::Marker traj_marker;
         traj_marker.header.frame_id = "map";
         traj_marker.header.stamp = this->now();
@@ -437,7 +442,7 @@ private:
         traj_marker.type = visualization_msgs::msg::Marker::LINE_LIST;
         traj_marker.action = visualization_msgs::msg::Marker::ADD;
         traj_marker.scale.x = 0.02; 
-        traj_marker.color.r = 0.0; traj_marker.color.g = 1.0; traj_marker.color.b = 0.0; traj_marker.color.a = 0.3;
+        // 기본 컬러는 유지하되, 개별 colors 벡터가 우선순위를 가집니다.
 
         if ((int)costs.size() == K) {
             std::vector<int> indices(K);
@@ -451,16 +456,29 @@ private:
                 int k = indices[i];
                 for (int t = 1; t < T - 2; ++t) {
                     int idx = k * T + t;
+                    
                     geometry_msgs::msg::Point p1, p2;
                     p1.x = states[idx].x; p1.y = states[idx].y;
                     p2.x = states[idx+1].x; p2.y = states[idx+1].y;
+                    
+                    // 속도에 따른 색상 결정 (RGBA)
+                    std_msgs::msg::ColorRGBA color;
+                    if (states[idx].v >= 0.5) {
+                        color.r = 1.0; color.g = 0.5; color.b = 0.0; color.a = 0.3; // 오렌지색 (고속)
+                    } else {
+                        color.r = 0.0; color.g = 1.0; color.b = 1.0; color.a = 0.3; // 하늘색 (저속)
+                    }
+
                     traj_marker.points.push_back(p1);
+                    traj_marker.colors.push_back(color); // p1의 색상
                     traj_marker.points.push_back(p2);
+                    traj_marker.colors.push_back(color); // p2의 색상 (한 선분은 동일 색상)
                 }
             }
         }
         markers.markers.push_back(traj_marker);
         
+        // 2. 최적 궤적 (Best Trajectory) 설정
         visualization_msgs::msg::Marker best_traj_marker;
         best_traj_marker.header.frame_id = "map";
         best_traj_marker.header.stamp = this->now();
@@ -468,8 +486,7 @@ private:
         best_traj_marker.id = 1;
         best_traj_marker.type = visualization_msgs::msg::Marker::LINE_LIST;
         best_traj_marker.action = visualization_msgs::msg::Marker::ADD;
-        best_traj_marker.scale.x = 0.05;
-        best_traj_marker.color.r = 1.0; best_traj_marker.color.g = 0.0; best_traj_marker.color.b = 0.0; best_traj_marker.color.a = 0.8;
+        best_traj_marker.scale.x = 0.06;
 
         const auto& best_trajectory = solver_->get_best_trajectory();
         if (!best_trajectory.empty()) {
@@ -477,15 +494,24 @@ private:
                 geometry_msgs::msg::Point p1, p2;
                 p1.x = best_trajectory[t].x; p1.y = best_trajectory[t].y;
                 p2.x = best_trajectory[t+1].x; p2.y = best_trajectory[t+1].y;
-                best_traj_marker.points.push_back(p1);
-                best_traj_marker.points.push_back(p2);
-            }
 
+                std_msgs::msg::ColorRGBA b_color;
+                if (best_trajectory[t].v >= 0.5) {
+                    b_color.r = 1.0; b_color.g = 0.0; b_color.b = 0.0; b_color.a = 1.0; // 빨간색 (고속)
+                } else {
+                    b_color.r = 0.0; b_color.g = 0.0; b_color.b = 1.0; b_color.a = 1.0; // 파란색 (저속)
+                }
+
+                best_traj_marker.points.push_back(p1);
+                best_traj_marker.colors.push_back(b_color);
+                best_traj_marker.points.push_back(p2);
+                best_traj_marker.colors.push_back(b_color);
+            }
             markers.markers.push_back(best_traj_marker);
         }
+        
         vis_pub_->publish(markers);
     }
-
     std::int16_t num_samples_;
     mppi::Params mppi_params_;
     std::unique_ptr<mppi::MPPISolver> solver_;

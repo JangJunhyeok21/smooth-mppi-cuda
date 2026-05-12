@@ -57,9 +57,14 @@ class MPPIOptimizer(Node):
         self.mppi_process = None
         self.mppi_log_file = None
 
+        # per-run lap counting and departure-wait flag
+        self.lap_count = 0
+        self.awaiting_departure = False
+        self.crash_ignore_deadline = 0.0
+
         # 시작 포즈 및 완료 판정 기준
         self.start_x = 0.0
-        self.start_y = 0.0
+        self.start_y = 0.2
         self.start_yaw = 0.0
         self.min_lap_distance = 1.0
 
@@ -74,7 +79,12 @@ class MPPIOptimizer(Node):
         self.car_v = msg.twist.twist.linear.x
 
     def collision_callback(self, msg):
-        if msg.data == True: 
+        # Ignore collision messages during reset/grace periods or when controller not running
+        if time.time() < self.crash_ignore_deadline:
+            return
+        if not self.is_running:
+            return
+        if msg.data == True:
             self.has_crashed = True
             self.get_logger().warn("Simulator reported a CRASH!")
 
@@ -96,6 +106,8 @@ class MPPIOptimizer(Node):
         self.init_pose_pub.publish(init_pose)
         
         self.has_crashed = False
+        # ignore collision messages briefly while simulator settles
+        self.crash_ignore_deadline = time.time() + 1.0
         self.max_distance = 0.0
         self.reset_pending = True
         self.reset_deadline = time.time() + 1.0
@@ -128,10 +140,24 @@ class MPPIOptimizer(Node):
             start_new_session=True
         )
         self.start_time = time.time()
+        self.lap_count = 0
+        self.awaiting_departure = False
+        self.max_distance = 0.0
+        # clear crash flag and set short grace period to ignore stale collision pub
+        self.has_crashed = False
+        self.crash_ignore_deadline = time.time() + 1.0
         self.is_running = True
 
     def stop_mppi_node(self):
         """제어기 노드 강제 종료"""
+        # publish explicit stop command to halt vehicle immediately
+        try:
+            stop_msg = AckermannDriveStamped()
+            stop_msg.drive.speed = 0.0
+            stop_msg.drive.steering_angle = 0.0
+            self.drive_pub.publish(stop_msg)
+        except Exception:
+            pass
         if self.mppi_process:
             if self.mppi_process.poll() is None:
                 try:
@@ -172,23 +198,57 @@ class MPPIOptimizer(Node):
             self.max_distance = max(self.max_distance, distance_from_start)
 
             is_crashed = self.has_crashed
-            is_lap_done = (elapsed_time > 10.0) and (distance_from_start < 2.0) and (self.max_distance > self.min_lap_distance)
+            # clear awaiting_departure once vehicle leaves start area
+            if self.awaiting_departure and distance_from_start > 2.0:
+                self.awaiting_departure = False
+
+            is_lap_condition = (elapsed_time > 10.0) and (distance_from_start < 2.0) and (self.max_distance > self.min_lap_distance)
             is_timeout = elapsed_time > 60.0
 
-            if is_crashed or is_lap_done or is_timeout:
+            if is_crashed:
+                # immediate stop on crash
                 self.stop_mppi_node()
-                
-                status = "Finished" if is_lap_done else ("Crashed" if is_crashed else "Timeout")
                 q_v, q_dist, q_du, q_steer, q_lat_g, q_col = self.param_combinations[self.current_run]
-                
                 self.results.append({
                     'q_v': q_v, 'q_dist': q_dist, 'q_du': q_du, 'q_steer': q_steer,
                     'q_lat_g': q_lat_g, 'q_collision': q_col,
-                    'status': status, 'lap_time': elapsed_time if is_lap_done else 999.0,
+                    'status': 'Crashed', 'lap_time': 999.0,
                     'max_distance': self.max_distance
                 })
-                
-                self.get_logger().info(f"Ended: {status}, Time: {elapsed_time:.2f}s, Dist: {self.max_distance:.2f}m")
+                self.get_logger().warn(f"Ended: Crashed, Time: {elapsed_time:.2f}s, Dist: {self.max_distance:.2f}m")
+                self.current_run += 1
+
+            elif is_lap_condition and not self.awaiting_departure:
+                # completed one lap
+                self.lap_count += 1
+                self.awaiting_departure = True
+                self.max_distance = 0.0
+                self.get_logger().info(f"Lap {self.lap_count} completed for run {self.current_run + 1}")
+
+                # if reached required laps, finish run
+                if self.lap_count >= 3:
+                    self.stop_mppi_node()
+                    q_v, q_dist, q_du, q_steer, q_lat_g, q_col = self.param_combinations[self.current_run]
+                    self.results.append({
+                        'q_v': q_v, 'q_dist': q_dist, 'q_du': q_du, 'q_steer': q_steer,
+                        'q_lat_g': q_lat_g, 'q_collision': q_col,
+                        'status': 'Finished', 'lap_time': elapsed_time,
+                        'max_distance': self.max_distance
+                    })
+                    self.get_logger().info(f"Ended: Finished (3 laps), Time: {elapsed_time:.2f}s")
+                    self.current_run += 1
+
+            elif is_timeout:
+                # timeout for the run
+                self.stop_mppi_node()
+                q_v, q_dist, q_du, q_steer, q_lat_g, q_col = self.param_combinations[self.current_run]
+                self.results.append({
+                    'q_v': q_v, 'q_dist': q_dist, 'q_du': q_du, 'q_steer': q_steer,
+                    'q_lat_g': q_lat_g, 'q_collision': q_col,
+                    'status': 'Timeout', 'lap_time': 999.0,
+                    'max_distance': self.max_distance
+                })
+                self.get_logger().info(f"Ended: Timeout, Time: {elapsed_time:.2f}s, Dist: {self.max_distance:.2f}m")
                 self.current_run += 1
 
     def save_results(self):

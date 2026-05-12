@@ -11,6 +11,7 @@ def generate_launch_description():
     #이 변수를 False로 바꾸면 Jetson Nano 최적화 모드(실차)로 진입합니다.
     is_simulation = True
 
+
     default_param_file = os.path.join(
         get_package_share_directory("smppi_cuda_controller"),
         "config",

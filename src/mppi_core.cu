@@ -43,14 +43,22 @@ namespace mppi
         float px = s.x; float py = s.y; float yaw = s.yaw;
         float vx = s.v; float vy = s.vy; float omega = s.omega;
         
-        if (vx < 0.8f) {
+        if (vx < 0.5f) {
             State next_s;
-            float beta = atanf(p.l_r * tanf(u.steer) / (p.l_f + p.l_r));
-            next_s.x = px + vx * fast_cos(yaw + beta) * p.dt;
-            next_s.y = py + vx * fast_sin(yaw + beta) * p.dt;
-            next_s.yaw = angle_normalize(yaw + (vx / p.l_r) * fast_sin(beta) * p.dt);
+            float wheelbase = p.l_f + p.l_r; // dynamics.cpp의 p.car.wheelbase에 해당
+
+            // Kinematic Model 적용 (dt를 곱해 상태를 업데이트)
+            next_s.x = px + vx * fast_cos(yaw) * p.dt;
+            next_s.y = py + vx * fast_sin(yaw) * p.dt;
+            next_s.yaw = angle_normalize(yaw + (vx * tanf(u.steer) / wheelbase) * p.dt);
             next_s.v = vx + u.accel * p.dt;
-            next_s.vy = 0.0f; next_s.omega = 0.0f;
+            
+            // 미사용 상태 변수 0으로 초기화
+            next_s.vy = 0.0f; 
+            next_s.omega = 0.0f; 
+            next_s.ay = 0.0f;
+            next_s.slip_angle = 0.0f;
+
             return next_s;
         }
 
@@ -505,6 +513,11 @@ namespace mppi
             std::fill(h_prev_controls_.begin(), h_prev_controls_.end(), stop_control);
             return stop_control;
         }
+        for (int k = 0; k < K_; ++k) {
+            if (std::isnan(h_costs_[k])) {
+                h_costs_[k] = 1.0e8f; // NaN 발생 시 최악의 비용으로 간주하여 도태시킴
+            }
+        }
 
         float lambda = params_.lambda; 
         float sum_weights = 0.0f;
@@ -527,7 +540,7 @@ namespace mppi
                 weighted_controls[t].accel += w * u_k.accel;
             }
         }
-
+        
         optimal_controls_ = weighted_controls; 
         Control output = weighted_controls[0];
 

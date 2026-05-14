@@ -420,7 +420,34 @@ private:
             traj_pub_->publish(msg);
         }
     }
+    
+    // [추가] 속도를 입력받아 파랑 -> 노랑 -> 빨강 그라데이션을 반환하는 함수
+    std_msgs::msg::ColorRGBA get_speed_color(float v, float alpha) {
+        std_msgs::msg::ColorRGBA color;
+        color.a = alpha;
+        
+        // 속도 정규화 (0.0 ~ max_speed)
+        float max_v = mppi_params_.max_speed;
+        float min_v = 0.0f; 
+        float t = (v - min_v) / (max_v - min_v);
+        t = std::max(0.0f, std::min(1.0f, t)); // 0.0 ~ 1.0 사이로 클램핑
 
+        // 그라데이션 (Heatmap 스타일: 저속=파랑, 중속=노랑, 고속=빨강)
+        if (t < 0.5f) {
+            // 0.0 ~ 0.5 구간: 파랑(0,0,1) -> 노랑(1,1,0)
+            color.r = 2.0f * t;
+            color.g = 2.0f * t;
+            color.b = 1.0f - 2.0f * t;
+        } else {
+            // 0.5 ~ 1.0 구간: 노랑(1,1,0) -> 빨강(1,0,0)
+            color.r = 1.0f;
+            color.g = 2.0f * (1.0f - t);
+            color.b = 0.0f;
+        }
+
+        return color;
+    }
+    
     void publish_path_visualization() {
         if (!mppi_params_.visualize_candidates) {
             return;
@@ -461,13 +488,8 @@ private:
                     p1.x = states[idx].x; p1.y = states[idx].y;
                     p2.x = states[idx+1].x; p2.y = states[idx+1].y;
                     
-                    // 속도에 따른 색상 결정 (RGBA)
-                    std_msgs::msg::ColorRGBA color;
-                    if (states[idx].v >= 0.5) {
-                        color.r = 1.0; color.g = 0.5; color.b = 0.0; color.a = 0.3; // 오렌지색 (고속)
-                    } else {
-                        color.r = 0.0; color.g = 1.0; color.b = 1.0; color.a = 0.3; // 하늘색 (저속)
-                    }
+                    // 속도에 따른 그라데이션 색상 결정 (투명도 0.3)
+                    std_msgs::msg::ColorRGBA color = get_speed_color(states[idx].v, 0.3f);
 
                     traj_marker.points.push_back(p1);
                     traj_marker.colors.push_back(color); // p1의 색상
@@ -495,12 +517,8 @@ private:
                 p1.x = best_trajectory[t].x; p1.y = best_trajectory[t].y;
                 p2.x = best_trajectory[t+1].x; p2.y = best_trajectory[t+1].y;
 
-                std_msgs::msg::ColorRGBA b_color;
-                if (best_trajectory[t].v >= 0.5) {
-                    b_color.r = 1.0; b_color.g = 0.0; b_color.b = 0.0; b_color.a = 1.0; // 빨간색 (고속)
-                } else {
-                    b_color.r = 0.0; b_color.g = 0.0; b_color.b = 1.0; b_color.a = 1.0; // 파란색 (저속)
-                }
+                // 최적 궤적 그라데이션 색상 결정 (투명도 1.0)
+                std_msgs::msg::ColorRGBA b_color = get_speed_color(best_trajectory[t].v, 1.0f);
 
                 best_traj_marker.points.push_back(p1);
                 best_traj_marker.colors.push_back(b_color);
@@ -512,6 +530,8 @@ private:
         
         vis_pub_->publish(markers);
     }
+
+
     std::int16_t num_samples_;
     mppi::Params mppi_params_;
     std::unique_ptr<mppi::MPPISolver> solver_;

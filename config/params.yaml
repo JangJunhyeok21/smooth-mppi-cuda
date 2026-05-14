@@ -5,8 +5,8 @@
     min_accel: -9.0         # m/s^2
     max_accel: 9.0          # m/s^2
     min_speed: 0.0          # m/s
-    target_speed: 6.0       # m/s
-    max_speed: 3.5         # m/s
+    target_speed: 6.5       # m/s
+    max_speed: 6.5         # m/s
     
     # --- Path Publisher Params (곡률 감속용) ---
     max_lat_g: 9.0         # 최대 횡가속도 한계 (m/s^2)

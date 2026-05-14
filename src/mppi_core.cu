@@ -45,8 +45,8 @@ namespace mppi
         
         if (vx < 0.5f) {
             State next_s;
-            float wheelbase = p.l_f + p.l_r; // dynamics.cpp의 p.car.wheelbase에 해당
-
+            float wheelbase = p.l_f + p.l_r;
+            
             // Kinematic Model 적용 (dt를 곱해 상태를 업데이트)
             next_s.x = px + vx * fast_cos(yaw) * p.dt;
             next_s.y = py + vx * fast_sin(yaw) * p.dt;
@@ -133,10 +133,10 @@ namespace mppi
 
         // 3. 오버스피드 방지 패널티 (곡률 기반 한계 속도인 ref_vs를 넘었을 때만 브레이크 강제)
         float overspeed_cost = 0.0f;
-        // if (s.v > ref_vs[nearest_idx]) {
-        //     float excess = s.v - ref_vs[nearest_idx] * 0.9f;
-        //     overspeed_cost = p.q_v * 20.0f * (excess * excess); // 20.0f는 브레이킹 강도 튜닝 계수
-        // }
+        if (s.v > ref_vs[nearest_idx]) {
+            float excess = s.v - ref_vs[nearest_idx] * 0.9f;
+            overspeed_cost = p.q_v * 20.0f * (excess * excess); // 20.0f는 브레이킹 강도 튜닝 계수
+        }
 
         // 4. Control Input Cost
         float d_steer = u.steer - u_prev.steer;
@@ -148,12 +148,12 @@ namespace mppi
         float ay_abs = fabsf(s.ay);
         if (ay_abs >= 11.5f) {  // 1.17g
             float excess = ay_abs - 9.5f;
-            lat_g_cost = p.q_lat_g * (__expf(-3.0f * excess));
+            lat_g_cost = p.q_lat_g * (excess * excess);
         }
         
         // 6. Boundary Collision Cost
         float boundary_cost = 0.0f;
-        float safe_dist = p.collision_radius + 0.4f;
+        float safe_dist = p.collision_radius + 0.1f;
 
         if (min_bnd_dist < safe_dist) {
             float penetration = safe_dist - min_bnd_dist;
@@ -413,7 +413,7 @@ namespace mppi
         CUDA_CHECK(cudaMalloc(&d_costs_, K_ * sizeof(float)));
         CUDA_CHECK(cudaMalloc(&d_rng_states_, K_ * T_ * sizeof(curandState)));
         
-        int max_path = 10000;
+        int max_path = 1000;
         CUDA_CHECK(cudaMalloc(&d_ref_xs_, max_path * sizeof(float)));
         CUDA_CHECK(cudaMalloc(&d_ref_ys_, max_path * sizeof(float)));
         CUDA_CHECK(cudaMalloc(&d_ref_yaws_, max_path * sizeof(float)));

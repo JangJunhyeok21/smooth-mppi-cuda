@@ -14,12 +14,14 @@
     
     # --- Costs (공통 기본값) ---
     q_v: 1.3
-    q_dist: 0.0
-    q_du: 0.5
-    q_steer: 0.5
-    q_collision: 200.0
-    q_lat_g: 200.0
+    q_dist: 0.0 
+    q_du: 0.2
+    q_steer: 3.0
+    q_collision: 150.0
+    q_lat_g: 250.0
     collision_radius: 0.21
+    q_progress: 16.0
+    q_escape_vel: 6.5
     
     # --- Obstacle Avoidance Params ---
     car_radius: 0.15
@@ -40,13 +42,13 @@
     I_z: 0.04712
     
     # Pacejka Coefficients
-    B_f: 8.0
+    B_f: 1.7
     C_f: 1.5
-    D_f: 19.0
+    D_f: 40.0
     
-    B_r: 8.0
+    B_r: 1.7
     C_r: 1.5
-    D_r: 17.0
+    D_r: 40.0
 
     # --- Topics (공통 키) ---
     odom_topic: /odom0

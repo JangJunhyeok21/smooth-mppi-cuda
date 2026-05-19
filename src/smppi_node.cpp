@@ -184,6 +184,8 @@ private:
         this->declare_parameter("q_steer", 0.3); mppi_params_.q_steer = this->get_parameter("q_steer").as_double();
         this->declare_parameter("q_collision", 400.0); mppi_params_.q_collision = this->get_parameter("q_collision").as_double();
         this->declare_parameter("q_lat_g", 200.0); mppi_params_.q_lat_g = this->get_parameter("q_lat_g").as_double();
+        this->declare_parameter("q_progress", 13.0); mppi_params_.q_progress = this->get_parameter("q_progress").as_double();
+        this->declare_parameter("q_escape_vel", 6.5); mppi_params_.q_escape_vel = this->get_parameter("q_escape_vel").as_double();
         this->declare_parameter("collision_radius", 0.19); mppi_params_.collision_radius = this->get_parameter("collision_radius").as_double();
         
         this->declare_parameter("car_radius", 0.15); mppi_params_.car_radius = this->get_parameter("car_radius").as_double();
@@ -447,7 +449,7 @@ private:
 
         return color;
     }
-    
+
     void publish_path_visualization() {
         if (!mppi_params_.visualize_candidates) {
             return;

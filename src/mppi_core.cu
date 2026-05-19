@@ -46,7 +46,7 @@ namespace mppi
         if (vx < 0.5f) {
             State next_s;
             float wheelbase = p.l_f + p.l_r;
-            
+
             // Kinematic Model 적용 (dt를 곱해 상태를 업데이트)
             next_s.x = px + vx * fast_cos(yaw) * p.dt;
             next_s.y = py + vx * fast_sin(yaw) * p.dt;
@@ -128,8 +128,9 @@ namespace mppi
         // 1. Reference Tracking Cost
         float dist_error = min_dist_sq;
 
-        // 2. 공격적 속도 보상 (무조건 빠르게 가도록 유도하여 거북이 주행 방지)
-        float vel_cost = -p.q_v * (s.v * fast_cos(s.yaw - ref_yaws[nearest_idx]));
+        // 2. 속도 보상
+        float vel_cost = - (p.q_v * 0.2f) * (s.v * fast_cos(s.yaw - ref_yaws[nearest_idx]));    //전체적인 직진성 유도
+
 
         // 3. 오버스피드 방지 패널티 (곡률 기반 한계 속도인 ref_vs를 넘었을 때만 브레이크 강제)
         float overspeed_cost = 0.0f;
@@ -146,10 +147,10 @@ namespace mppi
         // 5. Lateral G / Slip Cost
         float lat_g_cost = 0.0f;
         float ay_abs = fabsf(s.ay);
-        if (ay_abs >= 11.5f) {  // 1.17g
-            float excess = ay_abs - 9.5f;
-            lat_g_cost = p.q_lat_g * (excess * excess);
-        }
+        // if (ay_abs >= 11.5f) {  // 1.17g
+        //     float excess = ay_abs - 9.5f;
+        //     lat_g_cost = p.q_lat_g * (excess * excess);
+        // }
         
         // 6. Boundary Collision Cost
         float boundary_cost = 0.0f;
@@ -157,13 +158,13 @@ namespace mppi
 
         if (min_bnd_dist < safe_dist) {
             float penetration = safe_dist - min_bnd_dist;
-            float soft_cost = 1000.0f * (penetration * penetration); 
+            float soft_cost = 50.0f * (penetration * penetration); 
 
             float hard_cost = 0.0f;
             if (min_bnd_dist < p.collision_radius * 1.5f) {
                 float diff = min_bnd_dist - p.collision_radius;
                 float capped = fminf(diff, 1.0e-5f);
-                hard_cost = p.q_collision * logf(1.0f + __expf(-40.0f * capped));
+                hard_cost = p.q_collision * logf(1.0f + __expf(-30.0f * capped));
             }
 
             boundary_cost = soft_cost + hard_cost;
@@ -363,14 +364,19 @@ namespace mppi
                     u_clamped, last_u, p, min_dist, &local_path_idx); 
             }
 
-            // 🚨 핵심 수정부 2: 종점 진행도 강력 보상 (속도 향상 유도)
+            // 종점 진행도 보상
             if (t == T - 1 && path_len > 0) {
                 int progress = local_path_idx - initial_path_idx;
                 if (progress < -path_len / 2) progress += path_len; 
                 int max_possible_progress = T + 10; 
                 progress = max(0, min(progress, max_possible_progress));
-                // 무사히 완주한 경우 진행 칸수에 비례해 엄청난 보상을 주어 공격적 가속을 유도
-                total_cost -= p.q_v * (float)progress * 10.0f; 
+                
+                // 1. 기존 로직: 무사히 완주한 경우 진행 칸수에 비례해 보상
+                total_cost -= p.q_progress * (float)progress; 
+
+                // 2. 탈출 속도 강력 보상 (Out-In-Out 유도)
+                // 속도의 제곱을 사용하여 코너 탈출 시 고속을 유지하는 궤적에 압도적인 가산점을 줍니다.
+                total_cost -= p.q_escape_vel * (x.v * x.v) * 5.0f; 
             }
 
             last_u = u_clamped;

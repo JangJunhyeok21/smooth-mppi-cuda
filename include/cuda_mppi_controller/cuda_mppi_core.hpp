@@ -63,6 +63,8 @@ struct Params {
     float q_steer;
     float q_collision;
     float q_lat_g;
+    float q_progress;
+    float q_escape_vel;
     float collision_radius;
     
     // Obstacle Avoidance Params

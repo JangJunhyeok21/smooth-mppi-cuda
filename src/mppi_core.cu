@@ -41,50 +41,70 @@ namespace mppi
     __host__ __device__ State update_dynamics(const State &s, const Control &u, const Params &p)
     {
         float px = s.x; float py = s.y; float yaw = s.yaw;
-        float vx = s.v; float vy = s.vy; float omega = s.omega;
+        float vel = s.v; float omega = s.omega; float slip_angle = s.slip_angle;
         
-        if (vx < 0.5f) {
+        // 1. 저속 구간: 순수 운동학 모델 (Kinematic Model)
+        // 분모에 vel이 들어가는 동역학의 특이점(Division by zero)을 방지
+        if (fabsf(vel) < 0.5f) {
             State next_s;
             float wheelbase = p.l_f + p.l_r;
 
-            // Kinematic Model 적용 (dt를 곱해 상태를 업데이트)
-            next_s.x = px + vx * fast_cos(yaw) * p.dt;
-            next_s.y = py + vx * fast_sin(yaw) * p.dt;
-            next_s.yaw = angle_normalize(yaw + (vx * tanf(u.steer) / wheelbase) * p.dt);
-            next_s.v = vx + u.accel * p.dt;
+            // 기존 MPC Kinematic 수식 적용
+            float dot_x = vel * fast_cos(yaw);
+            float dot_y = vel * fast_sin(yaw);
+            float dot_yaw = vel * tanf(u.steer) / wheelbase;
+            float dot_vel = u.accel;
             
-            // 미사용 상태 변수 0으로 초기화
-            next_s.vy = 0.0f; 
-            next_s.omega = 0.0f; 
-            next_s.ay = 0.0f;
+            next_s.x = px + dot_x * p.dt;
+            next_s.y = py + dot_y * p.dt;
+            next_s.yaw = angle_normalize(yaw + dot_yaw * p.dt);
+            next_s.v = vel + dot_vel * p.dt;
+            
+            // 기존 MPC 기준 미사용 변수 초기화 (omega는 제어 연속성을 위해 dot_yaw 인가)
+            next_s.omega = dot_yaw; 
             next_s.slip_angle = 0.0f;
+            
+            // MPPI 비용 함수용 보조 변수
+            next_s.vy = 0.0f; 
+            next_s.ay = 0.0f;
 
             return next_s;
         }
 
+        // 2. 고속 구간: 파세이카 동역학 모델 (Pacejka Dynamic Model)
+        
+        // 슬립각(beta)으로부터 차량 좌표계 vx, vy 역산 (타이어 슬립각 alpha 연산용)
+        float vx = vel * fast_cos(slip_angle);
+        float vy = vel * fast_sin(slip_angle);
+
+        // 전/후륜 타이어 슬립각 계산
         float alpha_f = u.steer - atan2f(vy + p.l_f * omega, vx);
         float alpha_r = -atan2f(vy - p.l_r * omega, vx);
 
+        // 타이어 횡력 연산 (Newton 단위 - Df, Dr 파라미터가 40.0 같은 힘의 크기일 때 사용)
         float F_fy = p.D_f * fast_sin(p.C_f * atanf(p.B_f * alpha_f));
         float F_ry = p.D_r * fast_sin(p.C_r * atanf(p.B_r * alpha_r));
 
-        float F_rx = p.mass * u.accel; 
-        float dot_vx = (F_rx - F_fy * fast_sin(u.steer) + p.mass * vy * omega) / p.mass;
-        float dot_vy = (F_ry + F_fy * fast_cos(u.steer) - p.mass * vx * omega) / p.mass;
-        float dot_omega = (F_fy * p.l_f * fast_cos(u.steer) - F_ry * p.l_r) / p.I_z;
+        // 기존 MPC 동역학 수식 완벽 적용 (단위 및 로직 동일)
+        float dot_x = vel * fast_cos(yaw + slip_angle);
+        float dot_y = vel * fast_sin(yaw + slip_angle);
+        float dot_yaw = omega;
+        float dot_vel = u.accel * (1.0f - p.Cm0 * vel); // 모터 감쇠 계수 적용
+        float dot_omega = (p.l_f * F_fy * fast_cos(u.steer) - p.l_r * F_ry) / p.I_z; // 토크 / 관성모멘트
+        float dot_slip = ((F_fy + F_ry) / (p.mass * vel)) - omega; // 횡력의 합 / (질량 * 속도)
 
-        float dot_x = vx * fast_cos(yaw) - vy * fast_sin(yaw);
-        float dot_y = vx * fast_sin(yaw) + vy * fast_cos(yaw);
-
+        // 상태 업데이트 (Euler Integration)
         State next_s;
         next_s.x = px + dot_x * p.dt;
         next_s.y = py + dot_y * p.dt;
-        next_s.yaw = angle_normalize(yaw + omega * p.dt);
-        next_s.v = vx + dot_vx * p.dt;
-        next_s.vy = vy + dot_vy * p.dt;
-        next_s.ay = dot_vy + vx * omega;
+        next_s.yaw = angle_normalize(yaw + dot_yaw * p.dt);
+        next_s.v = vel + dot_vel * p.dt;
         next_s.omega = omega + dot_omega * p.dt;
-        next_s.slip_angle = atan2f(next_s.vy, fabsf(next_s.v) + 1e-5f);
+        next_s.slip_angle = slip_angle + dot_slip * p.dt;
+
+        // MPPI 비용 함수에서 사용하는 보조 변수 도출
+        next_s.vy = next_s.v * fast_sin(next_s.slip_angle); // 슬립각 기반 vy 
+        next_s.ay = (F_fy * fast_cos(u.steer) + F_ry) / p.mass; // 횡가속도 a_y = F_y / m 
 
         return next_s;
     }
@@ -134,10 +154,10 @@ namespace mppi
 
         // 3. 오버스피드 방지 패널티 (곡률 기반 한계 속도인 ref_vs를 넘었을 때만 브레이크 강제)
         float overspeed_cost = 0.0f;
-        if (s.v > ref_vs[nearest_idx]) {
-            float excess = s.v - ref_vs[nearest_idx] * 0.9f;
-            overspeed_cost = p.q_v * 20.0f * (excess * excess); // 20.0f는 브레이킹 강도 튜닝 계수
-        }
+        // if (s.v > ref_vs[nearest_idx]) {
+        //     float excess = s.v - ref_vs[nearest_idx] * 0.9f;
+        //     overspeed_cost = p.q_v * 20.0f * (excess * excess); // 20.0f는 브레이킹 강도 튜닝 계수
+        // }
 
         // 4. Control Input Cost
         float d_steer = u.steer - u_prev.steer;
@@ -453,7 +473,7 @@ namespace mppi
                                         const std::vector<float> &yaws, const std::vector<float> &vs) {
         h_ref_xs_ = xs; h_ref_ys_ = ys; 
         ref_path_len_ = xs.size();
-        if (ref_path_len_ > 10000) ref_path_len_ = 10000; 
+        if (ref_path_len_ > 1000) ref_path_len_ = 1000; 
         if (ref_path_len_ > 0) {
             CUDA_CHECK(cudaMemcpy(d_ref_xs_, xs.data(), ref_path_len_ * sizeof(float), cudaMemcpyHostToDevice));
             CUDA_CHECK(cudaMemcpy(d_ref_ys_, ys.data(), ref_path_len_ * sizeof(float), cudaMemcpyHostToDevice));
@@ -465,7 +485,7 @@ namespace mppi
     void MPPISolver::set_boundaries(const std::vector<float>& left_xs, const std::vector<float>& left_ys,
                                     const std::vector<float>& right_xs, const std::vector<float>& right_ys) {
         bnd_len_ = left_xs.size();
-        if (bnd_len_ > 10000) bnd_len_ = 10000; 
+        if (bnd_len_ > 1000) bnd_len_ = 1000; 
         if (bnd_len_ > 0) {
             CUDA_CHECK(cudaMemcpy(d_left_bnd_xs_, left_xs.data(), bnd_len_ * sizeof(float), cudaMemcpyHostToDevice));
             CUDA_CHECK(cudaMemcpy(d_left_bnd_ys_, left_ys.data(), bnd_len_ * sizeof(float), cudaMemcpyHostToDevice));

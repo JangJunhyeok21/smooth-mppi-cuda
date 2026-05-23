@@ -202,6 +202,7 @@ private:
         this->declare_parameter("l_f", 0.163); mppi_params_.l_f = this->get_parameter("l_f").as_double();
         this->declare_parameter("l_r", 0.162); mppi_params_.l_r = this->get_parameter("l_r").as_double();
         this->declare_parameter("I_z", 0.04712); mppi_params_.I_z = this->get_parameter("I_z").as_double();
+        this->declare_parameter("Cm0", 0.04); mppi_params_.Cm0 = this->get_parameter("Cm0").as_double();
         
         this->declare_parameter("B_f", 14.0); mppi_params_.B_f = this->get_parameter("B_f").as_double();
         this->declare_parameter("C_f", 1.5); mppi_params_.C_f = this->get_parameter("C_f").as_double();

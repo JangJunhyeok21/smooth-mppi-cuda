@@ -87,6 +87,7 @@ struct Params {
     float I_z;
     float l_f;
     float l_r;
+    float Cm0;
     
     // Pacejka
     float B_f, C_f, D_f;

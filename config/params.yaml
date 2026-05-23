@@ -2,19 +2,19 @@
   ros__parameters:
     # --- Limits ---
     max_steer: 0.4089        # rad
-    min_accel: -9.0         # m/s^2
-    max_accel: 9.0          # m/s^2
-    min_speed: 0.0          # m/s
-    target_speed: 6.5       # m/s
-    max_speed: 6.5         # m/s
+    min_accel: -9.0          # m/s^2
+    max_accel: 9.0           # m/s^2
+    min_speed: 0.0           # m/s
+    target_speed: 5.5        # m/s
+    max_speed: 6.0           # m/s
     
     # --- Path Publisher Params (곡률 감속용) ---
-    max_lat_g: 9.0         # 최대 횡가속도 한계 (m/s^2)
-    max_decel: 9.0          # 코너 진입 전 브레이킹 한계 감속도
+    max_lat_g: 9.0           # 최대 횡가속도 한계 (m/s^2)
+    max_decel: 9.0           # 코너 진입 전 브레이킹 한계 감속도
     
-    # --- Costs (공통 기본값) ---
+    # --- Costs (최적화 결과 반영) ---
     q_v: 1.3
-    q_dist: 0.0 
+    q_dist: 0.0
     q_du: 0.2
     q_steer: 3.0
     q_collision: 150.0
@@ -28,20 +28,21 @@
     q_obs: 50.0
     
     # --- Noise & Tuning ---
-    noise_steer_std: 0.4    # rad/s
-    noise_accel_std: 2.0    # m/s^3
-    max_steer_rate: 8.0     # rad/s
-    max_accel_rate: 100.0  # m/s^3
+    noise_steer_std: 0.4     # rad/s
+    noise_accel_std: 2.0     # m/s^3
+    max_steer_rate: 8.0      # rad/s
+    max_accel_rate: 100.0    # m/s^3
     lambda: 15.0
     visualize_candidates: true
     
-    # --- Dynamic Model Params ---
+    # --- Dynamic Model Params (Pacejka & Kinematics) ---
     mass: 3.74
     l_f: 0.163
     l_r: 0.162
     I_z: 0.04712
+    Cm0: 0.04                # 고속 감쇠용 모터 역기전력 계수
     
-    # Pacejka Coefficients
+    # Pacejka Coefficients (힘 Newton 단위)
     B_f: 1.7
     C_f: 1.5
     D_f: 40.0
@@ -56,4 +57,4 @@
     velocity_topic: /odom
     drive_topic: /ackermann_cmd0
     path_topic: /mppi_target_path
-    use_mcl_pose: false
+    use_mcl_pose: false      # 시뮬레이터 구동 모드

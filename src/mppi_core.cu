@@ -160,19 +160,16 @@ namespace mppi
             nearest_idx = start_search;
         *last_idx = nearest_idx;
 
-        // 1. Reference Tracking Cost
-        float dist_error = min_dist_sq;
-
-        // 2. 속도 보상
+        // 1. 속도 보상
         float vel_cost = -p.q_v * (s.v * fast_cos(s.yaw - ref_yaws[nearest_idx])); // 전체적인 직진성 유도
 
-        // 4. Control Input Cost
+        // 2. Control Input Cost
         float d_steer = u.steer - u_prev.steer;
         float d_accel = u.accel - u_prev.accel;
         float rate_cost = p.q_du * (d_steer * d_steer + d_accel * d_accel);
         float steer_cost = p.q_steer * (u.steer * u.steer);
 
-        // 6. Boundary Collision Cost
+        // 3. Boundary Collision Cost
         float boundary_cost = 0.0f;
         float safe_dist = p.collision_radius + 0.1f;
 
@@ -192,7 +189,7 @@ namespace mppi
             boundary_cost = soft_cost + hard_cost;
         }
 
-        // 7. Obstacle Cost (정적 벽 취급 + 동적 예측 및 ACC)
+        // 4. Obstacle Cost (정적 벽 취급 + 동적 예측 및 ACC)
         float obs_cost = 0.0f;
 
         for (int i = 0; i < p.num_obstacles; ++i)
@@ -237,15 +234,13 @@ namespace mppi
                 float target_gap = 0.3f; // 30cm 유지 목표
 
                 // (2) 충돌 회피 (우회 공간이 있으면 자연스럽게 추월 궤적이 선택됨)
-                if (bumper_dist <= target_gap)
-                {
-                    // 30cm 이내 진입 시 강력한 충돌 패널티.
-                    // 양옆이 벽으로 막혀있다면, 속도를 줄여서 이 영역에 안 들어가는 샘플만 살아남음.
-                    obs_cost += 10000.0f;
-                }
-                // (3) ACC 구간: 30cm ~ 1.0m 사이
-                else if (bumper_dist < target_gap + 0.7f)
-                {
+                if (bumper_dist <= 0.1f) {
+                    obs_cost += 10000.0f; // 진짜 충돌 위험 시에만 폐기
+                } else if (bumper_dist <= target_gap) {
+                    // 10cm ~ 30cm 구간: 강한 소프트 페널티로 밀어내어 거리를 벌리도록 유도
+                    float penetration = target_gap - bumper_dist;
+                    obs_cost += 5000.0f * (penetration * penetration); 
+                } else if (bumper_dist < target_gap + 0.7f) {
                     // 논리 오류 방지: 내가 상대방을 추월하기 위해 옆 차선에 있거나 이미 앞서가고 있다면 감속하면 안 됨.
                     // 내적(Dot Product)을 통해 내 차량이 상대 차량의 '뒤'에 있는지 판단.
                     // 상대 차량의 직진 벡터와, 상대차량 -> 내 차량으로 향하는 벡터의 내적
@@ -266,7 +261,7 @@ namespace mppi
             }
         }
 
-        return p.q_dist * dist_error + vel_cost + steer_cost + rate_cost + boundary_cost + obs_cost;
+        return vel_cost + steer_cost + rate_cost + boundary_cost + obs_cost;
     }
 
     // [수정된 함수] O(N) 바운더리 탐색을 대체하는 O(1) 횡방향 오차 기반 거리 연산

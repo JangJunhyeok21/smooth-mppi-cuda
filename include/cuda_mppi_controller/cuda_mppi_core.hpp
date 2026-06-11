@@ -25,6 +25,15 @@
 
 namespace mppi {
 
+struct alignas(16) Obstacle {
+    float x;
+    float y;
+    float yaw;
+    float v;
+    float radius;
+    bool is_dynamic; // 속도 0.3m/s 기준으로 분류
+};
+
 struct alignas(16) ButterworthCoeffs {
     float b0, b1, b2, a1, a2;
 };
@@ -57,8 +66,8 @@ struct Params {
     float max_speed;
     
     // Cost Weights
-    float q_dist;
     float q_v;
+    float q_progress;
     float q_du;
     float q_steer;
     float q_collision;
@@ -69,10 +78,10 @@ struct Params {
     
     // Obstacle Avoidance Params
     int num_obstacles;
-    float obs_x[MAX_OBS];
-    float obs_y[MAX_OBS];
+    Obstacle obstacles[MAX_OBS]; // 기존 obs_x, obs_y 배열을 구조체 배열로 대체
     float car_radius;
     float q_obs;
+    float q_acc;                 // [추가] ACC 속도 추종 패널티 가중치 (예: 15.0)
     
     // Noise & Tuning
     float noise_steer_std;

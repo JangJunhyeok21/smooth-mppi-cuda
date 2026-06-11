@@ -37,6 +37,10 @@ public:
         right_bnd_sub_ = this->create_subscription<nav_msgs::msg::Path>(
             "/mppi_right_boundary", qos, std::bind(&MPPINode::right_bnd_callback, this, std::placeholders::_1));
 
+        // [추가] 동적/정적 장애물 정보를 받는 Subscriber 생성
+        // obs_sub_ = this->create_subscription<custom_msgs::msg::ObstacleArray>(
+        //     obs_topic_, 10, std::bind(&MPPINode::obstacle_callback, this, std::placeholders::_1));
+
         if (use_mcl_pose_) {
             pose_sub_ = this->create_subscription<geometry_msgs::msg::PoseStamped>(
                 pose_topic_, 10, std::bind(&MPPINode::pose_callback, this, std::placeholders::_1));
@@ -171,15 +175,15 @@ private:
 
     void load_parameters() {
         this->declare_parameter("num_samples", 8000); num_samples_ = this->get_parameter("num_samples").as_int();
-        this->declare_parameter("max_steer", 0.507); mppi_params_.max_steer = this->get_parameter("max_steer").as_double();
+        this->declare_parameter("max_steer", 0.4089); mppi_params_.max_steer = this->get_parameter("max_steer").as_double();
         this->declare_parameter("min_accel", -9.0); mppi_params_.min_accel = this->get_parameter("min_accel").as_double();
         this->declare_parameter("max_accel", 9.0); mppi_params_.max_accel = this->get_parameter("max_accel").as_double();
         this->declare_parameter("min_speed", 0.0); mppi_params_.min_speed = this->get_parameter("min_speed").as_double();
         this->declare_parameter("target_speed", 6.0); mppi_params_.target_speed = this->get_parameter("target_speed").as_double();
         this->declare_parameter("max_speed", 10.0); mppi_params_.max_speed = this->get_parameter("max_speed").as_double();
         
-        this->declare_parameter("q_dist", 1.5); mppi_params_.q_dist = this->get_parameter("q_dist").as_double();
-        this->declare_parameter("q_v", 2.0); mppi_params_.q_v = this->get_parameter("q_v").as_double();
+        this->declare_parameter("q_v", 0.3); mppi_params_.q_v = this->get_parameter("q_v").as_double();
+        this->declare_parameter("q_progress", 6.0); mppi_params_.q_progress = this->get_parameter("q_progress").as_double();
         this->declare_parameter("q_du", 0.8); mppi_params_.q_du = this->get_parameter("q_du").as_double();
         this->declare_parameter("q_steer", 0.3); mppi_params_.q_steer = this->get_parameter("q_steer").as_double();
         this->declare_parameter("q_collision", 400.0); mppi_params_.q_collision = this->get_parameter("q_collision").as_double();
@@ -190,7 +194,7 @@ private:
         
         this->declare_parameter("car_radius", 0.15); mppi_params_.car_radius = this->get_parameter("car_radius").as_double();
         this->declare_parameter("q_obs", 50.0); mppi_params_.q_obs = this->get_parameter("q_obs").as_double();
-        
+        this->declare_parameter("q_acc", 15.0); mppi_params_.q_acc = this->get_parameter("q_acc").as_double();
         this->declare_parameter("noise_steer_std", 0.4); mppi_params_.noise_steer_std = this->get_parameter("noise_steer_std").as_double();
         this->declare_parameter("noise_accel_std", 2.0); mppi_params_.noise_accel_std = this->get_parameter("noise_accel_std").as_double();
         this->declare_parameter("max_steer_rate", 0.5236); mppi_params_.max_steer_rate = this->get_parameter("max_steer_rate").as_double();
@@ -217,7 +221,8 @@ private:
         this->declare_parameter("pose_topic", "/mcl_pose"); pose_topic_ = this->get_parameter("pose_topic").as_string();
         this->declare_parameter("velocity_topic", "/odom"); velocity_topic_ = this->get_parameter("velocity_topic").as_string();
         this->declare_parameter("drive_topic", "/ackermann_cmd0"); drive_topic_ = this->get_parameter("drive_topic").as_string();
-        
+        this->declare_parameter("obs_topic", "/perception/obstacles"); obs_topic_ = this->get_parameter("obs_topic").as_string();
+
         // 🚨 타겟 경로 토픽 이름 변경
         this->declare_parameter("path_topic", "/mppi_target_path"); path_topic_ = this->get_parameter("path_topic").as_string();      
         
@@ -550,6 +555,8 @@ private:
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
     rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr pose_sub_;
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr vel_sub_;
+    // [추가] 장애물 Subscriber
+    // rclcpp::Subscription<custom_msgs::msg::ObstacleArray>::SharedPtr obs_sub_;
     
     rclcpp::Publisher<ackermann_msgs::msg::AckermannDriveStamped>::SharedPtr drive_pub_;
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr vis_pub_;
@@ -562,7 +569,7 @@ private:
     bool has_velocity_{false};
     geometry_msgs::msg::PoseStamped pose_;
     nav_msgs::msg::Odometry velocity_odom_;
-    std::string odom_topic_, pose_topic_, velocity_topic_, drive_topic_, path_topic_;
+    std::string odom_topic_, pose_topic_, velocity_topic_, drive_topic_, path_topic_, obs_topic_;
     bool odom_received_ = false;
 };
 

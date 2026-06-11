@@ -151,26 +151,11 @@ namespace mppi
         // 2. 속도 보상
         float vel_cost = - (p.q_v * 0.2f) * (s.v * fast_cos(s.yaw - ref_yaws[nearest_idx]));    //전체적인 직진성 유도
 
-
-        // 3. 오버스피드 방지 패널티 (곡률 기반 한계 속도인 ref_vs를 넘었을 때만 브레이크 강제)
-        float overspeed_cost = 0.0f;
-        // if (s.v > ref_vs[nearest_idx]) {
-        //     float excess = s.v - ref_vs[nearest_idx] * 0.9f;
-        //     overspeed_cost = p.q_v * 20.0f * (excess * excess); // 20.0f는 브레이킹 강도 튜닝 계수
-        // }
-
         // 4. Control Input Cost
         float d_steer = u.steer - u_prev.steer;
-        float d_accel = u.accel - u_prev.accel; 
+        float d_accel = u.accel - u_prev.accel;
+        float rate_cost = p.q_du * (d_steer * d_steer + d_accel * d_accel);
         float steer_cost = p.q_steer * (u.steer * u.steer);
-
-        // 5. Lateral G / Slip Cost
-        float lat_g_cost = 0.0f;
-        float ay_abs = fabsf(s.ay);
-        // if (ay_abs >= 11.5f) {  // 1.17g
-        //     float excess = ay_abs - 9.5f;
-        //     lat_g_cost = p.q_lat_g * (excess * excess);
-        // }
         
         // 6. Boundary Collision Cost
         float boundary_cost = 0.0f;
@@ -202,7 +187,7 @@ namespace mppi
             }
         }
 
-        return p.q_dist * dist_error + vel_cost + overspeed_cost + steer_cost + lat_g_cost + boundary_cost + obs_cost;
+        return p.q_dist * dist_error + vel_cost + steer_cost + rate_cost + boundary_cost + obs_cost;
     }
     
     // [수정된 함수] O(N) 바운더리 탐색을 대체하는 O(1) 횡방향 오차 기반 거리 연산

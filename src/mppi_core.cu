@@ -159,11 +159,11 @@ namespace mppi
         
         // 6. Boundary Collision Cost
         float boundary_cost = 0.0f;
-        float safe_dist = p.collision_radius + 0.1f;
+        float safe_dist = p.collision_radius + 0.35f;
 
         if (min_bnd_dist < safe_dist) {
             float penetration = safe_dist - min_bnd_dist;
-            float soft_cost = 50.0f * (penetration * penetration); 
+            float soft_cost = 70.0f * (penetration * penetration); 
 
             float hard_cost = 0.0f;
             if (min_bnd_dist < p.collision_radius * 1.5f) {
@@ -196,9 +196,10 @@ namespace mppi
         const float *ref_xs, const float *ref_ys, const float *ref_yaws,
         const float *left_xs, const float *left_ys,
         const float *right_xs, const float *right_ys,
-        int path_len, int current_path_idx, int *nearest_idx_out) 
+        int path_len, int bnd_len, int current_path_idx, int *nearest_idx_out)
     {
-        if (ref_xs == nullptr || left_xs == nullptr || path_len <= 0) return 1e9f;
+        if (ref_xs == nullptr || left_xs == nullptr || path_len <= 0 || bnd_len <= 0) return 1e9f;
+        int eff_len = (bnd_len < path_len) ? bnd_len : path_len;
 
         // 1. 이전 인덱스 근처에서 가장 가까운 중심점(Reference) 탐색
         float min_dist_sq = 1e9f;
@@ -206,12 +207,12 @@ namespace mppi
         int search_window = 30;
         int start_search = current_path_idx;
 
-        if (start_search >= path_len) start_search %= path_len;
+        if (start_search >= eff_len) start_search %= eff_len;
         if (start_search < 0) start_search = 0;
 
         for (int offset = 0; offset < search_window; ++offset) {
             int i = start_search + offset;
-            if (i >= path_len) i -= path_len;
+            if (i >= eff_len) i -= eff_len;
             
             float dx = s.x - ref_xs[i];
             float dy = s.y - ref_ys[i];
@@ -334,30 +335,33 @@ namespace mppi
             }
 
             float min_dist = compute_min_boundary_distance(
-                x, ref_xs, ref_ys, ref_yaws, left_bnd_xs, left_bnd_ys, right_bnd_xs, right_bnd_ys, path_len, local_path_idx, &local_path_idx);
+                x, ref_xs, ref_ys, ref_yaws, left_bnd_xs, left_bnd_ys, right_bnd_xs, right_bnd_ys, path_len, bnd_len, local_path_idx, &local_path_idx);
             
-            if (min_dist < p.collision_radius) {
+            // EKF 위치 오차(±5~10cm)를 고려해 임계값에 0.05m 여유를 둠.
+            // collision_radius 내부 확실한 침범만 is_fault 처리.
+            if (min_dist < p.collision_radius - 0.05f) {
                 is_fault = true;
             }
 
             if (is_fault) {
-                // 기본 패널티를 10000으로 낮추고, 오래 버틸수록 패널티를 50씩 대폭 깎아줍니다.
-                // 이로 인해 어차피 박을 상황이면 풀브레이킹+조향으로 1틱이라도 더 버티는 샘플의 가중치가 높아집니다.
-                total_cost += 10000.0f - (float)t * 50.0f; 
-                
-                // 충돌했더라도, 그때까지 더 멀리 전진했다면 보상을 줍니다.
+                // 고횡G 이탈 시: 현재 조향 유지 + 풀브레이킹으로 살아남는 샘플 우선
+                total_cost += 10000.0f - (float)t * 50.0f;
+
                 if (path_len > 0) {
                     int progress = local_path_idx - initial_path_idx;
-                    if (progress < -path_len / 2) progress += path_len; 
-                    int max_possible_progress = T + 10; 
+                    if (progress < -path_len / 2) progress += path_len;
+                    int max_possible_progress = T + 10;
                     progress = max(0, min(progress, max_possible_progress));
-                    total_cost -= p.q_v * (float)progress * 5.0f; 
+                    total_cost -= p.q_v * (float)progress * 5.0f;
                 }
 
-                const Control zero_control = {0.0f, 0.0f};
+                // {steer, accel} 순서: 조향 0(방향 편향 없음) + 풀브레이킹
+                // steer를 유지하면 스키드 패드 등 코너 구간에서 warm-start가 오염됨
+                Control safe_control = {0.0f, -1.0f};
+
                 for (int fill_t = t + 1; fill_t < T; ++fill_t) {
                     states[k * T + fill_t] = x;
-                    controls[k * T + fill_t] = zero_control;
+                    controls[k * T + fill_t] = safe_control;
                 }
                 break;
             }
@@ -381,7 +385,7 @@ namespace mppi
 
                 // 2. 탈출 속도 강력 보상 (Out-In-Out 유도)
                 // 속도의 제곱을 사용하여 코너 탈출 시 고속을 유지하는 궤적에 압도적인 가산점을 줍니다.
-                total_cost -= p.q_escape_vel * (x.v * x.v) * 5.0f; 
+                total_cost -= p.q_escape_vel * (x.v * x.v); 
             }
 
             last_u = u_clamped;
@@ -515,19 +519,20 @@ namespace mppi
     }
 
     Control MPPISolver::compute_optimal_control(const State &current_state) {
-        auto min_it = std::min_element(h_costs_.begin(), h_costs_.end());
-        float min_cost = *min_it;
-        best_k_ = static_cast<int>(std::distance(h_costs_.begin(), min_it));
-
-        if (std::isinf(min_cost) || min_cost >= 1.0e8f) { 
-            Control stop_control = {0.0f, -5.0f};
-            std::fill(h_prev_controls_.begin(), h_prev_controls_.end(), stop_control);
-            return stop_control;
-        }
         for (int k = 0; k < K_; ++k) {
             if (std::isnan(h_costs_[k])) {
                 h_costs_[k] = 1.0e8f; // NaN 발생 시 최악의 비용으로 간주하여 도태시킴
             }
+        }
+
+        auto min_it = std::min_element(h_costs_.begin(), h_costs_.end());
+        float min_cost = *min_it;
+        best_k_ = static_cast<int>(std::distance(h_costs_.begin(), min_it));
+
+        if (std::isinf(min_cost) || min_cost >= 1.0e8f) {
+            Control stop_control = {0.0f, -5.0f};
+            std::fill(h_prev_controls_.begin(), h_prev_controls_.end(), stop_control);
+            return stop_control;
         }
 
         float lambda = params_.lambda; 

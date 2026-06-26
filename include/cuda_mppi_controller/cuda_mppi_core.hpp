@@ -13,6 +13,13 @@
 #define HOST_DEVICE
 #endif
 
+// float2는 CUDA 컴파일러에만 존재하므로 호스트 C++ 코드에서도 쓸 수 있게 alias 정의
+#ifdef __CUDACC__
+typedef float2 Vec2;
+#else
+struct alignas(8) Vec2 { float x; float y; };
+#endif
+
 #define CUDA_CHECK(call) \
     do { \
         cudaError_t err = call; \
@@ -45,6 +52,14 @@ struct alignas(8) Control {
     float accel;
 };
 
+struct ObstacleState {
+    float x, y;          // 현재 위치 (world frame)
+    float vx, vy;        // 속도 벡터 (정적 장애물이면 0)
+    float theta;         // 현재 헤딩 (perception yaw)
+    Vec2 p0, p1, p2, p3; // 베지에 제어점 (CPU 사전 계산)
+    bool detected;       // 유효 장애물 여부
+};
+
 struct Params {
     float dt;
     
@@ -67,12 +82,24 @@ struct Params {
     float q_escape_vel;
     float collision_radius;
     
-    // Obstacle Avoidance Params
+    // Obstacle Avoidance Params (deprecated: 아래 동적 장애물 필드 사용 권장)
     int num_obstacles;
     float obs_x[MAX_OBS];
     float obs_y[MAX_OBS];
     float car_radius;
     float q_obs;
+
+    // 동적 장애물 예측 (베지에 기반)
+    ObstacleState obstacles[MAX_OBS];
+    int num_obs;
+    float q_obs_gauss;   // 가우시안 장애물 패널티 가중치
+    float sigma_x;       // 종방향 가우시안 폭 (m)
+    float sigma_y;       // 횡방향 가우시안 폭 (m)
+
+    // 멀티모달 샘플링
+    float modal_steer_offset;     // 조향 편향 δ (0.10~0.25 rad)
+    float modal_activation_dist;  // 활성화 거리 임계값 (2.0m)
+    bool  multimodal_enabled;     // 런타임 플래그 (히스테리시스 로직이 설정)
     
     // Noise & Tuning
     float noise_steer_std;

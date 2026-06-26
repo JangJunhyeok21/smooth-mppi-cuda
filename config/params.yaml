@@ -24,8 +24,8 @@
     q_escape_vel: 8.0  #32.0
     
     # --- Obstacle Avoidance Params ---
-    car_radius: 0.15
-    q_obs: 50.0
+    car_radius: 0.25
+    q_obs: 150.0
     
     # --- Noise & Tuning ---
     noise_steer_std: 0.4     # rad/s
@@ -58,3 +58,10 @@
     drive_topic: /ackermann_cmd0
     path_topic: /mppi_target_path
     use_mcl_pose: false      # 시뮬레이터 구동 모드
+
+    # --- 장애물 회피 / 추월 파라미터 ---
+    obstacle_topic: /f1/perception/object/obstacles/arr
+    static_vel_threshold: 0.5      # (m/s) 이하이면 정적 장애물 → 벽으로 처리
+    front_obstacle_range: 5.0      # (m)  전방 탐색 범위
+    overtake_lateral_margin: 0.3   # (m)  추월 판단 시 필요한 추가 여유 폭
+    cruise_follow_dist: 0.10       # (m)  크루즈 컨트롤 목표 간격 (10 cm)

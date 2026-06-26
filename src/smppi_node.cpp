@@ -8,6 +8,7 @@
 #include "geometry_msgs/msg/pose_stamped.hpp"
 #include "cuda_mppi_controller/cuda_mppi_core.hpp"
 #include "smppi_cuda_controller/msg/mppi_trajectory.hpp"
+#include "f1_msgs/msg/f1state_arr.hpp"
 #include <algorithm>
 #include <cmath>
 
@@ -37,9 +38,8 @@ public:
         right_bnd_sub_ = this->create_subscription<nav_msgs::msg::Path>(
             "/mppi_right_boundary", qos, std::bind(&MPPINode::right_bnd_callback, this, std::placeholders::_1));
 
-        // [추가] 동적/정적 장애물 정보를 받는 Subscriber 생성
-        // obs_sub_ = this->create_subscription<custom_msgs::msg::ObstacleArray>(
-        //     obs_topic_, 10, std::bind(&MPPINode::obstacle_callback, this, std::placeholders::_1));
+        obs_sub_ = this->create_subscription<f1_msgs::msg::F1stateArr>(
+            obs_topic_, 10, std::bind(&MPPINode::obstacle_callback, this, std::placeholders::_1));
 
         if (use_mcl_pose_) {
             pose_sub_ = this->create_subscription<geometry_msgs::msg::PoseStamped>(
@@ -188,11 +188,12 @@ private:
         this->declare_parameter("q_steer", 0.3); mppi_params_.q_steer = this->get_parameter("q_steer").as_double();
         this->declare_parameter("q_collision", 400.0); mppi_params_.q_collision = this->get_parameter("q_collision").as_double();
         this->declare_parameter("q_lat_g", 200.0); mppi_params_.q_lat_g = this->get_parameter("q_lat_g").as_double();
-        this->declare_parameter("q_progress", 13.0); mppi_params_.q_progress = this->get_parameter("q_progress").as_double();
+        this->declare_parameter("q_dist", 1.0); mppi_params_.q_dist = this->get_parameter("q_dist").as_double();
         this->declare_parameter("q_escape_vel", 6.5); mppi_params_.q_escape_vel = this->get_parameter("q_escape_vel").as_double();
         this->declare_parameter("collision_radius", 0.19); mppi_params_.collision_radius = this->get_parameter("collision_radius").as_double();
         
         this->declare_parameter("car_radius", 0.15); mppi_params_.car_radius = this->get_parameter("car_radius").as_double();
+        this->declare_parameter("obs_radius", 0.2); obs_radius_ = static_cast<float>(this->get_parameter("obs_radius").as_double());
         this->declare_parameter("q_obs", 50.0); mppi_params_.q_obs = this->get_parameter("q_obs").as_double();
         this->declare_parameter("q_acc", 15.0); mppi_params_.q_acc = this->get_parameter("q_acc").as_double();
         this->declare_parameter("noise_steer_std", 0.4); mppi_params_.noise_steer_std = this->get_parameter("noise_steer_std").as_double();
@@ -221,7 +222,7 @@ private:
         this->declare_parameter("pose_topic", "/mcl_pose"); pose_topic_ = this->get_parameter("pose_topic").as_string();
         this->declare_parameter("velocity_topic", "/odom"); velocity_topic_ = this->get_parameter("velocity_topic").as_string();
         this->declare_parameter("drive_topic", "/ackermann_cmd0"); drive_topic_ = this->get_parameter("drive_topic").as_string();
-        this->declare_parameter("obs_topic", "/perception/obstacles"); obs_topic_ = this->get_parameter("obs_topic").as_string();
+        this->declare_parameter("obs_topic", "/f1/perception/object/obstacles/arr"); obs_topic_ = this->get_parameter("obs_topic").as_string();
 
         // 🚨 타겟 경로 토픽 이름 변경
         this->declare_parameter("path_topic", "/mppi_target_path"); path_topic_ = this->get_parameter("path_topic").as_string();      
@@ -297,6 +298,26 @@ private:
         }
         update_boundaries();
         right_bnd_received_ = true;
+    }
+
+    void obstacle_callback(const f1_msgs::msg::F1stateArr::SharedPtr msg) {
+        std::vector<mppi::Obstacle> obstacles;
+        obstacles.reserve(std::min((int)msg->f1_state_arr.size(), MAX_OBS));
+
+        for (const auto& f1 : msg->f1_state_arr) {
+            if ((int)obstacles.size() >= MAX_OBS) break;
+
+            mppi::Obstacle obs;
+            obs.x      = static_cast<float>(f1.x);
+            obs.y      = static_cast<float>(f1.y);
+            obs.yaw    = static_cast<float>(f1.yaw);
+            obs.v      = static_cast<float>(f1.v);
+            obs.radius = obs_radius_;
+            obs.is_dynamic = (std::abs(f1.v) >= 0.5f);
+            obstacles.push_back(obs);
+        }
+
+        solver_->set_obstacles(obstacles);
     }
 
     void update_boundaries() {
@@ -555,8 +576,7 @@ private:
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
     rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr pose_sub_;
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr vel_sub_;
-    // [추가] 장애물 Subscriber
-    // rclcpp::Subscription<custom_msgs::msg::ObstacleArray>::SharedPtr obs_sub_;
+    rclcpp::Subscription<f1_msgs::msg::F1stateArr>::SharedPtr obs_sub_;
     
     rclcpp::Publisher<ackermann_msgs::msg::AckermannDriveStamped>::SharedPtr drive_pub_;
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr vis_pub_;
@@ -570,6 +590,7 @@ private:
     geometry_msgs::msg::PoseStamped pose_;
     nav_msgs::msg::Odometry velocity_odom_;
     std::string odom_topic_, pose_topic_, velocity_topic_, drive_topic_, path_topic_, obs_topic_;
+    float obs_radius_{0.2f};
     bool odom_received_ = false;
 };
 

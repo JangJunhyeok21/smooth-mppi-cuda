@@ -578,6 +578,14 @@ namespace mppi
         }
     }
 
+    void MPPISolver::set_obstacles(const std::vector<Obstacle> &obstacles)
+    {
+        int n = std::min(static_cast<int>(obstacles.size()), MAX_OBS);
+        params_.num_obstacles = n;
+        for (int i = 0; i < n; ++i)
+            params_.obstacles[i] = obstacles[i];
+    }
+
     void MPPISolver::set_boundaries(const std::vector<float> &left_xs, const std::vector<float> &left_ys,
                                     const std::vector<float> &right_xs, const std::vector<float> &right_ys)
     {

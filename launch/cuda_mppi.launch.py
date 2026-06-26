@@ -9,7 +9,7 @@ def generate_launch_description():
     map_name = "map1"
     
     #이 변수를 False로 바꾸면 Jetson Nano 최적화 모드(실차)로 진입합니다.
-    is_simulation = True
+    is_simulation = False
 
 
     default_param_file = os.path.join(

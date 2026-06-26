@@ -72,7 +72,7 @@ struct Params {
     float q_steer;
     float q_collision;
     float q_lat_g;
-    float q_progress;
+    float q_dist;
     float q_escape_vel;
     float collision_radius;
     
@@ -117,6 +117,7 @@ public:
                             const std::vector<float>& yaws, const std::vector<float>& vs);
     void set_boundaries(const std::vector<float>& left_xs, const std::vector<float>& left_ys,
                         const std::vector<float>& right_xs, const std::vector<float>& right_ys);
+    void set_obstacles(const std::vector<Obstacle>& obstacles);
     
     Control solve(const State& current_state);
     

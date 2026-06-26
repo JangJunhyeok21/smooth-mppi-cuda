@@ -1,61 +1,60 @@
 /**:
   ros__parameters:
     # --- Limits ---
-    max_steer: 0.4089        # rad
-    min_accel: -9.0          # m/s^2
-    max_accel: 9.0           # m/s^2
-    min_speed: 0.0           # m/s
+    max_steer: 0.38        # rad
+    min_accel: -8.0          # m/s^2
+    max_accel: 8.5           # m/s^2
+    min_speed: 0.5           # m/s
     target_speed: 5.5        # m/s
-    max_speed: 6.0           # m/s
+    max_speed: 2.5           # m/s
     
-    # --- Path Publisher Params ---
-    max_lat_g: 9.0           
-    max_decel: 9.0           
+    # --- Path Publisher Params (곡률 감속용) ---
+    max_lat_g: 9.0           # 최대 횡가속도 한계 (m/s^2)
+    max_decel: 9.0           # 코너 진입 전 브레이킹 한계 감속도
     
     # --- Costs (최적화 결과 반영) ---
-    q_v: 0.3
-    q_progress: 6.0
+    q_v: 1.0
+    q_dist: 0.2
     q_du: 0.2
     q_steer: 3.0
-    q_collision: 150.0
-    q_lat_g: 250.0
-    collision_radius: 0.21
-    q_progress: 16.0
-    q_escape_vel: 6.5
+    q_collision: 400.0
+    q_lat_g: 200.0
+    collision_radius: 0.3
+    q_progress: 36.0  #36.0
+    q_escape_vel: 8.0  #32.0
     
     # --- Obstacle Avoidance Params ---
     car_radius: 0.15
     q_obs: 50.0
-    q_acc: 15.0              # [추가] ACC 속도 추종 시 패널티 가중치
     
     # --- Noise & Tuning ---
-    noise_steer_std: 0.4     
-    noise_accel_std: 2.0     
-    max_steer_rate: 8.0      
-    max_accel_rate: 100.0    
+    noise_steer_std: 0.4     # rad/s
+    noise_accel_std: 2.0     # m/s^3
+    max_steer_rate: 8.0      # rad/s
+    max_accel_rate: 100.0    # m/s^3
     lambda: 15.0
     visualize_candidates: true
     
-    # --- Dynamic Model Params ---
+    # --- Dynamic Model Params (Pacejka & Kinematics) ---
     mass: 3.74
     l_f: 0.163
-    l_r: 0.162
-    I_z: 0.04712
-    Cm0: 0.04                
+    l_r: 0.161
+    I_z: 0.16
+    Cm0: 0.04                # 고속 감쇠용 모터 역기전력 계수
     
-    # Pacejka Coefficients
-    B_f: 1.7
+    # Pacejka Coefficients (힘 Newton 단위)
+    B_f: 1.5
     C_f: 1.5
-    D_f: 40.0
-    B_r: 1.7
+    D_f: 38.0
+    
+    B_r: 1.5
     C_r: 1.5
-    D_r: 40.0
+    D_r: 35.5
 
-    # --- Topics ---
+    # --- Topics (공통 키) ---
     odom_topic: /odom0
     pose_topic: /mcl_pose
     velocity_topic: /odom
     drive_topic: /ackermann_cmd0
     path_topic: /mppi_target_path
-    obs_topic: /perception/obstacles  # [추가] Perception 노드가 쏴주는 장애물 토픽
-    use_mcl_pose: false
+    use_mcl_pose: false      # 시뮬레이터 구동 모드

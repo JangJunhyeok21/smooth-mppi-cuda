@@ -39,8 +39,7 @@ def generate_launch_description():
     else:
         controller_overrides = {
             "use_mcl_pose": True,
-            "pose_topic": "/mcl_pose",
-            "velocity_topic": "/odom",
+            "odom_topic": "/ekf_odom",
             "drive_topic": "/drive",
             "num_samples": 10000,             # 🚨 Jetson Nano 최적화 (5000개)
             "publish_debug_info": False,     # 🚨 디버그 토픽 발행 스킵

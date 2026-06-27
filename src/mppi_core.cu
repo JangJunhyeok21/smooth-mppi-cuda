@@ -31,19 +31,6 @@ namespace mppi
     #endif
     }
 
-    // 3차 베지에 곡선 평가 — De Casteljau 알고리즘 (수치 안정성)
-    // s = t/(T-1) 범위 [0,1]
-    __device__ inline Vec2 eval_bezier(float s, Vec2 p0, Vec2 p1, Vec2 p2, Vec2 p3)
-    {
-        float u = 1.0f - s;
-        Vec2 q0 = {u*p0.x + s*p1.x, u*p0.y + s*p1.y};
-        Vec2 q1 = {u*p1.x + s*p2.x, u*p1.y + s*p2.y};
-        Vec2 q2 = {u*p2.x + s*p3.x, u*p2.y + s*p3.y};
-        Vec2 r0 = {u*q0.x + s*q1.x, u*q0.y + s*q1.y};
-        Vec2 r1 = {u*q1.x + s*q2.x, u*q1.y + s*q2.y};
-        return {u*r0.x + s*r1.x, u*r0.y + s*r1.y};
-    }
-
     __host__ __device__ float angle_normalize(float angle)
     {
         while (angle > M_PI) angle -= 2.0f * M_PI;
@@ -123,7 +110,7 @@ namespace mppi
     }
 
     __device__ float compute_cost_cuda(
-        const State &s, int t, int T,
+        const State &s,
         const float *ref_xs, const float *ref_ys, const float *ref_yaws, const float *ref_vs, int path_len,
         const Control &u, const Control &u_prev,
         const Params &p,
@@ -188,19 +175,15 @@ namespace mppi
             boundary_cost = soft_cost + hard_cost;
         }
 
-        // 7. 동적 장애물 비용 (베지에 예측 + 가우시안 패널티)
+        // 7. Obstacle Cost
         float obs_cost = 0.0f;
-        float s_param = (T > 1) ? ((float)t / (float)(T - 1)) : 0.0f;
-        for (int i = 0; i < p.num_obs; ++i) {
-            if (!p.obstacles[i].detected) continue;
-            Vec2 obs_pos = eval_bezier(s_param,
-                p.obstacles[i].p0, p.obstacles[i].p1,
-                p.obstacles[i].p2, p.obstacles[i].p3);
-            float dx = s.x - obs_pos.x;
-            float dy = s.y - obs_pos.y;
-            obs_cost += p.q_obs_gauss
-                * fast_exp(-(dx*dx) / (2.0f * p.sigma_x * p.sigma_x)
-                           -(dy*dy) / (2.0f * p.sigma_y * p.sigma_y));
+        for (int i = 0; i < p.num_obstacles; ++i) {
+            float dx = s.x - p.obs_x[i];
+            float dy = s.y - p.obs_y[i];
+            float dist = sqrtf(dx * dx + dy * dy);
+            if (dist < 1.5f) {
+                obs_cost += p.q_obs / (dist - p.car_radius + 1e-3f);
+            }
         }
 
         return p.q_dist * dist_error + vel_cost + steer_cost + rate_cost + boundary_cost + obs_cost;
@@ -308,12 +291,6 @@ namespace mppi
             float raw_steer_noise = curand_normal(&rng_states[idx]) * p.noise_steer_std;
             float raw_accel_noise = curand_normal(&rng_states[idx]) * p.noise_accel_std;
 
-            // 멀티모달 샘플링: k < K/2 → 왼쪽(+δ), k >= K/2 → 오른쪽(-δ) 편향
-            if (p.multimodal_enabled) {
-                float delta = p.modal_steer_offset;
-                raw_steer_noise += (k < K / 2) ? delta : -delta;
-            }
-
             // 2. 2차 버터워스 필터링 (IIR 차분 방정식)
             float filtered_steer = p.filter_coeffs.b0 * raw_steer_noise 
                                 + p.filter_coeffs.b1 * x_steer_prev1 + p.filter_coeffs.b2 * x_steer_prev2
@@ -329,24 +306,6 @@ namespace mppi
 
             x_accel_prev2 = x_accel_prev1; x_accel_prev1 = raw_accel_noise;
             y_accel_prev2 = y_accel_prev1; y_accel_prev1 = filtered_accel;
-
-            // IS 보정: 혼합 분포 q에서 샘플링한 비용을 사전 분포 p 기준으로 보정
-            // C_IS = -λ * (log p(ε) - log q(ε))  →  total_cost에 누적
-            if (p.multimodal_enabled) {
-                float n  = raw_steer_noise;   // 편향 포함 raw 노이즈
-                float s2 = p.noise_steer_std * p.noise_steer_std;
-                float d  = p.modal_steer_offset;
-
-                float log_p = -0.5f * n * n / s2;
-
-                // log[0.5*N(n; +δ, σ) + 0.5*N(n; -δ, σ)] — log-sum-exp 수치 안정화
-                float a = -0.5f * (n - d) * (n - d) / s2;
-                float b = -0.5f * (n + d) * (n + d) / s2;
-                float m = fmaxf(a, b);
-                float log_q = -0.6931f + m + logf(1.0f + fast_exp(fminf(a, b) - m));
-
-                total_cost += -p.lambda * (log_p - log_q);
-            }
 
             // 4. 부드러워진 노이즈에 dt를 곱해 최종 변화량 산출
             float noise_delta_steer = filtered_steer * p.dt;   
@@ -409,7 +368,7 @@ namespace mppi
             if (path_len > 0)
             {
                 total_cost += compute_cost_cuda(
-                    x, t, T,
+                    x,
                     ref_xs, ref_ys, ref_yaws, ref_vs, path_len,
                     u_clamped, last_u, p, min_dist, &local_path_idx);
             }

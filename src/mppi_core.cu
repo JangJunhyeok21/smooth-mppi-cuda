@@ -31,6 +31,19 @@ namespace mppi
     #endif
     }
 
+    // 3차 베지에 곡선 평가 — De Casteljau 알고리즘 (수치 안정성)
+    // s = t/(T-1) 범위 [0,1]
+    __device__ inline Vec2 eval_bezier(float s, Vec2 p0, Vec2 p1, Vec2 p2, Vec2 p3)
+    {
+        float u = 1.0f - s;
+        Vec2 q0 = {u*p0.x + s*p1.x, u*p0.y + s*p1.y};
+        Vec2 q1 = {u*p1.x + s*p2.x, u*p1.y + s*p2.y};
+        Vec2 q2 = {u*p2.x + s*p3.x, u*p2.y + s*p3.y};
+        Vec2 r0 = {u*q0.x + s*q1.x, u*q0.y + s*q1.y};
+        Vec2 r1 = {u*q1.x + s*q2.x, u*q1.y + s*q2.y};
+        return {u*r0.x + s*r1.x, u*r0.y + s*r1.y};
+    }
+
     __host__ __device__ float angle_normalize(float angle)
     {
         while (angle > M_PI) angle -= 2.0f * M_PI;
@@ -110,12 +123,12 @@ namespace mppi
     }
 
     __device__ float compute_cost_cuda(
-        const State &s,
+        const State &s, int t, int T,
         const float *ref_xs, const float *ref_ys, const float *ref_yaws, const float *ref_vs, int path_len,
         const Control &u, const Control &u_prev,
         const Params &p,
         float min_bnd_dist,
-        int* last_idx)  
+        int* last_idx)
     {
         float min_dist_sq = 1e9f;
         int nearest_idx = -1;
@@ -168,23 +181,26 @@ namespace mppi
             float hard_cost = 0.0f;
             if (min_bnd_dist < p.collision_radius * 1.5f) {
                 float diff = min_bnd_dist - p.collision_radius;
-                float capped = fminf(diff, 1.0e-5f);
+                float capped = fmaxf(diff, 1.0e-5f);
                 hard_cost = p.q_collision * logf(1.0f + __expf(-30.0f * capped));
             }
 
             boundary_cost = soft_cost + hard_cost;
         }
 
-        // 7. Obstacle Cost
+        // 7. 동적 장애물 비용 (베지에 예측 + 가우시안 패널티)
         float obs_cost = 0.0f;
-        for (int i = 0; i < p.num_obstacles; ++i) {
-            float dx = s.x - p.obs_x[i];
-            float dy = s.y - p.obs_y[i];
-            float dist = sqrtf(dx * dx + dy * dy);
-            float safe_margin = 1.5f; 
-            if (dist < safe_margin) {
-                obs_cost += p.q_obs / (dist - p.car_radius + 1e-3f); 
-            }
+        float s_param = (T > 1) ? ((float)t / (float)(T - 1)) : 0.0f;
+        for (int i = 0; i < p.num_obs; ++i) {
+            if (!p.obstacles[i].detected) continue;
+            Vec2 obs_pos = eval_bezier(s_param,
+                p.obstacles[i].p0, p.obstacles[i].p1,
+                p.obstacles[i].p2, p.obstacles[i].p3);
+            float dx = s.x - obs_pos.x;
+            float dy = s.y - obs_pos.y;
+            obs_cost += p.q_obs_gauss
+                * fast_exp(-(dx*dx) / (2.0f * p.sigma_x * p.sigma_x)
+                           -(dy*dy) / (2.0f * p.sigma_y * p.sigma_y));
         }
 
         return p.q_dist * dist_error + vel_cost + steer_cost + rate_cost + boundary_cost + obs_cost;
@@ -196,10 +212,9 @@ namespace mppi
         const float *ref_xs, const float *ref_ys, const float *ref_yaws,
         const float *left_xs, const float *left_ys,
         const float *right_xs, const float *right_ys,
-        int path_len, int bnd_len, int current_path_idx, int *nearest_idx_out)
+        int path_len, int current_path_idx, int *nearest_idx_out) 
     {
-        if (ref_xs == nullptr || left_xs == nullptr || path_len <= 0 || bnd_len <= 0) return 1e9f;
-        int eff_len = (bnd_len < path_len) ? bnd_len : path_len;
+        if (ref_xs == nullptr || left_xs == nullptr || path_len <= 0) return 1e9f;
 
         // 1. 이전 인덱스 근처에서 가장 가까운 중심점(Reference) 탐색
         float min_dist_sq = 1e9f;
@@ -207,12 +222,12 @@ namespace mppi
         int search_window = 30;
         int start_search = current_path_idx;
 
-        if (start_search >= eff_len) start_search %= eff_len;
+        if (start_search >= path_len) start_search %= path_len;
         if (start_search < 0) start_search = 0;
 
         for (int offset = 0; offset < search_window; ++offset) {
             int i = start_search + offset;
-            if (i >= eff_len) i -= eff_len;
+            if (i >= path_len) i -= path_len;
             
             float dx = s.x - ref_xs[i];
             float dy = s.y - ref_ys[i];
@@ -293,6 +308,12 @@ namespace mppi
             float raw_steer_noise = curand_normal(&rng_states[idx]) * p.noise_steer_std;
             float raw_accel_noise = curand_normal(&rng_states[idx]) * p.noise_accel_std;
 
+            // 멀티모달 샘플링: k < K/2 → 왼쪽(+δ), k >= K/2 → 오른쪽(-δ) 편향
+            if (p.multimodal_enabled) {
+                float delta = p.modal_steer_offset;
+                raw_steer_noise += (k < K / 2) ? delta : -delta;
+            }
+
             // 2. 2차 버터워스 필터링 (IIR 차분 방정식)
             float filtered_steer = p.filter_coeffs.b0 * raw_steer_noise 
                                 + p.filter_coeffs.b1 * x_steer_prev1 + p.filter_coeffs.b2 * x_steer_prev2
@@ -308,6 +329,24 @@ namespace mppi
 
             x_accel_prev2 = x_accel_prev1; x_accel_prev1 = raw_accel_noise;
             y_accel_prev2 = y_accel_prev1; y_accel_prev1 = filtered_accel;
+
+            // IS 보정: 혼합 분포 q에서 샘플링한 비용을 사전 분포 p 기준으로 보정
+            // C_IS = -λ * (log p(ε) - log q(ε))  →  total_cost에 누적
+            if (p.multimodal_enabled) {
+                float n  = raw_steer_noise;   // 편향 포함 raw 노이즈
+                float s2 = p.noise_steer_std * p.noise_steer_std;
+                float d  = p.modal_steer_offset;
+
+                float log_p = -0.5f * n * n / s2;
+
+                // log[0.5*N(n; +δ, σ) + 0.5*N(n; -δ, σ)] — log-sum-exp 수치 안정화
+                float a = -0.5f * (n - d) * (n - d) / s2;
+                float b = -0.5f * (n + d) * (n + d) / s2;
+                float m = fmaxf(a, b);
+                float log_q = -0.6931f + m + logf(1.0f + fast_exp(fminf(a, b) - m));
+
+                total_cost += -p.lambda * (log_p - log_q);
+            }
 
             // 4. 부드러워진 노이즈에 dt를 곱해 최종 변화량 산출
             float noise_delta_steer = filtered_steer * p.dt;   
@@ -335,29 +374,30 @@ namespace mppi
             }
 
             float min_dist = compute_min_boundary_distance(
-                x, ref_xs, ref_ys, ref_yaws, left_bnd_xs, left_bnd_ys, right_bnd_xs, right_bnd_ys, path_len, bnd_len, local_path_idx, &local_path_idx);
+                x, ref_xs, ref_ys, ref_yaws, left_bnd_xs, left_bnd_ys, right_bnd_xs, right_bnd_ys, path_len, local_path_idx, &local_path_idx);
             
-            // EKF 위치 오차(±5~10cm)를 고려해 임계값에 0.05m 여유를 둠.
-            // collision_radius 내부 확실한 침범만 is_fault 처리.
-            if (min_dist < p.collision_radius - 0.05f) {
+            if (min_dist < p.collision_radius) {
                 is_fault = true;
             }
 
             if (is_fault) {
-                // 고횡G 이탈 시: 현재 조향 유지 + 풀브레이킹으로 살아남는 샘플 우선
-                total_cost += 10000.0f - (float)t * 50.0f;
-
+                // 기본 패널티를 10000으로 낮추고, 오래 버틸수록 패널티를 50씩 대폭 깎아줍니다.
+                // 이로 인해 어차피 박을 상황이면 풀브레이킹+조향으로 1틱이라도 더 버티는 샘플의 가중치가 높아집니다.
+                total_cost += 10000.0f - (float)t * 50.0f; 
+                
+                // 충돌했더라도, 그때까지 더 멀리 전진했다면 보상을 줍니다.
                 if (path_len > 0) {
                     int progress = local_path_idx - initial_path_idx;
-                    if (progress < -path_len / 2) progress += path_len;
-                    int max_possible_progress = T + 10;
+                    if (progress < -path_len / 2) progress += path_len; 
+                    int max_possible_progress = T + 10; 
                     progress = max(0, min(progress, max_possible_progress));
-                    total_cost -= p.q_v * (float)progress * 5.0f;
+                    total_cost -= p.q_v * (float)progress * 5.0f; 
                 }
 
-                // {steer, accel} 순서: 조향 0(방향 편향 없음) + 풀브레이킹
-                // steer를 유지하면 스키드 패드 등 코너 구간에서 warm-start가 오염됨
-                Control safe_control = {0.0f, -1.0f};
+                // 현재 틱(t)에서 사용한 제어 입력(u)의 조향각을 가져옵니다.
+                float survival_steer = controls[k * T + t].steer * 0.1; 
+                // 속도는 0.0f (또는 마찰원 한계 내의 급제동 -1.0f)로 설정하고 조향은 살립니다.
+                Control safe_control = {survival_steer, -2.0f};
 
                 for (int fill_t = t + 1; fill_t < T; ++fill_t) {
                     states[k * T + fill_t] = x;
@@ -369,8 +409,9 @@ namespace mppi
             if (path_len > 0)
             {
                 total_cost += compute_cost_cuda(
-                    x, ref_xs, ref_ys, ref_yaws, ref_vs, path_len,
-                    u_clamped, last_u, p, min_dist, &local_path_idx); 
+                    x, t, T,
+                    ref_xs, ref_ys, ref_yaws, ref_vs, path_len,
+                    u_clamped, last_u, p, min_dist, &local_path_idx);
             }
 
             // 종점 진행도 보상
@@ -519,20 +560,19 @@ namespace mppi
     }
 
     Control MPPISolver::compute_optimal_control(const State &current_state) {
-        for (int k = 0; k < K_; ++k) {
-            if (std::isnan(h_costs_[k])) {
-                h_costs_[k] = 1.0e8f; // NaN 발생 시 최악의 비용으로 간주하여 도태시킴
-            }
-        }
-
         auto min_it = std::min_element(h_costs_.begin(), h_costs_.end());
         float min_cost = *min_it;
         best_k_ = static_cast<int>(std::distance(h_costs_.begin(), min_it));
 
-        if (std::isinf(min_cost) || min_cost >= 1.0e8f) {
+        if (std::isinf(min_cost) || min_cost >= 1.0e8f) { 
             Control stop_control = {0.0f, -5.0f};
             std::fill(h_prev_controls_.begin(), h_prev_controls_.end(), stop_control);
             return stop_control;
+        }
+        for (int k = 0; k < K_; ++k) {
+            if (std::isnan(h_costs_[k])) {
+                h_costs_[k] = 1.0e8f; // NaN 발생 시 최악의 비용으로 간주하여 도태시킴
+            }
         }
 
         float lambda = params_.lambda; 

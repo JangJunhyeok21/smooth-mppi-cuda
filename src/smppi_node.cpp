@@ -8,8 +8,12 @@
 #include "geometry_msgs/msg/pose_stamped.hpp"
 #include "cuda_mppi_controller/cuda_mppi_core.hpp"
 #include "smppi_cuda_controller/msg/mppi_trajectory.hpp"
+#include "f1_msgs/msg/f1state_arr.hpp"
+#include "f1_msgs/msg/f1state.hpp"
 #include <algorithm>
 #include <cmath>
+#include <limits>
+#include <mutex>
 
 using namespace std::chrono_literals;
 
@@ -42,6 +46,11 @@ public:
         odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
             odom_topic_, 10,
             std::bind(&MPPINode::odom_callback, this, std::placeholders::_1));
+
+        // ── 동적 장애물 구독 ─────────────────────────────────────────
+        obs_sub_ = this->create_subscription<f1_msgs::msg::F1stateArr>(
+            "/f1/perception/object/obstacles/arr", 10,
+            std::bind(&MPPINode::obs_callback, this, std::placeholders::_1));
 
         timer_ = this->create_wall_timer(
             35ms, std::bind(&MPPINode::timer_callback, this));
@@ -78,7 +87,102 @@ private:
         current_state_.ay = current_state_.v * current_state_.omega;
 
         odom_received_ = true;
-        last_odom_stamp_ = msg->header.stamp;
+    }
+
+    // ── 장애물 콜백: 최신 장애물 목록 저장 ──────────────────────────
+    void obs_callback(const f1_msgs::msg::F1stateArr::SharedPtr msg)
+    {
+        std::lock_guard<std::mutex> lock(obs_mutex_);
+        latest_obstacles_ = msg->f1_state_arr;
+    }
+
+    // ── CPU 베지에 제어점 계산 ────────────────────────────────────────
+    void compute_bezier_obstacles()
+    {
+        std::lock_guard<std::mutex> lock(obs_mutex_);
+        mppi_params_.num_obs = 0;
+        for (int i = 0; i < MAX_OBS; ++i) mppi_params_.obstacles[i].detected = false;
+
+        if (ref_path_xs_.empty()) return;
+
+        float horizon = 50 * mppi_params_.dt;   // T * dt = 1.75s
+        int n = std::min((int)latest_obstacles_.size(), MAX_OBS);
+
+        for (int i = 0; i < n; ++i) {
+            const auto &obs = latest_obstacles_[i];
+            auto &os = mppi_params_.obstacles[i];
+
+            os.x = (float)obs.x;
+            os.y = (float)obs.y;
+            os.theta = (float)obs.yaw;
+
+            // perception이 v_x/v_y를 채우지 않으므로 v + yaw로 직접 유도
+            float speed = (float)obs.v;
+            os.vx = speed * std::cos(os.theta);
+            os.vy = speed * std::sin(os.theta);
+
+            if (std::abs(speed) < 0.2f) {
+                // 정적 장애물: 베지에를 현재 위치로 고정
+                os.p0 = os.p1 = os.p2 = os.p3 = {os.x, os.y};
+            } else {
+                // 동적 장애물: 등속 예측 → 센터라인 스냅 → Hermite 베지에
+                float px = os.x + os.vx * horizon;
+                float py = os.y + os.vy * horizon;
+
+                int snap_idx = 0;
+                float min_d2 = std::numeric_limits<float>::max();
+                for (int j = 0; j < (int)ref_path_xs_.size(); ++j) {
+                    float dx = px - ref_path_xs_[j];
+                    float dy = py - ref_path_ys_[j];
+                    float d2 = dx*dx + dy*dy;
+                    if (d2 < min_d2) { min_d2 = d2; snap_idx = j; }
+                }
+                float sx = ref_path_xs_[snap_idx];
+                float sy = ref_path_ys_[snap_idx];
+                float theta_T = ref_path_yaws_[snap_idx];
+                // 제어점이 트랙 밖으로 벗어나지 않도록 alpha 클램핑
+                float alpha = std::min(0.333f * std::hypot(sx - os.x, sy - os.y), 2.0f);
+
+                os.p0 = {os.x, os.y};
+                os.p1 = {os.x + alpha * std::cos(os.theta),
+                          os.y + alpha * std::sin(os.theta)};
+                os.p3 = {sx, sy};
+                os.p2 = {sx - alpha * std::cos(theta_T),
+                          sy - alpha * std::sin(theta_T)};
+            }
+            os.detected = true;
+            mppi_params_.num_obs++;
+        }
+    }
+
+    // ── 멀티모달 히스테리시스 활성화 로직 ────────────────────────────
+    void update_multimodal_hysteresis()
+    {
+        std::lock_guard<std::mutex> lock(obs_mutex_);
+        if (latest_obstacles_.empty()) {
+            multimodal_active_ = false;
+            mppi_params_.multimodal_enabled = false;
+            return;
+        }
+
+        float dist_min = std::numeric_limits<float>::max();
+        float v_obs = 0.0f;
+        for (const auto &obs : latest_obstacles_) {
+            float d = std::hypot(current_state_.x - (float)obs.x,
+                                 current_state_.y - (float)obs.y);
+            if (d < dist_min) { dist_min = d; v_obs = (float)obs.v; }
+        }
+
+        float activate_dist   = mppi_params_.modal_activation_dist;  // 2.0m
+        float deactivate_dist = activate_dist + 0.5f;                 // 2.5m
+        bool gaining = (current_state_.v - v_obs) > 0.3f;
+
+        if (multimodal_active_ && dist_min > deactivate_dist)
+            multimodal_active_ = false;
+        else if (!multimodal_active_ && dist_min < activate_dist && gaining)
+            multimodal_active_ = true;
+
+        mppi_params_.multimodal_enabled = multimodal_active_;
     }
 
     // ────────────────────────────────────────────────────────────────
@@ -87,9 +191,6 @@ private:
     float compute_min_boundary_distance(const mppi::State &s, int current_path_idx) {
         if (left_xs_.empty() || right_xs_.empty() ||
             left_xs_.size() != right_xs_.size() || ref_path_xs_.empty()) return 1e9f;
-        if (current_path_idx < 0 ||
-            current_path_idx >= (int)left_xs_.size() ||
-            current_path_idx >= (int)ref_path_xs_.size()) return 1e9f;
 
         float dx = s.x - ref_path_xs_[current_path_idx];
         float dy = s.y - ref_path_ys_[current_path_idx];
@@ -144,13 +245,10 @@ private:
         if (min_bnd < safe_dist) {
             float pen = safe_dist - min_bnd;
             float hrd = 0.f;
-            if (min_bnd < mppi_params_.collision_radius * 1.5f) {
-                float diff   = min_bnd - mppi_params_.collision_radius;
-                float capped = std::min(diff, 1.0e-5f);  // CUDA fminf와 동일
+            if (min_bnd < mppi_params_.collision_radius * 1.2f)
                 hrd = mppi_params_.q_collision *
-                      std::log(1.f + std::exp(-30.f * capped));
-            }
-            bnd_cost = 70.f * pen * pen + hrd;
+                      std::log(1.f + std::exp(-40.f*(min_bnd - mppi_params_.collision_radius)));
+            bnd_cost = 150.f * pen * pen + hrd;
         }
 
         msg.dist_cost       = mppi_params_.q_dist * dist_error;
@@ -184,6 +282,11 @@ private:
         this->declare_parameter("collision_radius",     0.19);   mppi_params_.collision_radius = this->get_parameter("collision_radius").as_double();
         this->declare_parameter("car_radius",           0.15);   mppi_params_.car_radius    = this->get_parameter("car_radius").as_double();
         this->declare_parameter("q_obs",                50.0);   mppi_params_.q_obs         = this->get_parameter("q_obs").as_double();
+        this->declare_parameter("q_obs_gauss",          200.0);  mppi_params_.q_obs_gauss          = this->get_parameter("q_obs_gauss").as_double();
+        this->declare_parameter("sigma_x",              1.0);    mppi_params_.sigma_x               = this->get_parameter("sigma_x").as_double();
+        this->declare_parameter("sigma_y",              0.5);    mppi_params_.sigma_y               = this->get_parameter("sigma_y").as_double();
+        this->declare_parameter("modal_steer_offset",   0.15);   mppi_params_.modal_steer_offset    = this->get_parameter("modal_steer_offset").as_double();
+        this->declare_parameter("modal_activation_dist",2.0);    mppi_params_.modal_activation_dist = this->get_parameter("modal_activation_dist").as_double();
         this->declare_parameter("noise_steer_std",      0.4);    mppi_params_.noise_steer_std  = this->get_parameter("noise_steer_std").as_double();
         this->declare_parameter("noise_accel_std",      2.0);    mppi_params_.noise_accel_std  = this->get_parameter("noise_accel_std").as_double();
         this->declare_parameter("max_steer_rate",       0.5236); mppi_params_.max_steer_rate   = this->get_parameter("max_steer_rate").as_double();
@@ -212,6 +315,9 @@ private:
 
         mppi_params_.dt            = 0.035;
         mppi_params_.num_obstacles = 0;
+        mppi_params_.num_obs       = 0;
+        mppi_params_.multimodal_enabled = false;
+        for (int i = 0; i < MAX_OBS; ++i) mppi_params_.obstacles[i].detected = false;
     }
 
     void validate_parameters() {
@@ -270,13 +376,10 @@ private:
                 "Waiting for EKF odom (%s)...", odom_topic_.c_str());
             return;
         }
-        auto age = this->now() - last_odom_stamp_;
-        if (age.seconds() > 0.2) {
-            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
-                "EKF odom stale (%.0f ms) — skipping solve", age.seconds() * 1000.0);
-            return;
-        }
         auto start = std::chrono::high_resolution_clock::now();
+        update_multimodal_hysteresis();
+        compute_bezier_obstacles();
+        solver_->update_params(mppi_params_);
         mppi::Control u = solver_->solve(current_state_);
         float next_v = current_state_.v + u.accel * mppi_params_.dt;
         if      (next_v <= mppi_params_.min_speed) { u.accel = (mppi_params_.min_speed - current_state_.v) / mppi_params_.dt; next_v = mppi_params_.min_speed; }
@@ -368,10 +471,16 @@ private:
         vis_pub_->publish(markers);
     }
 
-    int num_samples_;
+    std::int16_t num_samples_;
     mppi::Params mppi_params_;
     std::unique_ptr<mppi::MPPISolver> solver_;
     mppi::State  current_state_;
+
+    // 동적 장애물 관련
+    rclcpp::Subscription<f1_msgs::msg::F1stateArr>::SharedPtr obs_sub_;
+    std::vector<f1_msgs::msg::F1state> latest_obstacles_;
+    std::mutex obs_mutex_;
+    bool multimodal_active_ = false;
 
     std::vector<float> left_xs_, left_ys_, right_xs_, right_ys_;
     std::vector<float> ref_path_xs_, ref_path_ys_, ref_path_yaws_, ref_path_vs_;
@@ -389,7 +498,6 @@ private:
 
     std::string odom_topic_, drive_topic_, path_topic_;
     bool odom_received_ = false;
-    rclcpp::Time last_odom_stamp_{0, 0, RCL_ROS_TIME};
 };
 
 int main(int argc, char **argv) {

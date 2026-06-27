@@ -2,11 +2,11 @@
   ros__parameters:
     # --- Limits ---
     max_steer: 0.38        # rad
-    min_accel: -9.0          # m/s^2
-    max_accel: 9.0           # m/s^2
+    min_accel: -8.0          # m/s^2
+    max_accel: 8.5           # m/s^2
     min_speed: 0.5           # m/s
     target_speed: 5.5        # m/s
-    max_speed: 3.0           # m/s
+    max_speed: 2.5           # m/s
     
     # --- Path Publisher Params (곡률 감속용) ---
     max_lat_g: 9.0           # 최대 횡가속도 한계 (m/s^2)
@@ -19,13 +19,13 @@
     q_steer: 3.0
     q_collision: 400.0
     q_lat_g: 200.0
-    collision_radius: 0.15
-    q_progress: 26.0
-    q_escape_vel: 2.0
+    collision_radius: 0.3
+    q_progress: 36.0  #36.0
+    q_escape_vel: 8.0  #32.0
     
     # --- Obstacle Avoidance Params ---
-    car_radius: 0.15
-    q_obs: 50.0
+    car_radius: 0.25
+    q_obs: 150.0
     
     # --- Noise & Tuning ---
     noise_steer_std: 0.4     # rad/s
@@ -39,13 +39,13 @@
     mass: 3.74
     l_f: 0.163
     l_r: 0.161
-    I_z: 0.14
+    I_z: 0.16
     Cm0: 0.04                # 고속 감쇠용 모터 역기전력 계수
     
     # Pacejka Coefficients (힘 Newton 단위)
     B_f: 1.5
     C_f: 1.5
-    D_f: 40.0
+    D_f: 38.0
     
     B_r: 1.5
     C_r: 1.5
@@ -58,3 +58,17 @@
     drive_topic: /ackermann_cmd0
     path_topic: /mppi_target_path
     use_mcl_pose: false      # 시뮬레이터 구동 모드
+
+    # --- 장애물 회피 / 추월 파라미터 ---
+    obstacle_topic: /f1/perception/object/obstacles/arr
+    static_vel_threshold: 0.2      # (m/s) 이하이면 정적 장애물 → 벽으로 처리
+    front_obstacle_range: 5.0      # (m)  전방 탐색 범위
+    overtake_lateral_margin: 0.3   # (m)  추월 판단 시 필요한 추가 여유 폭
+    cruise_follow_dist: 0.10       # (m)  크루즈 컨트롤 목표 간격 (10 cm)
+
+    # --- 동적 장애물 예측 & 멀티모달 샘플링 ---
+    q_obs_gauss: 200.0             # 가우시안 장애물 패널티 가중치
+    sigma_x: 1.0                   # 종방향 가우시안 폭 (m) — sigma_x > sigma_y (타원형)
+    sigma_y: 0.5                   # 횡방향 가우시안 폭 (m)
+    modal_steer_offset: 0.15       # 조향 편향 δ (rad), 트랙 폭에 따라 0.10~0.25 조정
+    modal_activation_dist: 2.0     # 멀티모달 활성화 거리 임계값 (m), 비활성화는 +0.5m 히스테리시스

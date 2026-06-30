@@ -99,7 +99,9 @@ struct Params {
     // 멀티모달 샘플링
     float modal_steer_offset;     // 조향 편향 δ (0.10~0.25 rad)
     float modal_activation_dist;  // 활성화 거리 임계값 (2.0m)
-    bool  multimodal_enabled;     // 런타임 플래그 (히스테리시스 로직이 설정)
+    bool  multimodal_enabled;     // 런타임 플래그 (FSM이 설정)
+    float modal_ratio {0.5f};     // 좌편향 샘플 비율 (0~1), FSM이 덮어씀
+    float max_vel     {5.0f};     // FSM 속도 상한 (EMERGENCY/FOLLOW 등)
     
     // Noise & Tuning
     float noise_steer_std;
@@ -129,7 +131,9 @@ public:
     ~MPPISolver();
 
     void update_params(Params p);
-    
+    Params get_params() const;
+    void   set_params(const Params& p);
+
     // 경로 및 바운더리 설정
     void set_reference_path(const std::vector<float>& xs, const std::vector<float>& ys,
                             const std::vector<float>& yaws, const std::vector<float>& vs);

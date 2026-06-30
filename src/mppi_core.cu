@@ -308,10 +308,11 @@ namespace mppi
             float raw_steer_noise = curand_normal(&rng_states[idx]) * p.noise_steer_std;
             float raw_accel_noise = curand_normal(&rng_states[idx]) * p.noise_accel_std;
 
-            // 멀티모달 샘플링: k < K/2 → 왼쪽(+δ), k >= K/2 → 오른쪽(-δ) 편향
+            // 멀티모달 샘플링: k < split → 왼쪽(+δ), k >= split → 오른쪽(-δ) 편향
             if (p.multimodal_enabled) {
                 float delta = p.modal_steer_offset;
-                raw_steer_noise += (k < K / 2) ? delta : -delta;
+                int split = static_cast<int>(K * p.modal_ratio);
+                raw_steer_noise += (k < split) ? delta : -delta;
             }
 
             // 2. 2차 버터워스 필터링 (IIR 차분 방정식)
@@ -362,6 +363,10 @@ namespace mppi
             if (v_next >= p.max_speed && u_clamped.accel > 0.0f) u_clamped.accel = 0.0;
             else if (v_next <= p.min_speed + 0.1f && u_clamped.accel < 0.0f) u_clamped.accel = 0.0;
             else u_clamped.accel = fminf(fmaxf(u_clamped.accel, p.min_accel), p.max_accel);
+            // FSM max_vel 상한: EMERGENCY/FOLLOW 등 속도 제한 상황에서 강제 감속
+            if (x.v > p.max_vel) {
+                u_clamped.accel = fminf(u_clamped.accel, -0.5f);
+            }
 
             current_action = u_clamped; 
 
@@ -575,11 +580,21 @@ namespace mppi
             }
         }
 
-        float lambda = params_.lambda; 
+        // 모드-인식 가중합: multimodal_enabled 시 best_k_가 속한 절반만 집계
+        // → 좌/우 샘플이 서로 상쇄돼 정면으로 추돌하는 mode collapse 방지
+        int k_start = 0, k_end = K_;
+        if (params_.multimodal_enabled) {
+            int split = static_cast<int>(K_ * params_.modal_ratio);
+            bool best_is_left = (best_k_ < split);
+            k_start = best_is_left ? 0     : split;
+            k_end   = best_is_left ? split : K_;
+        }
+
+        float lambda = params_.lambda;
         float sum_weights = 0.0f;
-        for (int k = 0; k < K_; ++k) {
+        for (int k = k_start; k < k_end; ++k) {
             if (std::isinf(h_costs_[k])) {
-                h_weights_[k] = 0.0f; 
+                h_weights_[k] = 0.0f;
             } else {
                 h_weights_[k] = fast_exp(-(h_costs_[k] - min_cost) / lambda);
             }
@@ -588,7 +603,7 @@ namespace mppi
         if (sum_weights < 1e-6) sum_weights = 1e-6;
 
         std::vector<Control> weighted_controls(T_, {0.0f, 0.0f});
-        for (int k = 0; k < K_; ++k) {
+        for (int k = k_start; k < k_end; ++k) {
             float w = h_weights_[k] / sum_weights;
             for (int t = 0; t < T_; ++t) {
                 Control u_k = h_controls_[k * T_ + t];
@@ -612,6 +627,9 @@ namespace mppi
         }
         return output;
     }
+
+    Params MPPISolver::get_params() const { return params_; }
+    void   MPPISolver::set_params(const Params& p) { params_ = p; }
 
     const std::vector<State> &MPPISolver::get_generated_trajectories() const { return h_states_; }
     const std::vector<State> &MPPISolver::get_best_trajectory() const { return best_trajectory_; }

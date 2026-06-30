@@ -99,6 +99,34 @@ target_link_libraries(smppi_node
   ${CUDA_LIBRARIES}
 )
 
+# ── FSM 통합 노드 ─────────────────────────────────────────────────────
+set(OVERTAKE_DEPS
+  rclcpp nav_msgs geometry_msgs sensor_msgs std_msgs
+  visualization_msgs ackermann_msgs f1_msgs)
+
+# opponent_tracker: LiDAR 기반 상대방 추적 (별도 노드)
+add_executable(opponent_tracker
+  src/opponent_tracker.cpp)
+target_include_directories(opponent_tracker PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>)
+ament_target_dependencies(opponent_tracker ${OVERTAKE_DEPS})
+
+# smppi_node_fsm: MPPI + OvertakeFSM 합성 단일 노드
+add_executable(smppi_node_fsm
+  src/smppi_node_fsm.cpp
+  src/overtake_fsm.cpp)
+target_include_directories(smppi_node_fsm PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
+  ${CUDA_INCLUDE_DIRS})
+rosidl_get_typesupport_target(cpp_typesupport_target_fsm ${PROJECT_NAME} "rosidl_typesupport_cpp")
+target_link_libraries(smppi_node_fsm
+  "${cpp_typesupport_target_fsm}"
+  smppi_lib
+  ${CUDA_LIBRARIES})
+ament_target_dependencies(smppi_node_fsm ${OVERTAKE_DEPS})
+
 # path_publisher 실행 파일
 add_executable(path_publisher
   src/path_publisher.cpp
@@ -115,7 +143,7 @@ ament_target_dependencies(path_publisher
   geometry_msgs
 )
 
-install(TARGETS smppi_node smppi_lib path_publisher
+install(TARGETS smppi_node smppi_lib path_publisher smppi_node_fsm opponent_tracker
   DESTINATION lib/${PROJECT_NAME})
 
 install(DIRECTORY launch config data msg

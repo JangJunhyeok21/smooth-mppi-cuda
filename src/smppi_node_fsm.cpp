@@ -9,6 +9,7 @@
 #include "geometry_msgs/msg/pose_stamped.hpp"
 #include "cuda_mppi_controller/cuda_mppi_core.hpp"
 #include "cuda_mppi_controller/overtake_fsm.hpp"
+#include "cuda_mppi_controller/static_obstacle_buffer.hpp"
 #include "smppi_cuda_controller/msg/mppi_trajectory.hpp"
 #include "f1_msgs/msg/f1state_arr.hpp"
 #include "f1_msgs/msg/f1state.hpp"
@@ -38,7 +39,19 @@ public:
         fsm_cfg.clear_dist      = fsm_clear_dist_;
         fsm_cfg.prep_timeout_s  = fsm_prep_timeout_;
         fsm_cfg.lateral_offset  = fsm_lateral_offset_;
+        fsm_cfg.prep_modal_ratio   = fsm_prep_modal_ratio_;
+        fsm_cfg.side_confirm_ticks = fsm_side_confirm_ticks_;
+        fsm_cfg.side_switch_margin = fsm_side_switch_margin_;
+        fsm_cfg.abort_clear_factor = fsm_abort_clear_factor_;
         fsm_ = std::make_unique<mppi::OvertakeFsm>(fsm_cfg);
+
+        mppi::StaticObstacleBuffer::Config sob_cfg;
+        sob_cfg.merge_radius   = static_obs_merge_radius_;
+        sob_cfg.min_hits       = static_obs_min_hits_;
+        sob_cfg.miss_limit     = static_obs_miss_limit_;
+        sob_cfg.verify_range   = static_obs_verify_range_;
+        sob_cfg.verify_fov_deg = static_obs_verify_fov_deg_;
+        static_obs_buffer_ = std::make_unique<mppi::StaticObstacleBuffer>(sob_cfg);
 
         drive_pub_ = this->create_publisher<ackermann_msgs::msg::AckermannDriveStamped>(drive_topic_, 10);
         vis_pub_   = this->create_publisher<visualization_msgs::msg::MarkerArray>("/mppi_viz", 50);
@@ -103,10 +116,12 @@ private:
         const auto &ori = msg->pose.pose.orientation;
         opp_x_ = static_cast<float>(msg->pose.pose.position.x);
         opp_y_ = static_cast<float>(msg->pose.pose.position.y);
+        opp_yaw_ = static_cast<float>(std::atan2(
+            2.0 * (ori.w * ori.z + ori.x * ori.y),
+            1.0 - 2.0 * (ori.y * ori.y + ori.z * ori.z)));
         float vx = static_cast<float>(msg->twist.twist.linear.x);
         float vy = static_cast<float>(msg->twist.twist.linear.y);
         opp_v_ = std::hypot(vx, vy);
-        (void)ori;
     }
 
     void path_callback(const nav_msgs::msg::Path::SharedPtr msg) {
@@ -155,7 +170,10 @@ private:
     // 상대방 좌/우 여유 공간 계산 (m)
     // h_pl: 상대방 왼쪽으로 ego가 지나갈 수 있는 여유
     // h_pr: 상대방 오른쪽으로 ego가 지나갈 수 있는 여유
-    void compute_opp_clearances(float opp_x, float opp_y, float &h_pl, float &h_pr) {
+    // 상대방의 진행 방향(yaw)·속도로 fsm_side_pred_time_ 뒤의 횡방향 위치를
+    // 예측해 반영하므로, 상대가 이동 중인 쪽의 여유는 줄고 반대쪽은 늘어난다.
+    void compute_opp_clearances(float opp_x, float opp_y, float opp_yaw, float opp_v,
+                                float &h_pl, float &h_pr) {
         h_pl = h_pr = 0.0f;
         if (ref_path_xs_.empty() || left_xs_.empty() || right_xs_.empty()) return;
 
@@ -187,11 +205,16 @@ private:
         float l_dist = std::hypot(dx_l, dy_l);
         float r_dist = std::hypot(dx_r, dy_r);
 
+        // 상대방 진행 방향의 횡방향 성분으로 예측 오프셋 계산 (트랙 폭 내 클램프)
+        float lat_vel   = opp_v * std::sin(opp_yaw - yaw);
+        float e_y_pred  = e_y_opp + lat_vel * fsm_side_pred_time_;
+        e_y_pred = std::max(-r_dist, std::min(l_dist, e_y_pred));
+
         // 차량 반폭 (ego + 상대방)
         float clearance_needed = mppi_params_.collision_radius + 0.2f + 0.1f; // 여유 0.1m
 
-        h_pl = (l_dist - e_y_opp) - clearance_needed;
-        h_pr = (r_dist + e_y_opp) - clearance_needed;
+        h_pl = (l_dist - e_y_pred) - clearance_needed;
+        h_pr = (r_dist + e_y_pred) - clearance_needed;
     }
 
     void compute_bezier_obstacles() {
@@ -202,11 +225,25 @@ private:
         if (ref_path_xs_.empty()) return;
 
         float horizon = 50 * mppi_params_.dt;
-        int n = std::min((int)latest_obstacles_.size(), MAX_OBS);
 
-        for (int i = 0; i < n; ++i) {
-            const auto &obs = latest_obstacles_[i];
-            auto &os = mppi_params_.obstacles[i];
+        // 1. 동적/정적 분리: 정적 검출은 버퍼로 흡수 (시야 밖에서도 유지)
+        std::vector<const f1_msgs::msg::F1state*> dynamic_obs;
+        std::vector<std::pair<float, float>> static_dets;
+        for (const auto &obs : latest_obstacles_) {
+            if (std::abs((float)obs.v) < static_vel_threshold_)
+                static_dets.emplace_back((float)obs.x, (float)obs.y);
+            else
+                dynamic_obs.push_back(&obs);
+        }
+        static_obs_buffer_->update(static_dets,
+            current_state_.x, current_state_.y, current_state_.yaw);
+
+        // 2. 동적 장애물: 베지에 예측 (라이브 검출 우선 배치)
+        int slot = 0;
+        for (const auto *p_obs : dynamic_obs) {
+            if (slot >= MAX_OBS) break;
+            const auto &obs = *p_obs;
+            auto &os = mppi_params_.obstacles[slot];
 
             os.x = (float)obs.x;
             os.y = (float)obs.y;
@@ -215,31 +252,62 @@ private:
             os.vx = speed * std::cos(os.theta);
             os.vy = speed * std::sin(os.theta);
 
-            if (std::abs(speed) < 0.2f) {
-                os.p0 = os.p1 = os.p2 = os.p3 = {os.x, os.y};
-            } else {
-                float px = os.x + os.vx * horizon;
-                float py = os.y + os.vy * horizon;
-                int snap_idx = 0;
-                float min_d2 = std::numeric_limits<float>::max();
-                for (int j = 0; j < (int)ref_path_xs_.size(); ++j) {
-                    float ddx = px - ref_path_xs_[j];
-                    float ddy = py - ref_path_ys_[j];
-                    float d2 = ddx*ddx + ddy*ddy;
-                    if (d2 < min_d2) { min_d2 = d2; snap_idx = j; }
-                }
-                float sx = ref_path_xs_[snap_idx];
-                float sy = ref_path_ys_[snap_idx];
-                float theta_T = ref_path_yaws_[snap_idx];
-                float alpha = std::min(0.333f * std::hypot(sx - os.x, sy - os.y), 2.0f);
-                os.p0 = {os.x, os.y};
-                os.p1 = {os.x + alpha * std::cos(os.theta), os.y + alpha * std::sin(os.theta)};
-                os.p3 = {sx, sy};
-                os.p2 = {sx - alpha * std::cos(theta_T), sy - alpha * std::sin(theta_T)};
+            float px = os.x + os.vx * horizon;
+            float py = os.y + os.vy * horizon;
+            int snap_idx = 0;
+            float min_d2 = std::numeric_limits<float>::max();
+            for (int j = 0; j < (int)ref_path_xs_.size(); ++j) {
+                float ddx = px - ref_path_xs_[j];
+                float ddy = py - ref_path_ys_[j];
+                float d2 = ddx*ddx + ddy*ddy;
+                if (d2 < min_d2) { min_d2 = d2; snap_idx = j; }
             }
+            float sx = ref_path_xs_[snap_idx];
+            float sy = ref_path_ys_[snap_idx];
+            float theta_T = ref_path_yaws_[snap_idx];
+            float alpha = std::min(0.333f * std::hypot(sx - os.x, sy - os.y), 2.0f);
+            os.p0 = {os.x, os.y};
+            os.p1 = {os.x + alpha * std::cos(os.theta), os.y + alpha * std::sin(os.theta)};
+            os.p3 = {sx, sy};
+            os.p2 = {sx - alpha * std::cos(theta_T), sy - alpha * std::sin(theta_T)};
             os.detected = true;
-            mppi_params_.num_obs++;
+            slot++;
         }
+
+        // 3. 남은 슬롯: 버퍼의 확정 정적 장애물을 ego 전방 진행 거리순으로 배치
+        //    → 블라인드 코너 너머 장애물도 MPPI 비용에 미리 반영됨
+        auto statics = static_obs_buffer_->confirmed();
+        if (!statics.empty() && slot < MAX_OBS) {
+            int ego_idx  = update_nearest_index(current_state_);
+            int path_len = (int)ref_path_xs_.size();
+            auto ahead_of_ego = [&](float x, float y) {
+                int idx = 0;
+                float min_d2 = std::numeric_limits<float>::max();
+                for (int j = 0; j < path_len; ++j) {
+                    float ddx = x - ref_path_xs_[j];
+                    float ddy = y - ref_path_ys_[j];
+                    float d2 = ddx*ddx + ddy*ddy;
+                    if (d2 < min_d2) { min_d2 = d2; idx = j; }
+                }
+                return (idx - ego_idx + path_len) % path_len;
+            };
+            std::sort(statics.begin(), statics.end(),
+                [&](const auto &a, const auto &b) {
+                    return ahead_of_ego(a.x, a.y) < ahead_of_ego(b.x, b.y);
+                });
+            for (const auto &s : statics) {
+                if (slot >= MAX_OBS) break;
+                auto &os = mppi_params_.obstacles[slot];
+                os.x = s.x; os.y = s.y;
+                os.theta = 0.f;
+                os.vx = os.vy = 0.f;
+                os.p0 = os.p1 = os.p2 = os.p3 = {s.x, s.y};
+                os.detected = true;
+                slot++;
+            }
+        }
+
+        mppi_params_.num_obs = slot;
     }
 
     void apply_fsm_command(const mppi::FsmCommand& cmd) {
@@ -305,18 +373,19 @@ private:
         compute_bezier_obstacles();
 
         // 2. 상대방 유효성 체크 및 여유 공간 계산
-        float opp_x = 0.f, opp_y = 0.f, opp_v = 0.f;
+        float opp_x = 0.f, opp_y = 0.f, opp_v = 0.f, opp_yaw = 0.f;
         bool  opp_det = false;
         float h_pl = 0.f, h_pr = 0.f;
         {
             std::lock_guard<std::mutex> lock(opp_mutex_);
-            double age = (this->now() - opp_recv_time_).seconds();
-            if (opp_detected_ && age < 0.5) {
+            // opp_recv_time_은 opp_callback에서 처음 설정됨 — 수신 전에 빼면
+            // 기본 생성 클럭(SYSTEM_TIME)과 노드 클럭(ROS_TIME)이 달라 예외 발생
+            if (opp_detected_ && (this->now() - opp_recv_time_).seconds() < 0.5) {
                 opp_det = true;
-                opp_x = opp_x_; opp_y = opp_y_; opp_v = opp_v_;
+                opp_x = opp_x_; opp_y = opp_y_; opp_v = opp_v_; opp_yaw = opp_yaw_;
             }
         }
-        if (opp_det) compute_opp_clearances(opp_x, opp_y, h_pl, h_pr);
+        if (opp_det) compute_opp_clearances(opp_x, opp_y, opp_yaw, opp_v, h_pl, h_pr);
 
         // 3. FSM tick → 명령 획득
         mppi::FsmCommand cmd = fsm_->tick(
@@ -473,6 +542,35 @@ private:
             }
             markers.markers.push_back(bm);
         }
+
+        // 정적 장애물 버퍼 (confirmed=주황, 미확정=회색 반투명)
+        int static_id = 0;
+        for (const auto &e : static_obs_buffer_->all()) {
+            visualization_msgs::msg::Marker m;
+            m.header.frame_id = "map"; m.header.stamp = this->now();
+            m.ns = "static_obs_buffer"; m.id = static_id++;
+            m.type = visualization_msgs::msg::Marker::CYLINDER;
+            m.action = visualization_msgs::msg::Marker::ADD;
+            m.pose.position.x = e.x; m.pose.position.y = e.y;
+            m.pose.position.z = 0.1; m.pose.orientation.w = 1.0;
+            m.scale.x = 0.3; m.scale.y = 0.3; m.scale.z = 0.2;
+            bool conf = e.confirmed(static_obs_min_hits_);
+            m.color.r = 1.0f;
+            m.color.g = conf ? 0.5f : 0.8f;
+            m.color.b = conf ? 0.0f : 0.8f;
+            m.color.a = conf ? 0.9f : 0.4f;
+            markers.markers.push_back(m);
+        }
+        // 이전 주기에 그렸던 잔여 마커 제거
+        for (int id = static_id; id < last_static_marker_count_; ++id) {
+            visualization_msgs::msg::Marker m;
+            m.header.frame_id = "map"; m.header.stamp = this->now();
+            m.ns = "static_obs_buffer"; m.id = id;
+            m.action = visualization_msgs::msg::Marker::DELETE;
+            markers.markers.push_back(m);
+        }
+        last_static_marker_count_ = static_id;
+
         vis_pub_->publish(markers);
     }
 
@@ -525,7 +623,7 @@ private:
         this->declare_parameter("D_r",    17.0);   mppi_params_.D_r  = get_parameter("D_r").as_double();
 
         this->declare_parameter("odom_topic",   "/ekf_odom");   odom_topic_  = get_parameter("odom_topic").as_string();
-        this->declare_parameter("drive_topic",  "/ackermann_cmd0"); drive_topic_ = get_parameter("drive_topic").as_string();
+        this->declare_parameter("drive_topic",  "/drive"); drive_topic_ = get_parameter("drive_topic").as_string();
         this->declare_parameter("path_topic",   "/mppi_target_path"); path_topic_  = get_parameter("path_topic").as_string();
 
         // FSM 파라미터
@@ -536,6 +634,19 @@ private:
         this->declare_parameter("fsm_lateral_offset",  0.5);   fsm_lateral_offset_ = get_parameter("fsm_lateral_offset").as_double();
         this->declare_parameter("fsm_follow_speed",    4.5);   fsm_follow_speed_   = get_parameter("fsm_follow_speed").as_double();
         this->declare_parameter("fsm_overtake_speed",  6.5);   fsm_overtake_speed_ = get_parameter("fsm_overtake_speed").as_double();
+        this->declare_parameter("fsm_side_pred_time",     0.6);  fsm_side_pred_time_     = get_parameter("fsm_side_pred_time").as_double();
+        this->declare_parameter("fsm_prep_modal_ratio",   0.75); fsm_prep_modal_ratio_   = get_parameter("fsm_prep_modal_ratio").as_double();
+        this->declare_parameter("fsm_side_confirm_ticks", 3);    fsm_side_confirm_ticks_ = get_parameter("fsm_side_confirm_ticks").as_int();
+        this->declare_parameter("fsm_side_switch_margin", 0.2);  fsm_side_switch_margin_ = get_parameter("fsm_side_switch_margin").as_double();
+        this->declare_parameter("fsm_abort_clear_factor", 0.5);  fsm_abort_clear_factor_ = get_parameter("fsm_abort_clear_factor").as_double();
+
+        // 정적 장애물 버퍼 파라미터
+        this->declare_parameter("static_vel_threshold",      0.2);   static_vel_threshold_      = get_parameter("static_vel_threshold").as_double();
+        this->declare_parameter("static_obs_merge_radius",   0.4);   static_obs_merge_radius_   = get_parameter("static_obs_merge_radius").as_double();
+        this->declare_parameter("static_obs_min_hits",       2);     static_obs_min_hits_       = get_parameter("static_obs_min_hits").as_int();
+        this->declare_parameter("static_obs_miss_limit",     5);     static_obs_miss_limit_     = get_parameter("static_obs_miss_limit").as_int();
+        this->declare_parameter("static_obs_verify_range",   4.0);   static_obs_verify_range_   = get_parameter("static_obs_verify_range").as_double();
+        this->declare_parameter("static_obs_verify_fov_deg", 240.0); static_obs_verify_fov_deg_ = get_parameter("static_obs_verify_fov_deg").as_double();
 
         mppi_params_.dt             = 0.035;
         mppi_params_.num_obstacles  = 0;
@@ -563,13 +674,23 @@ private:
     // 상대방 차량 (opponent_tracker)
     std::mutex opp_mutex_;
     bool  opp_detected_ {false};
-    float opp_x_ {0.f}, opp_y_ {0.f}, opp_v_ {0.f};
+    float opp_x_ {0.f}, opp_y_ {0.f}, opp_v_ {0.f}, opp_yaw_ {0.f};
     rclcpp::Time opp_recv_time_;
 
     // 장애물 (perception)
     std::mutex obs_mutex_;
     rclcpp::Subscription<f1_msgs::msg::F1stateArr>::SharedPtr obs_sub_;
     std::vector<f1_msgs::msg::F1state> latest_obstacles_;
+
+    // 정적 장애물 버퍼 (블라인드 코너 예측용)
+    std::unique_ptr<mppi::StaticObstacleBuffer> static_obs_buffer_;
+    float static_vel_threshold_    {0.2f};
+    float static_obs_merge_radius_ {0.4f};
+    int   static_obs_min_hits_     {2};
+    int   static_obs_miss_limit_   {5};
+    float static_obs_verify_range_ {4.0f};
+    float static_obs_verify_fov_deg_ {240.0f};
+    int   last_static_marker_count_ {0};
 
     std::vector<float> left_xs_, left_ys_, right_xs_, right_ys_;
     std::vector<float> ref_path_xs_, ref_path_ys_, ref_path_yaws_, ref_path_vs_;
@@ -587,6 +708,11 @@ private:
     float fsm_lateral_offset_  {0.5f};
     float fsm_follow_speed_    {4.5f};
     float fsm_overtake_speed_  {6.5f};
+    float fsm_side_pred_time_    {0.6f};
+    float fsm_prep_modal_ratio_  {0.75f};
+    int   fsm_side_confirm_ticks_ {3};
+    float fsm_side_switch_margin_ {0.2f};
+    float fsm_abort_clear_factor_ {0.5f};
 
     // 구독/발행
     rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr     path_sub_;

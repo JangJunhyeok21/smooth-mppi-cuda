@@ -340,11 +340,13 @@ namespace mppi
 
                 float log_p = -0.5f * n * n / s2;
 
-                // log[0.5*N(n; +δ, σ) + 0.5*N(n; -δ, σ)] — log-sum-exp 수치 안정화
-                float a = -0.5f * (n - d) * (n - d) / s2;
-                float b = -0.5f * (n + d) * (n + d) / s2;
+                // log[r*N(n; +δ, σ) + (1-r)*N(n; -δ, σ)] — log-sum-exp 수치 안정화
+                // r = modal_ratio (좌편향 샘플 비율, FSM이 선호 방향에 따라 설정)
+                float r = fminf(fmaxf(p.modal_ratio, 0.05f), 0.95f);
+                float a = logf(r)        - 0.5f * (n - d) * (n - d) / s2;
+                float b = logf(1.f - r)  - 0.5f * (n + d) * (n + d) / s2;
                 float m = fmaxf(a, b);
-                float log_q = -0.6931f + m + logf(1.0f + fast_exp(fminf(a, b) - m));
+                float log_q = m + logf(1.0f + fast_exp(fminf(a, b) - m));
 
                 total_cost += -p.lambda * (log_p - log_q);
             }

@@ -64,6 +64,7 @@ FsmCommand OvertakeFsm::tick(
     // EMERGENCY: 거리 임계치 이내 (어느 상태에서든 우선 적용)
     if (opp_detected && dist < cfg_.emergency_dist) {
         state_ = FsmState::EMERGENCY;
+        reset_side_selection();
     }
     else {
         switch (state_) {
@@ -88,6 +89,7 @@ FsmCommand OvertakeFsm::tick(
                 prep_entry_time_ = now;
                 last_opp_x_ = opp_x;
                 last_opp_y_ = opp_y;
+                reset_side_selection();
             }
             break;
 
@@ -95,19 +97,36 @@ FsmCommand OvertakeFsm::tick(
             double elapsed = std::chrono::duration<double>(now - prep_entry_time_).count();
             if (!opp_detected || dist > cfg_.clear_dist) {
                 state_ = FsmState::SOLO;
+                reset_side_selection();
             } else if (elapsed > cfg_.prep_timeout_s) {
                 // PREP 타임아웃 → FOLLOW로 후퇴
                 state_ = FsmState::FOLLOW;
-            } else if (h_pl >= cfg_.clear_threshold) {
-                state_ = FsmState::OVERTAKE_LEFT;
-                overtook_left_ = true;
-                last_opp_x_ = opp_x;
-                last_opp_y_ = opp_y;
-            } else if (h_pr >= cfg_.clear_threshold) {
-                state_ = FsmState::OVERTAKE_RIGHT;
-                overtook_left_ = false;
-                last_opp_x_ = opp_x;
-                last_opp_y_ = opp_y;
+                reset_side_selection();
+            } else {
+                // 선호 방향 선택: 예측 여유폭(상대방 위치+방향 반영)이 큰 쪽.
+                // 이미 선택된 방향은 반대쪽이 margin 이상 좋아질 때만 교체.
+                bool wide_left = has_preferred_side_
+                    ? (preferred_left_ ? h_pl + cfg_.side_switch_margin >= h_pr
+                                       : h_pl - cfg_.side_switch_margin >= h_pr)
+                    : (h_pl >= h_pr);
+                if (has_preferred_side_ && wide_left != preferred_left_)
+                    side_confirm_count_ = 0;
+                preferred_left_     = wide_left;
+                has_preferred_side_ = true;
+
+                // 선택 방향의 여유가 연속 유지되어야 추월 확정
+                float h_sel = preferred_left_ ? h_pl : h_pr;
+                if (h_sel >= cfg_.clear_threshold) side_confirm_count_++;
+                else                               side_confirm_count_ = 0;
+
+                if (side_confirm_count_ >= cfg_.side_confirm_ticks) {
+                    state_ = preferred_left_ ? FsmState::OVERTAKE_LEFT
+                                             : FsmState::OVERTAKE_RIGHT;
+                    overtook_left_ = preferred_left_;
+                    last_opp_x_ = opp_x;
+                    last_opp_y_ = opp_y;
+                    side_confirm_count_ = 0;
+                }
             }
             break;
         }
@@ -116,6 +135,14 @@ FsmCommand OvertakeFsm::tick(
         case FsmState::OVERTAKE_RIGHT:
             if (passed_opponent(ego, last_opp_x_, last_opp_y_)) {
                 state_ = FsmState::MERGE;
+                reset_side_selection();
+            } else if (opp_detected) {
+                // 선택한 쪽 여유가 무너지면 추월 중단 → FOLLOW 복귀 후 재시도
+                float h_sel = overtook_left_ ? h_pl : h_pr;
+                if (h_sel < cfg_.clear_threshold * cfg_.abort_clear_factor) {
+                    state_ = FsmState::FOLLOW;
+                    reset_side_selection();
+                }
             }
             break;
 
@@ -149,7 +176,10 @@ FsmCommand OvertakeFsm::tick(
     case FsmState::OVERTAKE_PREP:
         cmd.target_speed        = cfg_.follow_speed;
         cmd.multimodal_enabled  = true;
-        // PREP 구간에서 좌/우 탐색: 바이패스 경로 없이 멀티모달만 활성화
+        // 선호 방향으로 샘플 편향: modal_ratio = 좌편향 샘플 비율
+        if (has_preferred_side_)
+            cmd.modal_ratio = preferred_left_ ? cfg_.prep_modal_ratio
+                                              : 1.0f - cfg_.prep_modal_ratio;
         break;
 
     case FsmState::OVERTAKE_LEFT:

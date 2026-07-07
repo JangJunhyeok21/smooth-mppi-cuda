@@ -30,8 +30,8 @@ def generate_launch_description():
     if is_simulation:
         controller_overrides = {
             "use_mcl_pose": False,
-            "odom_topic": "/odom0",
-            "drive_topic": "/ackermann_cmd0",
+            "odom_topic": "/ekf_odom",
+            "drive_topic": "/drive",
             "num_samples": 10000,            # 데스크톱(시뮬)은 10000개
             "publish_debug_info": True,      
             "visualize_candidates": True,    # CPU <-> GPU 메모리 복사 발생

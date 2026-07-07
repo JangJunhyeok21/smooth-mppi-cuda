@@ -31,8 +31,8 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             "sim_odom_topic",
-            default_value="/odom0",
-            description="Simulator odometry topic",
+            default_value="/ekf_odom",
+            description="Simulator odometry topic (실차와 동일 토픽명)",
         ),
 
         # 경로 발행
@@ -74,7 +74,7 @@ def generate_launch_description():
             output="screen",
             parameters=[param_file, {
                 "odom_topic":            LaunchConfiguration("sim_odom_topic"),
-                "drive_topic":           "/ackermann_cmd0",
+                "drive_topic":           "/drive",
                 "num_samples":           8000,
                 "visualize_candidates":  True,
                 # FSM

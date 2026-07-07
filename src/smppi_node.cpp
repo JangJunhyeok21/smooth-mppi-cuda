@@ -308,7 +308,7 @@ private:
         // 기본값을 /ekf_odom 으로 변경 — EKF가 pose+twist를 하나로 발행
         this->declare_parameter("odom_topic",   "/ekf_odom");
         odom_topic_  = this->get_parameter("odom_topic").as_string();
-        this->declare_parameter("drive_topic",  "/ackermann_cmd0");
+        this->declare_parameter("drive_topic",  "/drive");
         drive_topic_ = this->get_parameter("drive_topic").as_string();
         this->declare_parameter("path_topic",   "/mppi_target_path");
         path_topic_  = this->get_parameter("path_topic").as_string();

@@ -59,6 +59,10 @@ public:
         float lateral_offset  {0.5f};   // 바이패스 경로 횡방향 오프셋 (m)
         float modal_offset    {0.15f};
         float modal_ratio     {0.5f};
+        float prep_modal_ratio   {0.75f}; // PREP 중 선호 방향 샘플 비율 (0.5~1)
+        int   side_confirm_ticks {3};     // 방향 확정 전 연속 확인 틱 수
+        float side_switch_margin {0.2f};  // 선호 방향 교체 히스테리시스 (m)
+        float abort_clear_factor {0.5f};  // 추월 중단 임계 = clear_threshold * factor
         float solo_speed      {6.0f};
         float follow_speed    {4.5f};
         float overtake_speed  {6.5f};
@@ -88,6 +92,17 @@ private:
     float last_opp_x_ {0.0f};
     float last_opp_y_ {0.0f};
     bool  overtook_left_ {false};  // 추월 방향 기억 (MERGE 후 복귀용)
+
+    // PREP 방향 선택 (상대방 위치+방향이 반영된 예측 여유폭 기반)
+    bool has_preferred_side_ {false};
+    bool preferred_left_     {false};
+    int  side_confirm_count_ {0};
+
+    void reset_side_selection() {
+        has_preferred_side_ = false;
+        preferred_left_     = false;
+        side_confirm_count_ = 0;
+    }
 
     // lateral offset으로 평행이동한 바이패스 경로 생성
     void generate_bypass_path(

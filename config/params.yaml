@@ -1,12 +1,12 @@
 /**:
   ros__parameters:
     # --- Limits ---
-    max_steer: 0.38        # rad
-    min_accel: -8.0          # m/s^2
-    max_accel: 8.5           # m/s^2
+    max_steer: 0.4083        # rad
+    min_accel: -9.0          # m/s^2
+    max_accel: 9.0           # m/s^2
     min_speed: 0.5           # m/s
     target_speed: 5.5        # m/s
-    max_speed: 2.5           # m/s
+    max_speed: 3.0           # m/s
     
     # --- Path Publisher Params (곡률 감속용) ---
     max_lat_g: 9.0           # 최대 횡가속도 한계 (m/s^2)
@@ -14,14 +14,14 @@
     
     # --- Costs (최적화 결과 반영) ---
     q_v: 1.0
-    q_dist: 0.2
+    q_dist: 0.0
     q_du: 0.2
     q_steer: 3.0
     q_collision: 400.0
     q_lat_g: 200.0
-    collision_radius: 0.3
+    collision_radius: 0.2
     q_progress: 36.0  #36.0
-    q_escape_vel: 8.0  #32.0
+    q_escape_vel: 32.0  #32.0
     
     # --- Obstacle Avoidance Params ---
     car_radius: 0.25
@@ -52,19 +52,33 @@
     D_r: 35.5
 
     # --- Topics (공통 키) ---
-    odom_topic: /odom0
+    odom_topic: /ekf_odom
     pose_topic: /mcl_pose
     velocity_topic: /odom
-    drive_topic: /ackermann_cmd0
+    drive_topic: /drive
     path_topic: /mppi_target_path
     use_mcl_pose: false      # 시뮬레이터 구동 모드
 
     # --- 장애물 회피 / 추월 파라미터 ---
     obstacle_topic: /f1/perception/object/obstacles/arr
-    static_vel_threshold: 0.2      # (m/s) 이하이면 정적 장애물 → 벽으로 처리
+    static_vel_threshold: 0.2      # (m/s) 이하이면 정적 장애물 → 버퍼에 저장
     front_obstacle_range: 5.0      # (m)  전방 탐색 범위
     overtake_lateral_margin: 0.3   # (m)  추월 판단 시 필요한 추가 여유 폭
     cruise_follow_dist: 0.10       # (m)  크루즈 컨트롤 목표 간격 (10 cm)
+
+    # --- FSM 추월 방향 선택 (상대차 위치+방향 기반) ---
+    fsm_side_pred_time: 0.6        # (s) 상대차 횡방향 위치 예측 시간
+    fsm_prep_modal_ratio: 0.75     # PREP 중 선호 방향 샘플 비율 (0.5=무편향)
+    fsm_side_confirm_ticks: 3      # 방향 확정 전 연속 확인 틱 수
+    fsm_side_switch_margin: 0.2    # (m) 선호 방향 교체 히스테리시스
+    fsm_abort_clear_factor: 0.5    # 추월 중단 임계 = clear_threshold * factor
+
+    # --- 정적 장애물 버퍼 (블라인드 코너 예측) ---
+    static_obs_merge_radius: 0.4   # (m) 검출-버퍼 병합 거리
+    static_obs_min_hits: 2         # confirmed 승격 검출 횟수
+    static_obs_miss_limit: 5       # 시야 내 연속 미검출 제거 임계 (치워짐 판정)
+    static_obs_verify_range: 4.0   # (m) 재확인 가능 센서 거리
+    static_obs_verify_fov_deg: 240.0 # (deg) 재확인 가능 FOV
 
     # --- 동적 장애물 예측 & 멀티모달 샘플링 ---
     q_obs_gauss: 200.0             # 가우시안 장애물 패널티 가중치

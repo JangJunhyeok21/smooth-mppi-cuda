@@ -1,88 +1,65 @@
 /**:
   ros__parameters:
-    # --- Limits ---
-    max_steer: 0.4083        # rad
-    min_accel: -9.0          # m/s^2
-    max_accel: 9.0           # m/s^2
-    min_speed: 0.5           # m/s
-    target_speed: 5.5        # m/s
-    max_speed: 3.0           # m/s
-    
-    # --- Path Publisher Params (곡률 감속용) ---
-    max_lat_g: 9.0           # 최대 횡가속도 한계 (m/s^2)
-    max_decel: 9.0           # 코너 진입 전 브레이킹 한계 감속도
-    
-    # --- Costs (최적화 결과 반영) ---
-    q_v: 1.0
-    q_dist: 0.0
-    q_du: 0.2
-    q_steer: 3.0
+    max_steer: 0.4083
+    min_accel: -9.0
+    max_accel: 9.0
+    min_speed: 0.1
+    target_speed: 4.7101
+    max_speed: 4.7101
+    max_lat_g: 9.0
+    max_decel: 9.0
+    q_v: 3.4381
+    q_dist: 38.2404
+    q_du: 0.1097
+    q_steer: 2.7696
     q_collision: 400.0
     q_lat_g: 200.0
-    collision_radius: 0.2
-    q_progress: 36.0  #36.0
-    q_escape_vel: 32.0  #32.0
-    
-    # --- Obstacle Avoidance Params ---
+    collision_radius: 0.215
+    q_progress: 13.6184
+    q_escape_vel: 54.7464
     car_radius: 0.25
     q_obs: 150.0
-    
-    # --- Noise & Tuning ---
-    noise_steer_std: 0.4     # rad/s
-    noise_accel_std: 2.0     # m/s^3
-    max_steer_rate: 8.0      # rad/s
-    max_accel_rate: 100.0    # m/s^3
-    lambda: 15.0
-    visualize_candidates: true
-    
-    # --- Dynamic Model Params (Pacejka & Kinematics) ---
+    noise_steer_std: 0.2868
+    noise_accel_std: 1.1549
+    max_steer_rate: 8.0
+    max_accel_rate: 100.0
+    lambda: 13.7917
+    visualize_candidates: false
     mass: 3.74
     l_f: 0.163
     l_r: 0.161
     I_z: 0.16
-    Cm0: 0.04                # 고속 감쇠용 모터 역기전력 계수
-    
-    # Pacejka Coefficients (힘 Newton 단위)
+    Cm0: 0.04
     B_f: 1.5
     C_f: 1.5
     D_f: 38.0
-    
     B_r: 1.5
     C_r: 1.5
     D_r: 35.5
-
-    # --- Topics (공통 키) ---
     odom_topic: /ekf_odom
     pose_topic: /mcl_pose
     velocity_topic: /odom
     drive_topic: /drive
     path_topic: /mppi_target_path
-    use_mcl_pose: false      # 시뮬레이터 구동 모드
-
-    # --- 장애물 회피 / 추월 파라미터 ---
+    use_mcl_pose: false
     obstacle_topic: /f1/perception/object/obstacles/arr
-    static_vel_threshold: 0.2      # (m/s) 이하이면 정적 장애물 → 버퍼에 저장
-    front_obstacle_range: 5.0      # (m)  전방 탐색 범위
-    overtake_lateral_margin: 0.3   # (m)  추월 판단 시 필요한 추가 여유 폭
-    cruise_follow_dist: 0.10       # (m)  크루즈 컨트롤 목표 간격 (10 cm)
-
-    # --- FSM 추월 방향 선택 (상대차 위치+방향 기반) ---
-    fsm_side_pred_time: 0.6        # (s) 상대차 횡방향 위치 예측 시간
-    fsm_prep_modal_ratio: 0.75     # PREP 중 선호 방향 샘플 비율 (0.5=무편향)
-    fsm_side_confirm_ticks: 3      # 방향 확정 전 연속 확인 틱 수
-    fsm_side_switch_margin: 0.2    # (m) 선호 방향 교체 히스테리시스
-    fsm_abort_clear_factor: 0.5    # 추월 중단 임계 = clear_threshold * factor
-
-    # --- 정적 장애물 버퍼 (블라인드 코너 예측) ---
-    static_obs_merge_radius: 0.4   # (m) 검출-버퍼 병합 거리
-    static_obs_min_hits: 2         # confirmed 승격 검출 횟수
-    static_obs_miss_limit: 5       # 시야 내 연속 미검출 제거 임계 (치워짐 판정)
-    static_obs_verify_range: 4.0   # (m) 재확인 가능 센서 거리
-    static_obs_verify_fov_deg: 240.0 # (deg) 재확인 가능 FOV
-
-    # --- 동적 장애물 예측 & 멀티모달 샘플링 ---
-    q_obs_gauss: 200.0             # 가우시안 장애물 패널티 가중치
-    sigma_x: 1.0                   # 종방향 가우시안 폭 (m) — sigma_x > sigma_y (타원형)
-    sigma_y: 0.5                   # 횡방향 가우시안 폭 (m)
-    modal_steer_offset: 0.15       # 조향 편향 δ (rad), 트랙 폭에 따라 0.10~0.25 조정
-    modal_activation_dist: 2.0     # 멀티모달 활성화 거리 임계값 (m), 비활성화는 +0.5m 히스테리시스
+    static_vel_threshold: 0.2
+    front_obstacle_range: 5.0
+    overtake_lateral_margin: 0.3
+    cruise_follow_dist: 0.1
+    fsm_side_pred_time: 0.6
+    fsm_prep_modal_ratio: 0.75
+    fsm_side_confirm_ticks: 3
+    fsm_side_switch_margin: 0.2
+    fsm_abort_clear_factor: 0.5
+    static_obs_merge_radius: 0.4
+    static_obs_min_hits: 2
+    static_obs_miss_limit: 5
+    static_obs_verify_range: 4.0
+    static_obs_verify_fov_deg: 240.0
+    q_obs_gauss: 197.33
+    sigma_x: 1.0
+    sigma_y: 0.5
+    modal_steer_offset: 0.15
+    modal_activation_dist: 2.0
+    num_samples: 10000

@@ -81,9 +81,14 @@ namespace mppi
         float alpha_f = u.steer - atan2f(vy + p.l_f * omega, vx);
         float alpha_r = -atan2f(vy - p.l_r * omega, vx);
 
-        // 타이어 횡력 연산 (Newton 단위 - Df, Dr 파라미터가 40.0 같은 힘의 크기일 때 사용)
-        float F_fy = p.D_f * fast_sin(p.C_f * atanf(p.B_f * alpha_f));
-        float F_ry = p.D_r * fast_sin(p.C_r * atanf(p.B_r * alpha_r));
+        // 타이어 횡력 연산 — ForzaETH On-Track-SysID 와 동일한 4-파라미터 매직 포뮬러.
+        //   F_y = F_z * D * sin( C * atan( B*a - E*(B*a - atan(B*a)) ) )
+        // D 는 무차원(마찰계수), 힘의 크기는 정하중 F_z 가 만든다.
+        // E=0 이면 안쪽 괄호가 B*a 로 환원되어 이전 3-파라미터 수식과 완전히 동일해진다.
+        float bf_a = p.B_f * alpha_f;
+        float br_a = p.B_r * alpha_r;
+        float F_fy = p.F_zf * p.D_f * fast_sin(p.C_f * atanf(bf_a - p.E_f * (bf_a - atanf(bf_a))));
+        float F_ry = p.F_zr * p.D_r * fast_sin(p.C_r * atanf(br_a - p.E_r * (br_a - atanf(br_a))));
 
         // 기존 MPC 동역학 수식 완벽 적용 (단위 및 로직 동일)
         float dot_x = vel * fast_cos(yaw + slip_angle);

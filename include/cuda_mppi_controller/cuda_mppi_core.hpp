@@ -89,9 +89,16 @@ struct Params {
     float l_r;
     float Cm0;
     
-    // Pacejka
-    float B_f, C_f, D_f;
-    float B_r, C_r, D_r;
+    // Pacejka (ForzaETH On-Track-SysID 와 동일한 4-파라미터 매직 포뮬러)
+    //   F_y = F_z * D * sin( C * atan( B*a - E*(B*a - atan(B*a)) ) )
+    // D 는 무차원(마찰계수 성격)이고 실제 힘은 정하중 F_z 를 곱해 나온다.
+    // 기존 3-파라미터 형태(D 가 뉴턴 단위)에서 바뀌었다 — E=0, D_new=D_old/F_z 로 두면
+    // 수식이 정확히 예전 형태로 환원되므로 무손실 마이그레이션이 가능하다.
+    // F_zf/F_zr 은 smppi_node 가 F_zf = m*g*l_r/l_wb, F_zr = m*g*l_f/l_wb 로 채워 준다
+    // (pacejka_sysid/helpers/generate_predictions.py 와 동일한 정하중 규약).
+    float B_f, C_f, D_f, E_f;
+    float B_r, C_r, D_r, E_r;
+    float F_zf, F_zr;
 
     ButterworthCoeffs filter_coeffs;
 };

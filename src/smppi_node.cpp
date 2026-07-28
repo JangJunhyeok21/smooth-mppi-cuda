@@ -79,7 +79,6 @@ private:
 
         odom_received_ = true;
     }
-    }
 
     float compute_min_boundary_distance(const mppi::State &s, int current_path_idx) {
         if (left_xs_.empty() || right_xs_.empty() ||
@@ -186,12 +185,30 @@ private:
         this->declare_parameter("l_r",    0.162);  mppi_params_.l_r  = this->get_parameter("l_r").as_double();
         this->declare_parameter("I_z",    0.04712);mppi_params_.I_z  = this->get_parameter("I_z").as_double();
         this->declare_parameter("Cm0",    0.04);   mppi_params_.Cm0  = this->get_parameter("Cm0").as_double();
-        this->declare_parameter("B_f",    14.0);   mppi_params_.B_f  = this->get_parameter("B_f").as_double();
+        // Pacejka 4-파라미터 (ForzaETH On-Track-SysID 규약).
+        // D 는 무차원 마찰계수이며 실제 힘은 아래에서 계산하는 정하중 F_z 가 만든다.
+        // E=0 이면 예전 3-파라미터 수식과 완전히 동일하다 (mppi_core.cu 주석 참고).
+        this->declare_parameter("B_f",    7.2);    mppi_params_.B_f  = this->get_parameter("B_f").as_double();
         this->declare_parameter("C_f",    1.5);    mppi_params_.C_f  = this->get_parameter("C_f").as_double();
-        this->declare_parameter("D_f",    19.0);   mppi_params_.D_f  = this->get_parameter("D_f").as_double();
-        this->declare_parameter("B_r",    14.0);   mppi_params_.B_r  = this->get_parameter("B_r").as_double();
+        this->declare_parameter("D_f",    0.65);   mppi_params_.D_f  = this->get_parameter("D_f").as_double();
+        this->declare_parameter("E_f",    0.0);    mppi_params_.E_f  = this->get_parameter("E_f").as_double();
+        this->declare_parameter("B_r",    7.5);    mppi_params_.B_r  = this->get_parameter("B_r").as_double();
         this->declare_parameter("C_r",    1.5);    mppi_params_.C_r  = this->get_parameter("C_r").as_double();
-        this->declare_parameter("D_r",    17.0);   mppi_params_.D_r  = this->get_parameter("D_r").as_double();
+        this->declare_parameter("D_r",    0.65);   mppi_params_.D_r  = this->get_parameter("D_r").as_double();
+        this->declare_parameter("E_r",    0.0);    mppi_params_.E_r  = this->get_parameter("E_r").as_double();
+
+        // 정하중 (pacejka_sysid/helpers/generate_predictions.py 와 동일한 규약)
+        //   F_zf = m*g*l_r/l_wb,  F_zr = m*g*l_f/l_wb,  l_wb = l_f + l_r
+        {
+            const double g_    = 9.81;
+            const double l_wb  = mppi_params_.l_f + mppi_params_.l_r;
+            mppi_params_.F_zf  = mppi_params_.mass * g_ * mppi_params_.l_r / l_wb;
+            mppi_params_.F_zr  = mppi_params_.mass * g_ * mppi_params_.l_f / l_wb;
+            RCLCPP_INFO(this->get_logger(),
+                        "Pacejka 정하중: F_zf=%.3f N, F_zr=%.3f N (m=%.3f, l_f=%.3f, l_r=%.3f)",
+                        mppi_params_.F_zf, mppi_params_.F_zr,
+                        mppi_params_.mass, mppi_params_.l_f, mppi_params_.l_r);
+        }
 
         // 기본값을 /ekf_odom 으로 변경 — EKF가 pose+twist를 하나로 발행
         this->declare_parameter("odom_topic",   "/ekf_odom");

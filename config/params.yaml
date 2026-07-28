@@ -1,7 +1,7 @@
 /**:
   ros__parameters:
     # --- Limits ---
-    max_steer: 0.38        # rad
+    max_steer: 0.4788        # rad
     min_accel: -8.0          # m/s^2
     max_accel: 8.5           # m/s^2
     min_speed: 0.5           # m/s
@@ -20,7 +20,7 @@
     q_collision: 400.0
     q_lat_g: 200.0
     collision_radius: 0.3
-    q_progress: 36.0  #36.0
+    q_progress: 16.0  #36.0
     q_escape_vel: 8.0  #32.0
     
     # --- Obstacle Avoidance Params ---
@@ -39,17 +39,31 @@
     mass: 3.74
     l_f: 0.163
     l_r: 0.161
-    I_z: 0.16
+    I_z: 0.04712
     Cm0: 0.04                # 고속 감쇠용 모터 역기전력 계수
     
-    # Pacejka Coefficients (힘 Newton 단위)
-    B_f: 1.5
-    C_f: 1.5
-    D_f: 38.0
-    
-    B_r: 1.5
-    C_r: 1.5
-    D_r: 35.5
+    # Pacejka 4-파라미터 (ForzaETH On-Track-SysID 규약)
+    #   F_y = F_z * D * sin( C * atan( B*a - E*(B*a - atan(B*a)) ) )
+    # D 는 **무차원 마찰계수**이고, 힘의 크기는 정하중이 만든다 —
+    # 노드가 F_zf = m*g*l_r/l_wb = 18.2315 N, F_zr = m*g*l_f/l_wb = 18.4579 N 로 계산한다.
+    #
+    # 아래 값은 예전 3-파라미터(D 가 뉴턴 단위) 설정의 **무손실 변환**이다:
+    #   D_f: 38.0 N / 18.2315 N = 2.0843,  D_r: 35.5 N / 18.4579 N = 1.9233,  E = 0
+    # E=0 이면 수식이 예전 형태로 정확히 환원되므로 주행 거동은 바뀌지 않는다.
+    #
+    # 주의: 이 값을 마찰계수로 읽으면 mu ~ 2.08 로 물리적으로 불가능하다 (실제 타이어는 0.6~1.0).
+    # pacejka_sysid 로 식별한 D 는 훨씬 작게 나오며, 그대로 넣으면 횡력이 3~4배 줄어
+    # SMPPI 가 크게 보수적으로 변한다. 반드시 저속에서 단계적으로 적용할 것.
+    # 절차: src/control/pacejka_sysid/README.md 의 "식별 결과를 SMPPI 에 반영하기" 참고.
+    B_f: 6.0926
+    C_f: 1.2447
+    D_f: 0.7955
+    E_f: 0.7815
+
+    B_r: 6.6457
+    C_r: 2.2129
+    D_r: 0.7317
+    E_r: 0.0597
 
     # --- Topics (공통 키) ---
     odom_topic: /odom0

@@ -112,7 +112,7 @@ public:
     
     // 경로 및 바운더리 설정
     void set_reference_path(const std::vector<float>& xs, const std::vector<float>& ys,
-                            const std::vector<float>& yaws, const std::vector<float>& vs);
+                            const std::vector<float>& yaws);
     void set_boundaries(const std::vector<float>& left_xs, const std::vector<float>& left_ys,
                         const std::vector<float>& right_xs, const std::vector<float>& right_ys);
     
@@ -159,7 +159,6 @@ private:
     float* d_ref_xs_;
     float* d_ref_ys_;
     float* d_ref_yaws_;
-    float* d_ref_vs_;
     int ref_path_len_ = 0;
 
     // Boundary Device Memory

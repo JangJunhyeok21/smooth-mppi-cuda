@@ -124,7 +124,7 @@ private:
 
         float dx = s.x - ref_path_xs_[idx], dy = s.y - ref_path_ys_[idx];
         float dist_error = dx*dx + dy*dy;
-        float speed_err  = s.v - ref_path_vs_[idx];
+        float speed_err  = s.v - mppi_params_.target_speed;
         float overspeed  = (speed_err > 0.f) ? mppi_params_.q_v * speed_err * speed_err : 0.f;
 
         float d_steer = u.steer - u_prev.steer, d_accel = u.accel - u_prev.accel;
@@ -234,9 +234,9 @@ private:
 
     void path_callback(const nav_msgs::msg::Path::SharedPtr msg) {
         if (path_received_ || msg->poses.empty()) return;
-        std::vector<float> xs, ys, yaws, vs;
+        std::vector<float> xs, ys, yaws;
         xs.reserve(msg->poses.size()); ys.reserve(msg->poses.size());
-        yaws.reserve(msg->poses.size()); vs.reserve(msg->poses.size());
+        yaws.reserve(msg->poses.size());
         for (const auto &p : msg->poses) {
             xs.push_back(p.pose.position.x); ys.push_back(p.pose.position.y);
             double yaw = atan2(2.0*(p.pose.orientation.w*p.pose.orientation.z
@@ -244,11 +244,9 @@ private:
                                1.0 - 2.0*(p.pose.orientation.y*p.pose.orientation.y
                                          + p.pose.orientation.z*p.pose.orientation.z));
             yaws.push_back((float)yaw);
-            float rv = (float)p.pose.position.z;
-            vs.push_back(rv > 0.1f ? rv : mppi_params_.target_speed);
         }
-        ref_path_xs_ = xs; ref_path_ys_ = ys; ref_path_yaws_ = yaws; ref_path_vs_ = vs;
-        solver_->set_reference_path(xs, ys, yaws, vs);
+        ref_path_xs_ = xs; ref_path_ys_ = ys; ref_path_yaws_ = yaws;
+        solver_->set_reference_path(xs, ys, yaws);
         RCLCPP_INFO_ONCE(this->get_logger(), "Path received: %zu points", xs.size());
         path_received_ = true;
     }
@@ -377,7 +375,7 @@ private:
     mppi::State  current_state_;
 
     std::vector<float> left_xs_, left_ys_, right_xs_, right_ys_;
-    std::vector<float> ref_path_xs_, ref_path_ys_, ref_path_yaws_, ref_path_vs_;
+    std::vector<float> ref_path_xs_, ref_path_ys_, ref_path_yaws_;
 
     rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr     path_sub_;
     rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr     left_bnd_sub_;

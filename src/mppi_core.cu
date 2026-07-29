@@ -116,7 +116,7 @@ namespace mppi
 
     __device__ float compute_cost_cuda(
         const State &s,
-        const float *ref_xs, const float *ref_ys, const float *ref_yaws, const float *ref_vs, int path_len,
+        const float *ref_xs, const float *ref_ys, const float *ref_yaws, int path_len,
         const Control &u, const Control &u_prev,
         const Params &p,
         float min_bnd_dist,
@@ -260,7 +260,7 @@ namespace mppi
     __global__ void rollout_kernel(
         State *states, Control *controls, float *costs, curandState *rng_states,
         const State start_state, const Control *prev_controls, const Params p,
-        const float *ref_xs, const float *ref_ys, const float *ref_yaws, const float *ref_vs, int path_len,
+        const float *ref_xs, const float *ref_ys, const float *ref_yaws, int path_len,
         const float *left_bnd_xs, const float *left_bnd_ys,
         const float *right_bnd_xs, const float *right_bnd_ys,
         int bnd_len,
@@ -374,7 +374,7 @@ namespace mppi
             {
                 total_cost += compute_cost_cuda(
                     x,
-                    ref_xs, ref_ys, ref_yaws, ref_vs, path_len,
+                    ref_xs, ref_ys, ref_yaws, path_len,
                     u_clamped, last_u, p, min_dist, &local_path_idx);
             }
 
@@ -437,8 +437,7 @@ namespace mppi
         CUDA_CHECK(cudaMalloc(&d_ref_xs_, max_path * sizeof(float)));
         CUDA_CHECK(cudaMalloc(&d_ref_ys_, max_path * sizeof(float)));
         CUDA_CHECK(cudaMalloc(&d_ref_yaws_, max_path * sizeof(float)));
-        CUDA_CHECK(cudaMalloc(&d_ref_vs_, max_path * sizeof(float)));
-        
+
         CUDA_CHECK(cudaMalloc(&d_left_bnd_xs_, max_path * sizeof(float)));
         CUDA_CHECK(cudaMalloc(&d_left_bnd_ys_, max_path * sizeof(float)));
         CUDA_CHECK(cudaMalloc(&d_right_bnd_xs_, max_path * sizeof(float)));
@@ -453,7 +452,7 @@ namespace mppi
     void MPPISolver::cleanup_cuda_memory() {
         cudaFree(d_states_); cudaFree(d_controls_); cudaFree(d_prev_controls_);
         cudaFree(d_costs_); cudaFree(d_rng_states_);
-        cudaFree(d_ref_xs_); cudaFree(d_ref_ys_); cudaFree(d_ref_yaws_); cudaFree(d_ref_vs_);
+        cudaFree(d_ref_xs_); cudaFree(d_ref_ys_); cudaFree(d_ref_yaws_);
         cudaFree(d_left_bnd_xs_); cudaFree(d_left_bnd_ys_);
         cudaFree(d_right_bnd_xs_); cudaFree(d_right_bnd_ys_);
     }
@@ -464,15 +463,14 @@ namespace mppi
     }   
 
     void MPPISolver::set_reference_path(const std::vector<float> &xs, const std::vector<float> &ys,
-                                        const std::vector<float> &yaws, const std::vector<float> &vs) {
-        h_ref_xs_ = xs; h_ref_ys_ = ys; 
+                                        const std::vector<float> &yaws) {
+        h_ref_xs_ = xs; h_ref_ys_ = ys;
         ref_path_len_ = xs.size();
-        if (ref_path_len_ > 1000) ref_path_len_ = 1000; 
+        if (ref_path_len_ > 1000) ref_path_len_ = 1000;
         if (ref_path_len_ > 0) {
             CUDA_CHECK(cudaMemcpy(d_ref_xs_, xs.data(), ref_path_len_ * sizeof(float), cudaMemcpyHostToDevice));
             CUDA_CHECK(cudaMemcpy(d_ref_ys_, ys.data(), ref_path_len_ * sizeof(float), cudaMemcpyHostToDevice));
             CUDA_CHECK(cudaMemcpy(d_ref_yaws_, yaws.data(), ref_path_len_ * sizeof(float), cudaMemcpyHostToDevice));
-            CUDA_CHECK(cudaMemcpy(d_ref_vs_, vs.data(), ref_path_len_ * sizeof(float), cudaMemcpyHostToDevice));
         }
     }
 
@@ -508,7 +506,7 @@ namespace mppi
         rollout_kernel<<<blocksPerGrid, threadsPerBlock>>>(
             d_states_, d_controls_, d_costs_, (curandState *)d_rng_states_,
             current_state, d_prev_controls_, params_,
-            d_ref_xs_, d_ref_ys_, d_ref_yaws_, d_ref_vs_, ref_path_len_,
+            d_ref_xs_, d_ref_ys_, d_ref_yaws_, ref_path_len_,
             d_left_bnd_xs_, d_left_bnd_ys_, d_right_bnd_xs_, d_right_bnd_ys_, bnd_len_, 
             K_, T_, start_path_idx);
         

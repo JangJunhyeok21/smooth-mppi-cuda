@@ -6,22 +6,18 @@
     max_accel: 8.5           # m/s^2
     min_speed: 0.5           # m/s
     target_speed: 5.5        # m/s
-    max_speed: 2.5           # m/s
-    
-    # --- Path Publisher Params (곡률 감속용) ---
-    max_lat_g: 9.0           # 최대 횡가속도 한계 (m/s^2)
-    max_decel: 9.0           # 코너 진입 전 브레이킹 한계 감속도
-    
+    max_speed: 2.0           # m/s
+
     # --- Costs (최적화 결과 반영) ---
     q_v: 1.0
-    q_dist: 0.2
+    q_dist: 0.0
     q_du: 0.2
-    q_steer: 3.0
-    q_collision: 400.0
+    q_steer: 0.5
+    q_collision: 300.0
     q_lat_g: 200.0
     collision_radius: 0.3
-    q_progress: 16.0  #36.0
-    q_escape_vel: 8.0  #32.0
+    q_progress: 32.0  #36.0
+    q_escape_vel: 28.0  #32.0
     
     # --- Obstacle Avoidance Params ---
     car_radius: 0.25

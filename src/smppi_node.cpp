@@ -6,7 +6,10 @@
 #include "visualization_msgs/msg/marker_array.hpp"
 #include "geometry_msgs/msg/point.hpp"
 #include "geometry_msgs/msg/pose_stamped.hpp"
+#include "std_msgs/msg/string.hpp"
+#include "f1_msgs/msg/f1state_arr.hpp"
 #include "cuda_mppi_controller/cuda_mppi_core.hpp"
+#include "cuda_mppi_controller/overtake_fsm.hpp"
 #include "smppi_cuda_controller/msg/mppi_trajectory.hpp"
 #include <algorithm>
 #include <cmath>
@@ -20,10 +23,16 @@ public:
         validate_parameters();
 
         solver_ = std::make_unique<mppi::MPPISolver>(num_samples_, 50, mppi_params_);
+        overtake_fsm_ = std::make_unique<mppi::OvertakeFsm>(fsm_cfg_);
 
         drive_pub_ = this->create_publisher<ackermann_msgs::msg::AckermannDriveStamped>(drive_topic_, 10);
         vis_pub_   = this->create_publisher<visualization_msgs::msg::MarkerArray>("/mppi_viz", 50);
         traj_pub_  = this->create_publisher<smppi_cuda_controller::msg::MppiTrajectory>("/mppi_optimal_trajectory", 10);
+        fsm_state_pub_ = this->create_publisher<std_msgs::msg::String>("/fsm/state", 10);
+
+        f1_obstacles_sub_ = this->create_subscription<f1_msgs::msg::F1stateArr>(
+            f1_obstacles_topic_, 10,
+            std::bind(&MPPINode::f1_obstacles_callback, this, std::placeholders::_1));
 
         path_sub_ = this->create_subscription<nav_msgs::msg::Path>(
             path_topic_, 1,
@@ -147,15 +156,122 @@ private:
         return std::min(std::hypot(dx_l, dy_l) - e_y, std::hypot(dx_r, dy_r) + e_y);
     }
 
-    int update_nearest_index(const mppi::State &s) {
+    int nearest_index_xy(float x, float y) {
         if (ref_path_xs_.empty()) return 0;
         int nearest = 0; float min_d = 1e9f;
         for (int i = 0; i < (int)ref_path_xs_.size(); ++i) {
-            float d = (s.x - ref_path_xs_[i]) * (s.x - ref_path_xs_[i])
-                    + (s.y - ref_path_ys_[i]) * (s.y - ref_path_ys_[i]);
+            float d = (x - ref_path_xs_[i]) * (x - ref_path_xs_[i])
+                    + (y - ref_path_ys_[i]) * (y - ref_path_ys_[i]);
             if (d < min_d) { min_d = d; nearest = i; }
         }
         return nearest;
+    }
+
+    int update_nearest_index(const mppi::State &s) {
+        return nearest_index_xy(s.x, s.y);
+    }
+
+    // 상대차 위치를 센터라인 법선에 투영해 좌/우 여유폭(h_pl/h_pr) 계산.
+    // opp_yaw/opp_v로 fsm_side_pred_time_ 뒤의 예측 횡위치를 반영한다.
+    bool compute_opp_clearances(float opp_x, float opp_y, float opp_yaw, float opp_v,
+                                float &h_pl, float &h_pr) {
+        if (left_xs_.empty() || right_xs_.empty() ||
+            left_xs_.size() != right_xs_.size() || ref_path_xs_.empty()) return false;
+
+        int idx = nearest_index_xy(opp_x, opp_y);
+        float dx = opp_x - ref_path_xs_[idx], dy = opp_y - ref_path_ys_[idx];
+        float ref_yaw = ref_path_yaws_[idx];
+        float nx = -std::sin(ref_yaw), ny = std::cos(ref_yaw);
+        float e_y = dx * nx + dy * ny;
+
+        float dx_l = left_xs_[idx]  - ref_path_xs_[idx], dy_l = left_ys_[idx]  - ref_path_ys_[idx];
+        float dx_r = right_xs_[idx] - ref_path_xs_[idx], dy_r = right_ys_[idx] - ref_path_ys_[idx];
+        float l_dist = std::hypot(dx_l, dy_l);
+        float r_dist = std::hypot(dx_r, dy_r);
+
+        float e_y_pred = e_y + opp_v * std::sin(opp_yaw - ref_yaw) * fsm_side_pred_time_;
+        e_y_pred = std::max(-r_dist, std::min(l_dist, e_y_pred));
+
+        float clearance_needed = mppi_params_.collision_radius + 0.2f + 0.1f;
+        h_pl = (l_dist - e_y_pred) - clearance_needed;
+        h_pr = (r_dist + e_y_pred) - clearance_needed;
+        return true;
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    //  f1_obstacles_callback — perception 노드가 발행하는 동적/정적
+    //  트랙(장애물+상대차) 목록 수신. header.stamp가 비어있으므로
+    //  수신 시각(now())을 별도로 기록해 신선도 판정에 쓴다.
+    // ════════════════════════════════════════════════════════════════
+    void f1_obstacles_callback(const f1_msgs::msg::F1stateArr::SharedPtr msg) {
+        latest_obstacles_ = msg;
+        obstacles_recv_time_ = this->now();
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    //  update_overtake_fsm — 매 제어 주기, solve() 직전에 호출.
+    //  1) 최신 장애물(정적+동적 모두)을 반발 비용(obs_x/obs_y)에 반영
+    //  2) v>=opp_min_speed_ && ego 전방에 있는 최근접 트랙을 "상대차"로 선택
+    //  3) FSM tick → speed_cap/바이패스 경로를 solver_에 적용
+    // ════════════════════════════════════════════════════════════════
+    void update_overtake_fsm() {
+        mppi_params_.num_obstacles = 0;
+        bool opp_detected = false;
+        float opp_x = 0.f, opp_y = 0.f, opp_yaw = 0.f, opp_v = 0.f;
+        float best_dist = 1e9f;
+
+        bool fresh = latest_obstacles_ &&
+            (this->now() - obstacles_recv_time_).seconds() < obstacle_timeout_s_;
+
+        if (fresh) {
+            const float cy = std::cos(current_state_.yaw), sy = std::sin(current_state_.yaw);
+            for (const auto &e : latest_obstacles_->f1_state_arr) {
+                float ex = static_cast<float>(e.x), ey = static_cast<float>(e.y);
+
+                if (mppi_params_.num_obstacles < MAX_OBS) {
+                    mppi_params_.obs_x[mppi_params_.num_obstacles] = ex;
+                    mppi_params_.obs_y[mppi_params_.num_obstacles] = ey;
+                    mppi_params_.num_obstacles++;
+                }
+
+                float fwd = (ex - current_state_.x) * cy + (ey - current_state_.y) * sy;
+                if (fwd > 0.f && e.v >= opp_min_speed_) {
+                    float d = std::hypot(ex - current_state_.x, ey - current_state_.y);
+                    if (d < best_dist) {
+                        best_dist    = d;
+                        opp_detected = true;
+                        opp_x   = ex;
+                        opp_y   = ey;
+                        opp_yaw = static_cast<float>(e.yaw);
+                        opp_v   = static_cast<float>(e.v);
+                    }
+                }
+            }
+        }
+
+        float h_pl = 0.f, h_pr = 0.f;
+        if (opp_detected) {
+            if (!compute_opp_clearances(opp_x, opp_y, opp_yaw, opp_v, h_pl, h_pr))
+                h_pl = h_pr = 0.f;
+        }
+
+        mppi::FsmCommand cmd = overtake_fsm_->tick(
+            current_state_, opp_detected, opp_x, opp_y, opp_v, h_pl, h_pr,
+            ref_path_xs_, ref_path_ys_, ref_path_yaws_);
+
+        mppi_params_.max_speed = std::min(base_max_speed_, cmd.speed_cap);
+
+        if (cmd.has_bypass_path()) {
+            solver_->set_reference_path(cmd.bypass_xs, cmd.bypass_ys, cmd.bypass_yaws);
+            bypass_active_ = true;
+        } else if (bypass_active_) {
+            solver_->set_reference_path(ref_path_xs_, ref_path_ys_, ref_path_yaws_);
+            bypass_active_ = false;
+        }
+
+        std_msgs::msg::String state_msg;
+        state_msg.data = mppi::fsm_state_to_str(cmd.state);
+        fsm_state_pub_->publish(state_msg);
     }
 
     void append_best_traj_costs(
@@ -211,6 +327,7 @@ private:
         this->declare_parameter("max_accel",            9.0);    mppi_params_.max_accel     = this->get_parameter("max_accel").as_double();
         this->declare_parameter("min_speed",            0.0);    mppi_params_.min_speed     = this->get_parameter("min_speed").as_double();
         this->declare_parameter("max_speed",            10.0);   mppi_params_.max_speed     = this->get_parameter("max_speed").as_double();
+        base_max_speed_ = mppi_params_.max_speed;  // FSM이 매 틱 덮어써도 넘지 않을 절대 상한
         this->declare_parameter("q_dist",               1.5);    mppi_params_.q_dist        = this->get_parameter("q_dist").as_double();
         this->declare_parameter("q_v",                  2.0);    mppi_params_.q_v           = this->get_parameter("q_v").as_double();
         this->declare_parameter("q_du",                 0.8);    mppi_params_.q_du          = this->get_parameter("q_du").as_double();
@@ -274,6 +391,48 @@ private:
         pose_topic_     = this->get_parameter("pose_topic").as_string();
         this->declare_parameter("velocity_topic", "/odom");
         velocity_topic_ = this->get_parameter("velocity_topic").as_string();
+
+        // ── 추월(Overtake) FSM: 상대차 인지 및 상태별 파라미터 ──────────
+        this->declare_parameter("f1_obstacles_topic", "/f1/perception/object/obstacles/arr");
+        f1_obstacles_topic_ = this->get_parameter("f1_obstacles_topic").as_string();
+        this->declare_parameter("obstacle_timeout_s", 0.5);
+        obstacle_timeout_s_ = this->get_parameter("obstacle_timeout_s").as_double();
+        this->declare_parameter("opp_min_speed", 0.5);
+        opp_min_speed_ = this->get_parameter("opp_min_speed").as_double();
+        this->declare_parameter("fsm_side_pred_time", 0.6);
+        fsm_side_pred_time_ = this->get_parameter("fsm_side_pred_time").as_double();
+
+        this->declare_parameter("fsm_follow_dist",        5.0);
+        this->declare_parameter("fsm_prep_dist",          3.5);
+        this->declare_parameter("fsm_clear_dist",         7.0);
+        this->declare_parameter("fsm_merge_dist",         2.0);
+        this->declare_parameter("fsm_prep_timeout_s",     2.5);
+        this->declare_parameter("fsm_emergency_dist",     0.5);
+        this->declare_parameter("fsm_clear_threshold",    0.8);
+        this->declare_parameter("fsm_lateral_offset",     0.5);
+        this->declare_parameter("fsm_side_confirm_ticks", 3);
+        this->declare_parameter("fsm_side_switch_margin", 0.2);
+        this->declare_parameter("fsm_abort_clear_factor", 0.5);
+        this->declare_parameter("fsm_solo_speed",         6.0);
+        this->declare_parameter("fsm_follow_speed",       4.5);
+        this->declare_parameter("fsm_overtake_speed",     6.5);
+        this->declare_parameter("fsm_emergency_speed",    0.0);
+
+        fsm_cfg_.follow_dist        = this->get_parameter("fsm_follow_dist").as_double();
+        fsm_cfg_.prep_dist          = this->get_parameter("fsm_prep_dist").as_double();
+        fsm_cfg_.clear_dist         = this->get_parameter("fsm_clear_dist").as_double();
+        fsm_cfg_.merge_dist         = this->get_parameter("fsm_merge_dist").as_double();
+        fsm_cfg_.prep_timeout_s     = this->get_parameter("fsm_prep_timeout_s").as_double();
+        fsm_cfg_.emergency_dist     = this->get_parameter("fsm_emergency_dist").as_double();
+        fsm_cfg_.clear_threshold    = this->get_parameter("fsm_clear_threshold").as_double();
+        fsm_cfg_.lateral_offset     = this->get_parameter("fsm_lateral_offset").as_double();
+        fsm_cfg_.side_confirm_ticks = this->get_parameter("fsm_side_confirm_ticks").as_int();
+        fsm_cfg_.side_switch_margin = this->get_parameter("fsm_side_switch_margin").as_double();
+        fsm_cfg_.abort_clear_factor = this->get_parameter("fsm_abort_clear_factor").as_double();
+        fsm_cfg_.solo_speed         = this->get_parameter("fsm_solo_speed").as_double();
+        fsm_cfg_.follow_speed       = this->get_parameter("fsm_follow_speed").as_double();
+        fsm_cfg_.overtake_speed     = this->get_parameter("fsm_overtake_speed").as_double();
+        fsm_cfg_.emergency_speed    = this->get_parameter("fsm_emergency_speed").as_double();
 
         mppi_params_.dt            = 0.035;
         mppi_params_.num_obstacles = 0;
@@ -341,6 +500,7 @@ private:
             return;
         }
         auto start = std::chrono::high_resolution_clock::now();
+        update_overtake_fsm();
         solver_->update_params(mppi_params_);
         mppi::Control u = solver_->solve(current_state_);
         float next_v = current_state_.v + u.accel * mppi_params_.dt;
@@ -447,10 +607,12 @@ private:
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr        odom_sub_;      // 시뮬레이터 모드 단일 구독
     rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr mcl_pose_sub_; // use_mcl_pose 모드
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr        velocity_sub_;  // use_mcl_pose 모드
+    rclcpp::Subscription<f1_msgs::msg::F1stateArr>::SharedPtr      f1_obstacles_sub_;
 
     rclcpp::Publisher<ackermann_msgs::msg::AckermannDriveStamped>::SharedPtr drive_pub_;
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr       vis_pub_;
     rclcpp::Publisher<smppi_cuda_controller::msg::MppiTrajectory>::SharedPtr traj_pub_;
+    rclcpp::Publisher<std_msgs::msg::String>::SharedPtr                     fsm_state_pub_;
 
     rclcpp::TimerBase::SharedPtr timer_;
 
@@ -460,6 +622,18 @@ private:
     bool odom_received_ = false;
     bool pose_received_ = false;
     bool velocity_received_ = false;
+
+    // ── 추월(Overtake) FSM ────────────────────────────────────────────
+    std::unique_ptr<mppi::OvertakeFsm> overtake_fsm_;
+    mppi::OvertakeFsm::Config fsm_cfg_;
+    std::string f1_obstacles_topic_;
+    double obstacle_timeout_s_ = 0.5;
+    double opp_min_speed_ = 0.5;
+    double fsm_side_pred_time_ = 0.6;
+    f1_msgs::msg::F1stateArr::SharedPtr latest_obstacles_;
+    rclcpp::Time obstacles_recv_time_;
+    float base_max_speed_ = 10.0f;   // yaml에 설정된 절대 속도 상한 (FSM이 넘지 못함)
+    bool  bypass_active_ = false;
 };
 
 int main(int argc, char **argv) {

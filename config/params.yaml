@@ -70,3 +70,26 @@
     path_topic: /mppi_target_path
     use_mcl_pose: false      # 시뮬레이터 구동 모드
 
+    # --- Overtake FSM: 상대차 인지 ---
+    f1_obstacles_topic: /f1/perception/object/obstacles/arr  # f1_msgs/F1stateArr (perception 노드 발행)
+    obstacle_timeout_s: 0.5   # 이 시간 넘게 갱신 없으면 미검출로 처리 (메시지 stamp가 없어 수신시각 기준)
+    opp_min_speed: 0.5        # 이 속도 이상인 트랙만 "상대차"(추월 대상)로 간주, 그 미만은 정적 장애물 취급
+    fsm_side_pred_time: 0.6   # 여유폭 계산 시 상대 횡위치 예측 시간 [s]
+
+    # --- Overtake FSM: 상태 전이/속도 파라미터 ---
+    fsm_follow_dist: 5.0        # FOLLOW 진입 거리 [m]
+    fsm_prep_dist: 3.5          # OVERTAKE_PREP 진입 거리 [m]
+    fsm_clear_dist: 7.0         # SOLO 복귀 거리 [m]
+    fsm_merge_dist: 2.0         # 추월 완료 판정 거리 [m]
+    fsm_prep_timeout_s: 2.5     # PREP 최대 체류 시간 [s]
+    fsm_emergency_dist: 0.5     # EMERGENCY 트리거 거리 [m]
+    fsm_clear_threshold: 0.8    # 추월 가능 판정 여유폭 [m]
+    fsm_lateral_offset: 0.5     # 바이패스 경로 횡방향 오프셋 [m]
+    fsm_side_confirm_ticks: 3   # 방향 확정 전 연속 확인 틱 수
+    fsm_side_switch_margin: 0.2 # 선호 방향 교체 히스테리시스 [m]
+    fsm_abort_clear_factor: 0.5 # 추월 중단 임계 = clear_threshold * factor
+    fsm_solo_speed: 6.0         # SOLO/MERGE 목표 속도 [m/s]
+    fsm_follow_speed: 4.5       # FOLLOW/PREP 목표 속도 [m/s]
+    fsm_overtake_speed: 6.5     # OVERTAKE 목표 속도 [m/s]
+    fsm_emergency_speed: 0.0    # EMERGENCY 목표 속도 [m/s]
+

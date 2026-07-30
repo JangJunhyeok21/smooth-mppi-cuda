@@ -53,7 +53,6 @@ struct Params {
     float min_accel;
     float max_accel;
     float min_speed;
-    float target_speed;
     float max_speed;
     
     // Cost Weights
@@ -63,6 +62,8 @@ struct Params {
     float q_steer;
     float q_collision;
     float q_lat_g;
+    float lat_g_threshold;       // 횡가속도 소프트 페널티 시작 임계값 [m/s^2]
+    float lat_g_fault_threshold; // 횡가속도 하드 페일(is_fault) 임계값 [m/s^2]
     float q_progress;
     float q_escape_vel;
     float collision_radius;

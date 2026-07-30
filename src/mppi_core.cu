@@ -191,7 +191,19 @@ namespace mppi
             }
         }
 
-        return p.q_dist * dist_error + vel_cost + steer_cost + rate_cost + boundary_cost + obs_cost;
+        // 8. 횡가속도(그립 한계) 안전 비용
+        //    현재 타이어 파라미터의 실제 최대 횡가속도는 약 7.48 m/s²
+        //    (F_zf*D_f + F_zr*D_r)/mass) 이므로, 그 아래인 p.lat_g_threshold부터
+        //    이차함수로 증가하는 비용을 부과해 MPPI가 그립 한계를 넘는 궤적을
+        //    스스로 피하게 한다 (임계값을 넘을수록 페널티가 커져야 하므로
+        //    boundary_cost의 soft_cost와 동일하게 제곱 증가 형태를 사용 —
+        //    감쇠하는 지수함수를 쓰면 한계에 다가갈수록 오히려 비용이 줄어들어
+        //    MPPI가 그립 한계 쪽으로 더 몰리는 역효과가 난다).
+        float ay_abs = fabsf(s.ay);
+        float lat_g_over = ay_abs - p.lat_g_threshold;
+        float lat_g_cost = (lat_g_over > 0.f) ? p.q_lat_g * lat_g_over * lat_g_over : 0.f;
+
+        return p.q_dist * dist_error + vel_cost + steer_cost + rate_cost + boundary_cost + obs_cost + lat_g_cost;
     }
     
     // [수정된 함수] O(N) 바운더리 탐색을 대체하는 O(1) 횡방향 오차 기반 거리 연산
@@ -333,7 +345,7 @@ namespace mppi
             states[idx] = x;
             controls[idx] = u_clamped; 
 
-            if(fabsf(x.ay) > 12.74f){   //1.3g
+            if(fabsf(x.ay) > p.lat_g_fault_threshold){   // 실제 최대 그립(~7.48 m/s²)보다 여유를 둔 하드 페일 임계값
                 is_fault = true;
             }
 

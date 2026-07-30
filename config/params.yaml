@@ -5,8 +5,7 @@
     min_accel: -8.0          # m/s^2
     max_accel: 8.5           # m/s^2
     min_speed: 0.5           # m/s
-    target_speed: 5.5        # m/s
-    max_speed: 2.0           # m/s
+    max_speed: 4.0           # m/s
 
     # --- Costs (최적화 결과 반영) ---
     q_v: 1.0
@@ -14,10 +13,12 @@
     q_du: 0.2
     q_steer: 0.5
     q_collision: 300.0
-    q_lat_g: 200.0
+    q_lat_g: 500.0
+    lat_g_threshold: 5.5        # 횡가속도 소프트 페널티 시작 임계값 [m/s^2]
+    lat_g_fault_threshold: 9.0  # 횡가속도 하드 페일 임계값 [m/s^2]
     collision_radius: 0.3
-    q_progress: 32.0  #36.0
-    q_escape_vel: 28.0  #32.0
+    q_progress: 36.0  #36.0
+    q_escape_vel: 32.0  #32.0
     
     # --- Obstacle Avoidance Params ---
     car_radius: 0.25
@@ -65,7 +66,7 @@
     odom_topic: /odom0
     pose_topic: /mcl_pose
     velocity_topic: /odom
-    drive_topic: /ackermann_cmd0
+    drive_topic: /drive
     path_topic: /mppi_target_path
     use_mcl_pose: false      # 시뮬레이터 구동 모드
 

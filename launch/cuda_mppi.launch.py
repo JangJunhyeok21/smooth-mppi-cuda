@@ -9,7 +9,7 @@ def generate_launch_description():
     map_name = "map1"
     
     #이 변수를 False로 바꾸면 Jetson Nano 최적화 모드(실차)로 진입합니다.
-    is_simulation = False
+    is_simulation = True
 
 
     default_param_file = os.path.join(
@@ -31,7 +31,7 @@ def generate_launch_description():
         controller_overrides = {
             "use_mcl_pose": False,
             "odom_topic": "/odom0",
-            "drive_topic": "/ackermann_cmd0",
+            "drive_topic": "/drive",
             "num_samples": 10000,            # 데스크톱(시뮬)은 10000개
             "publish_debug_info": True,      
             "visualize_candidates": True,    # CPU <-> GPU 메모리 복사 발생
@@ -39,7 +39,8 @@ def generate_launch_description():
     else:
         controller_overrides = {
             "use_mcl_pose": True,
-            "odom_topic": "/ekf_odom",
+            "pose_topic": "/newmcl_pose",
+            "velocity_topic": "/odom",
             "drive_topic": "/drive",
             "num_samples": 10000,             # 🚨 Jetson Nano 최적화 (5000개)
             "publish_debug_info": False,     # 🚨 디버그 토픽 발행 스킵

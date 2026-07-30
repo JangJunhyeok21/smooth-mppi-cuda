@@ -37,27 +37,77 @@ public:
             "/mppi_right_boundary", qos,
             std::bind(&MPPINode::right_bnd_callback, this, std::placeholders::_1));
 
-        // ── EKF odom 단일 구독 ──────────────────────────────────────
-        // /ekf_odom 한 토픽에서 pose(x,y,yaw) + twist(vx,vy,omega) 모두 수신
-        odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
-            odom_topic_, 10,
-            std::bind(&MPPINode::odom_callback, this, std::placeholders::_1));
+        if (use_mcl_pose_) {
+            // ── mcl_pose + odom 분리 구독 (ekf_pose 비의존) ──────────────
+            // pose(x,y,yaw)는 MCL에서, twist(vx,vy,omega)는 휠 오도메트리에서 직접 수신
+            mcl_pose_sub_ = this->create_subscription<geometry_msgs::msg::PoseStamped>(
+                pose_topic_, 10,
+                std::bind(&MPPINode::mcl_pose_callback, this, std::placeholders::_1));
+            velocity_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
+                velocity_topic_, 10,
+                std::bind(&MPPINode::velocity_callback, this, std::placeholders::_1));
+
+            RCLCPP_INFO(this->get_logger(),
+                "MPPI Node Started — pose: %s | velocity: %s",
+                pose_topic_.c_str(), velocity_topic_.c_str());
+        } else {
+            // ── odom0 단일 구독 (시뮬레이터 모드) ────────────────────
+            // /odom0 한 토픽에서 pose(x,y,yaw) + twist(vx,vy,omega) 모두 수신
+            odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
+                odom_topic_, 10,
+                std::bind(&MPPINode::odom_callback, this, std::placeholders::_1));
+
+            RCLCPP_INFO(this->get_logger(),
+                "MPPI Node Started — single odom topic: %s", odom_topic_.c_str());
+        }
 
         timer_ = this->create_wall_timer(
             35ms, std::bind(&MPPINode::timer_callback, this));
-
-        RCLCPP_INFO(this->get_logger(),
-            "MPPI Node Started — single EKF odom topic: %s", odom_topic_.c_str());
     }
 
 private:
+    // ════════════════════════════════════════════════════════════
+    //  mcl_pose_callback — 위치 & 헤딩만 갱신 (use_mcl_pose 모드)
+    // ════════════════════════════════════════════════════════════
+    void mcl_pose_callback(const geometry_msgs::msg::PoseStamped::SharedPtr msg)
+    {
+        const auto &ori = msg->pose.orientation;
+        double yaw = std::atan2(
+            2.0 * (ori.w * ori.z + ori.x * ori.y),
+            1.0 - 2.0 * (ori.y * ori.y + ori.z * ori.z));
+
+        current_state_.x   = static_cast<float>(msg->pose.position.x);
+        current_state_.y   = static_cast<float>(msg->pose.position.y);
+        current_state_.yaw = static_cast<float>(yaw);
+
+        pose_received_ = true;
+    }
+
     // ════════════════════════════════════════════════════════════════
-    //  단일 odom_callback
-    //  /ekf_odom 에서 pose(x,y,yaw) + twist(vx,vy,omega) 동시 처리
+    //  velocity_callback — 속도만 갱신 (use_mcl_pose 모드)
+    //  주의: 이 차량의 휠 오도메트리는 횡슬립을 감지하지 못해
+    //  twist.linear.y가 항상 0이므로 vy/slip_angle은 항상 0이 된다.
+    // ════════════════════════════════════════════════════════════════
+    void velocity_callback(const nav_msgs::msg::Odometry::SharedPtr msg)
+    {
+        current_state_.v     = static_cast<float>(msg->twist.twist.linear.x);
+        current_state_.vy    = static_cast<float>(msg->twist.twist.linear.y);
+        current_state_.omega = static_cast<float>(msg->twist.twist.angular.z);
+
+        current_state_.slip_angle =
+            std::atan2(current_state_.vy, std::fabs(current_state_.v) + 1e-5f);
+        current_state_.ay = current_state_.v * current_state_.omega;
+
+        velocity_received_ = true;
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    //  단일 odom_callback (시뮬레이터 모드 전용, 기존과 동일)
+    //  /odom0 에서 pose(x,y,yaw) + twist(vx,vy,omega) 동시 처리
     // ════════════════════════════════════════════════════════════════
     void odom_callback(const nav_msgs::msg::Odometry::SharedPtr msg)
     {
-        // 위치 & 헤딩 (EKF가 map 프레임으로 보장)
+        // 위치 & 헤딩
         const auto &ori = msg->pose.pose.orientation;
         double yaw = std::atan2(
             2.0 * (ori.w * ori.z + ori.x * ori.y),
@@ -124,12 +174,12 @@ private:
 
         float dx = s.x - ref_path_xs_[idx], dy = s.y - ref_path_ys_[idx];
         float dist_error = dx*dx + dy*dy;
-        float speed_err  = s.v - mppi_params_.target_speed;
-        float overspeed  = (speed_err > 0.f) ? mppi_params_.q_v * speed_err * speed_err : 0.f;
 
         float d_steer = u.steer - u_prev.steer, d_accel = u.accel - u_prev.accel;
         float ay_abs = fabsf(s.ay);
-        float lat_g  = (ay_abs >= 9.5f) ? mppi_params_.q_lat_g * expf(-3.f*(ay_abs-9.5f)) : 0.f;
+        // 실제 플래닝 비용함수(mppi_core.cu compute_cost_cuda)와 동일한 형태(제곱 증가, lat_g_threshold 파라미터 공유)
+        float lat_g_over = ay_abs - mppi_params_.lat_g_threshold;
+        float lat_g = (lat_g_over > 0.f) ? mppi_params_.q_lat_g * lat_g_over * lat_g_over : 0.f;
 
         float min_bnd   = compute_min_boundary_distance(s, idx);
         float safe_dist = mppi_params_.collision_radius + 0.4f;
@@ -144,7 +194,6 @@ private:
         }
 
         msg.dist_cost       = mppi_params_.q_dist * dist_error;
-        msg.vel_cost        = overspeed;
         msg.steer_rate_cost = mppi_params_.q_du * 2.f * d_steer * d_steer;
         msg.accel_rate_cost = mppi_params_.q_du * std::fabs(d_accel);
         msg.steer_cost      = mppi_params_.q_steer * u.steer * u.steer;
@@ -161,7 +210,6 @@ private:
         this->declare_parameter("min_accel",            -9.0);   mppi_params_.min_accel     = this->get_parameter("min_accel").as_double();
         this->declare_parameter("max_accel",            9.0);    mppi_params_.max_accel     = this->get_parameter("max_accel").as_double();
         this->declare_parameter("min_speed",            0.0);    mppi_params_.min_speed     = this->get_parameter("min_speed").as_double();
-        this->declare_parameter("target_speed",         6.0);    mppi_params_.target_speed  = this->get_parameter("target_speed").as_double();
         this->declare_parameter("max_speed",            10.0);   mppi_params_.max_speed     = this->get_parameter("max_speed").as_double();
         this->declare_parameter("q_dist",               1.5);    mppi_params_.q_dist        = this->get_parameter("q_dist").as_double();
         this->declare_parameter("q_v",                  2.0);    mppi_params_.q_v           = this->get_parameter("q_v").as_double();
@@ -169,6 +217,8 @@ private:
         this->declare_parameter("q_steer",              0.3);    mppi_params_.q_steer       = this->get_parameter("q_steer").as_double();
         this->declare_parameter("q_collision",          400.0);  mppi_params_.q_collision   = this->get_parameter("q_collision").as_double();
         this->declare_parameter("q_lat_g",              200.0);  mppi_params_.q_lat_g       = this->get_parameter("q_lat_g").as_double();
+        this->declare_parameter("lat_g_threshold",       5.5);   mppi_params_.lat_g_threshold       = this->get_parameter("lat_g_threshold").as_double();
+        this->declare_parameter("lat_g_fault_threshold", 9.0);   mppi_params_.lat_g_fault_threshold = this->get_parameter("lat_g_fault_threshold").as_double();
         this->declare_parameter("q_progress",           13.0);   mppi_params_.q_progress    = this->get_parameter("q_progress").as_double();
         this->declare_parameter("q_escape_vel",         6.5);    mppi_params_.q_escape_vel  = this->get_parameter("q_escape_vel").as_double();
         this->declare_parameter("collision_radius",     0.19);   mppi_params_.collision_radius = this->get_parameter("collision_radius").as_double();
@@ -210,13 +260,20 @@ private:
                         mppi_params_.mass, mppi_params_.l_f, mppi_params_.l_r);
         }
 
-        // 기본값을 /ekf_odom 으로 변경 — EKF가 pose+twist를 하나로 발행
-        this->declare_parameter("odom_topic",   "/ekf_odom");
+        this->declare_parameter("odom_topic",   "/odom0");
         odom_topic_  = this->get_parameter("odom_topic").as_string();
         this->declare_parameter("drive_topic",  "/ackermann_cmd0");
         drive_topic_ = this->get_parameter("drive_topic").as_string();
         this->declare_parameter("path_topic",   "/mppi_target_path");
         path_topic_  = this->get_parameter("path_topic").as_string();
+
+        // ekf_pose 비의존 모드: mcl_pose + odom을 직접 구독해 state를 구성
+        this->declare_parameter("use_mcl_pose",   true);
+        use_mcl_pose_   = this->get_parameter("use_mcl_pose").as_bool();
+        this->declare_parameter("pose_topic",     "/mcl_pose");
+        pose_topic_     = this->get_parameter("pose_topic").as_string();
+        this->declare_parameter("velocity_topic", "/odom");
+        velocity_topic_ = this->get_parameter("velocity_topic").as_string();
 
         mppi_params_.dt            = 0.035;
         mppi_params_.num_obstacles = 0;
@@ -271,9 +328,16 @@ private:
     }
 
     void timer_callback() {
-        if (!odom_received_) {
+        if (use_mcl_pose_) {
+            if (!pose_received_ || !velocity_received_) {
+                RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                    "Waiting for pose (%s) / velocity (%s)...",
+                    pose_topic_.c_str(), velocity_topic_.c_str());
+                return;
+            }
+        } else if (!odom_received_) {
             RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
-                "Waiting for EKF odom (%s)...", odom_topic_.c_str());
+                "Waiting for odom (%s)...", odom_topic_.c_str());
             return;
         }
         auto start = std::chrono::high_resolution_clock::now();
@@ -380,7 +444,9 @@ private:
     rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr     path_sub_;
     rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr     left_bnd_sub_;
     rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr     right_bnd_sub_;
-    rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;  // 단일 구독
+    rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr        odom_sub_;      // 시뮬레이터 모드 단일 구독
+    rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr mcl_pose_sub_; // use_mcl_pose 모드
+    rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr        velocity_sub_;  // use_mcl_pose 모드
 
     rclcpp::Publisher<ackermann_msgs::msg::AckermannDriveStamped>::SharedPtr drive_pub_;
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr       vis_pub_;
@@ -389,7 +455,11 @@ private:
     rclcpp::TimerBase::SharedPtr timer_;
 
     std::string odom_topic_, drive_topic_, path_topic_;
+    std::string pose_topic_, velocity_topic_;
+    bool use_mcl_pose_ = true;
     bool odom_received_ = false;
+    bool pose_received_ = false;
+    bool velocity_received_ = false;
 };
 
 int main(int argc, char **argv) {

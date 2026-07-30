@@ -66,6 +66,7 @@ target_include_directories(smppi_lib PUBLIC
 # 실행 파일 생성
 add_executable(smppi_node
   src/smppi_node.cpp
+  src/overtake_fsm.cpp
 )
 
 add_executable(mppi_step_parity model_tuning/real_car_v2/mppi_step_parity.cu)

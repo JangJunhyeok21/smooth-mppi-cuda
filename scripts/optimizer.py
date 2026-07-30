@@ -3,7 +3,7 @@ from rclpy.node import Node
 from nav_msgs.msg import Odometry
 from geometry_msgs.msg import PoseWithCovarianceStamped
 from ackermann_msgs.msg import AckermannDriveStamped
-from std_msgs.msg import Bool  
+from std_msgs.msg import Bool
 import subprocess
 import time
 import csv
@@ -13,10 +13,16 @@ import os
 import signal
 from ament_index_python.packages import get_package_share_directory
 
+CSV_FIELDNAMES = [
+    'q_v', 'q_dist', 'q_du', 'q_steer', 'q_lat_g', 'q_collision', 'q_progress', 'q_escape_vel',
+    'lat_g_soft_limit', 'longitudinal_accel_soft_limit',
+    'status', 'lap_time', 'max_distance',
+]
+
 class MPPIOptimizer(Node):
     def __init__(self):
         super().__init__('mppi_optimizer')
-        
+
         # 1. 테스트할 파라미터 범위 설정 (Grid Search)
         self.q_v_list = [1.3, 1.5, 1.7]
         self.q_dist_list = [0.0]
@@ -26,35 +32,47 @@ class MPPIOptimizer(Node):
         self.q_collision_list = [200.0, 150.0]
         self.q_progress_list = [10.0, 13.0, 16.0]
         self.q_escape_vel_list = [5.0, 6.5, 8.0]
-        
+        # 그립 한계(friction-ellipse) 소프트 코스트의 횡/종 방향 임계값도 탐색 대상에 포함
+        # (params.yaml 기본값: lat_g_soft_limit=7.5, longitudinal_accel_soft_limit=4.0 근방)
+        self.lat_g_soft_limit_list = [7.0, 7.5, 8.0]
+        self.longitudinal_accel_soft_limit_list = [3.5, 4.0, 4.5]
+
         self.param_combinations = list(itertools.product(
-            self.q_v_list, self.q_dist_list, self.q_du_list, 
-            self.q_steer_list, self.q_lat_g_list, self.q_collision_list, self.q_progress_list, self.q_escape_vel_list
+            self.q_v_list, self.q_dist_list, self.q_du_list,
+            self.q_steer_list, self.q_lat_g_list, self.q_collision_list, self.q_progress_list, self.q_escape_vel_list,
+            self.lat_g_soft_limit_list, self.longitudinal_accel_soft_limit_list,
         ))
         self.get_logger().info(f"Total Combinations to run: {len(self.param_combinations)}")
-        
+
+        # 완주 기준: 10바퀴 이상 코스이탈/충돌 없이 주행
+        self.required_laps = 10
+        # 10바퀴 기준 타임아웃 (기존 3바퀴=60s에서 새 타이어 모델 기준으로 넉넉히 연장)
+        self.run_timeout_sec = 300.0
+
         # 원본 yaml 경로 캐싱
         self.base_yaml_path = os.path.join(
             get_package_share_directory("smppi_cuda_controller"),
             "config",
             "params.yaml"
         )
-        
+
         self.odom_sub = self.create_subscription(Odometry, '/ego_racecar/odom', self.odom_callback, 10)
         self.collision_sub = self.create_subscription(Bool, '/collision0', self.collision_callback, 10)
-        
+
         self.init_pose_pub = self.create_publisher(PoseWithCovarianceStamped, '/initialpose', 10)
+        # 실제 시뮬레이터가 구독하는 토픽(/drive)으로 정지 명령을 보내야 한다.
+        # (기존에는 /ackermann_cmd0로 보내고 있어 시뮬레이터에 명령이 전달되지 않는 버그가 있었음)
         self.drive_pub = self.create_publisher(AckermannDriveStamped, '/drive', 10)
-        
+
         self.results = []
         self.current_run = 0
-        
+
         self.car_x = 0.0
         self.car_y = 0.0
         self.car_v = 0.0
         self.start_time = 0.0
         self.is_running = False
-        self.has_crashed = False  
+        self.has_crashed = False
         self.max_distance = 0.0
         self.mppi_process = None
         self.mppi_log_file = None
@@ -73,7 +91,31 @@ class MPPIOptimizer(Node):
         self.reset_pending = False
         self.reset_deadline = 0.0
 
+        # --- 결과 CSV: 매 실행마다 즉시 append(체크포인트) + 재시작 지원 ---
+        os.makedirs("result", exist_ok=True)
+        self.csv_path = "result/mppi_optimization_results.csv"
+        self.current_run = self._resume_from_existing_csv()
+
         self.timer = self.create_timer(1.0, self.optimization_loop)
+
+    def _resume_from_existing_csv(self) -> int:
+        """기존 결과 CSV가 있으면 이미 완료된 조합 수를 세어 그 지점부터 이어서 시작한다."""
+        if not os.path.exists(self.csv_path):
+            with open(self.csv_path, 'w', newline='') as f:
+                writer = csv.DictWriter(f, fieldnames=CSV_FIELDNAMES)
+                writer.writeheader()
+            return 0
+
+        with open(self.csv_path, 'r', newline='') as f:
+            completed = sum(1 for _ in csv.DictReader(f))
+
+        self.get_logger().info(f"Resuming: {completed} runs already completed, continuing from run {completed + 1}")
+        return completed
+
+    def _append_result(self, row: dict):
+        with open(self.csv_path, 'a', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=CSV_FIELDNAMES)
+            writer.writerow(row)
 
     def odom_callback(self, msg):
         self.car_x = msg.pose.pose.position.x
@@ -106,7 +148,7 @@ class MPPIOptimizer(Node):
         init_pose.pose.pose.orientation.z = math.sin(self.start_yaw * 0.5)
         init_pose.pose.pose.orientation.w = math.cos(self.start_yaw * 0.5)
         self.init_pose_pub.publish(init_pose)
-        
+
         self.has_crashed = False
         # ignore collision messages briefly while simulator settles
         self.crash_ignore_deadline = time.time() + 1.0
@@ -114,13 +156,14 @@ class MPPIOptimizer(Node):
         self.reset_pending = True
         self.reset_deadline = time.time() + 1.0
 
-    def start_mppi_node(self, q_v, q_dist, q_du, q_steer, q_lat_g, q_collision, q_progress, q_escape_vel):
+    def start_mppi_node(self, q_v, q_dist, q_du, q_steer, q_lat_g, q_collision, q_progress, q_escape_vel,
+                         lat_g_soft_limit, longitudinal_accel_soft_limit):
         """🚨 ros2 run으로 제어기만 단독 실행. 베이스 yaml 위에 최적화 변수만 덮어씌움"""
         cmd = [
             "ros2", "run", "smppi_cuda_controller", "smppi_node",
             "--ros-args",
             "--params-file", self.base_yaml_path,  # 기본 차량 세팅(D_f, mass 등)은 여기서 로드
-            "-p", f"q_v:={q_v}",                   # 아래 8개 변수만 실시간 덮어쓰기
+            "-p", f"q_v:={q_v}",                   # 아래 변수들만 실시간 덮어쓰기
             "-p", f"q_dist:={q_dist}",
             "-p", f"q_du:={q_du}",
             "-p", f"q_steer:={q_steer}",
@@ -128,15 +171,20 @@ class MPPIOptimizer(Node):
             "-p", f"q_collision:={q_collision}",
             "-p", f"q_progress:={q_progress}",
             "-p", f"q_escape_vel:={q_escape_vel}",
+            "-p", f"lat_g_soft_limit:={lat_g_soft_limit}",
+            "-p", f"longitudinal_accel_soft_limit:={longitudinal_accel_soft_limit}",
             "-p", "use_mcl_pose:=False"            # 시뮬레이터 모드 강제
         ]
-        
-        self.get_logger().info(f"Run {self.current_run + 1}: q_v={q_v}, lat_g={q_lat_g}, col={q_collision}, progress={q_progress}, escape_vel={q_escape_vel}")
-        
+
+        self.get_logger().info(
+            f"Run {self.current_run + 1}/{len(self.param_combinations)}: q_v={q_v}, lat_g={q_lat_g}, "
+            f"col={q_collision}, progress={q_progress}, escape_vel={q_escape_vel}, "
+            f"lat_g_soft={lat_g_soft_limit}, long_accel_soft={longitudinal_accel_soft_limit}")
+
         os.makedirs("result", exist_ok=True)
         log_path = f"result/mppi_node_run_{self.current_run + 1}.log"
         self.mppi_log_file = open(log_path, "w")
-        
+
         self.mppi_process = subprocess.Popen(
             cmd,
             stdout=self.mppi_log_file,
@@ -173,7 +221,7 @@ class MPPIOptimizer(Node):
                 except ProcessLookupError:
                     pass
             self.mppi_process = None
-            
+
         if self.mppi_log_file:
             self.mppi_log_file.close()
             self.mppi_log_file = None
@@ -181,7 +229,6 @@ class MPPIOptimizer(Node):
 
     def optimization_loop(self):
         if self.current_run >= len(self.param_combinations):
-            self.save_results()
             self.get_logger().info("Optimization Finished!")
             rclpy.shutdown()
             return
@@ -193,8 +240,8 @@ class MPPIOptimizer(Node):
             if time.time() < self.reset_deadline:
                 return
             self.reset_pending = False
-            q_v, q_dist, q_du, q_steer, q_lat_g, q_col, q_progress, q_escape_vel = self.param_combinations[self.current_run]
-            self.start_mppi_node(q_v, q_dist, q_du, q_steer, q_lat_g, q_col, q_progress, q_escape_vel)
+            params = self.param_combinations[self.current_run]
+            self.start_mppi_node(*params)
 
         else:
             elapsed_time = time.time() - self.start_time
@@ -207,63 +254,45 @@ class MPPIOptimizer(Node):
                 self.awaiting_departure = False
 
             is_lap_condition = (elapsed_time > 10.0) and (distance_from_start < 2.0) and (self.max_distance > self.min_lap_distance)
-            is_timeout = elapsed_time > 60.0
+            is_timeout = elapsed_time > self.run_timeout_sec
 
             if is_crashed:
                 # immediate stop on crash
                 self.stop_mppi_node()
-                q_v, q_dist, q_du, q_steer, q_lat_g, q_col, q_progress, q_escape_vel = self.param_combinations[self.current_run]
-                self.results.append({
-                    'q_v': q_v, 'q_dist': q_dist, 'q_du': q_du, 'q_steer': q_steer,
-                    'q_lat_g': q_lat_g, 'q_collision': q_col, 'q_progress': q_progress, 'q_escape_vel': q_escape_vel,
-                    'status': 'Crashed', 'lap_time': 999.0,
-                    'max_distance': self.max_distance
-                })
-                self.get_logger().warn(f"Ended: Crashed, Time: {elapsed_time:.2f}s, Dist: {self.max_distance:.2f}m")
-                self.current_run += 1
+                self._finish_run('Crashed', 999.0)
 
             elif is_lap_condition and not self.awaiting_departure:
                 # completed one lap
                 self.lap_count += 1
                 self.awaiting_departure = True
                 self.max_distance = 0.0
-                self.get_logger().info(f"Lap {self.lap_count} completed for run {self.current_run + 1}")
+                self.get_logger().info(f"Lap {self.lap_count}/{self.required_laps} completed for run {self.current_run + 1}")
 
                 # if reached required laps, finish run
-                if self.lap_count >= 3:
+                if self.lap_count >= self.required_laps:
                     self.stop_mppi_node()
-                    q_v, q_dist, q_du, q_steer, q_lat_g, q_col, q_progress, q_escape_vel = self.param_combinations[self.current_run]
-                    self.results.append({
-                        'q_v': q_v, 'q_dist': q_dist, 'q_du': q_du, 'q_steer': q_steer,
-                        'q_lat_g': q_lat_g, 'q_collision': q_col, 'q_progress': q_progress, 'q_escape_vel': q_escape_vel,
-                        'status': 'Finished', 'lap_time': elapsed_time,
-                        'max_distance': self.max_distance
-                    })
-                    self.get_logger().info(f"Ended: Finished (3 laps), Time: {elapsed_time:.2f}s")
-                    self.current_run += 1
+                    self._finish_run('Finished', elapsed_time)
 
             elif is_timeout:
                 # timeout for the run
                 self.stop_mppi_node()
-                q_v, q_dist, q_du, q_steer, q_lat_g, q_col, q_progress, q_escape_vel = self.param_combinations[self.current_run]
-                self.results.append({
-                    'q_v': q_v, 'q_dist': q_dist, 'q_du': q_du, 'q_steer': q_steer,
-                    'q_lat_g': q_lat_g, 'q_collision': q_col, 'q_progress': q_progress, 'q_escape_vel': q_escape_vel,
-                    'status': 'Timeout', 'lap_time': 999.0,
-                    'max_distance': self.max_distance
-                })
-                self.get_logger().info(f"Ended: Timeout, Time: {elapsed_time:.2f}s, Dist: {self.max_distance:.2f}m")
-                self.current_run += 1
+                self._finish_run('Timeout', 999.0)
 
-    def save_results(self):
-        with open('result/mppi_optimization_results.csv', 'w', newline='') as f:
-            writer = csv.DictWriter(
-                f,
-                fieldnames=['q_v', 'q_dist', 'q_du', 'q_steer', 'q_lat_g', 'q_collision', 'q_progress', 'q_escape_vel', 'status', 'lap_time', 'max_distance']
-            )
-            writer.writeheader()
-            writer.writerows(self.results)
-        self.get_logger().info("Results saved to result/mppi_optimization_results.csv")
+    def _finish_run(self, status: str, lap_time: float):
+        q_v, q_dist, q_du, q_steer, q_lat_g, q_col, q_progress, q_escape_vel, \
+            lat_g_soft_limit, longitudinal_accel_soft_limit = \
+            self.param_combinations[self.current_run]
+        row = {
+            'q_v': q_v, 'q_dist': q_dist, 'q_du': q_du, 'q_steer': q_steer,
+            'q_lat_g': q_lat_g, 'q_collision': q_col, 'q_progress': q_progress, 'q_escape_vel': q_escape_vel,
+            'lat_g_soft_limit': lat_g_soft_limit,
+            'longitudinal_accel_soft_limit': longitudinal_accel_soft_limit,
+            'status': status, 'lap_time': lap_time, 'max_distance': self.max_distance,
+        }
+        self._append_result(row)
+        self.get_logger().info(f"Ended: {status}, laps={self.lap_count}, Time: {lap_time:.2f}s, Dist: {self.max_distance:.2f}m")
+        self.current_run += 1
+
 
 def main(args=None):
     rclpy.init(args=args)

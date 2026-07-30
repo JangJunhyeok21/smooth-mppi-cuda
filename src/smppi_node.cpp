@@ -227,9 +227,10 @@ private:
         aligned_imu_valid_=true;
         while(imu_buffer_.size()>1 && imu_buffer_[1].stamp<=pose_stamp) imu_buffer_.pop_front();
     }
+
     // ════════════════════════════════════════════════════════════════
-    //  단일 odom_callback
-    //  /ekf_odom 에서 pose(x,y,yaw) + twist(vx,vy,omega) 동시 처리
+    //  단일 odom_callback (시뮬레이터 모드 전용)
+    //  odom 토픽에서 pose(x,y,yaw) + twist(vx,vy,omega) 동시 처리
     // ════════════════════════════════════════════════════════════════
     void odom_callback(const nav_msgs::msg::Odometry::SharedPtr msg)
     {
@@ -358,7 +359,9 @@ private:
 
         float d_steer = u.steer - u_prev.steer, d_accel = u.accel - u_prev.accel;
         float ay_abs = fabsf(s.ay);
-        float lat_g  = (ay_abs >= 9.5f) ? mppi_params_.q_lat_g * expf(-3.f*(ay_abs-9.5f)) : 0.f;
+        // 실제 플래닝 비용함수(mppi_core.cu compute_cost_cuda)와 동일한 형태(제곱 증가, lat_g_soft_limit 파라미터 공유)
+        float lat_g_over = ay_abs - mppi_params_.lat_g_soft_limit;
+        float lat_g = (lat_g_over > 0.f) ? mppi_params_.q_lat_g * lat_g_over * lat_g_over : 0.f;
 
         float min_bnd   = compute_min_boundary_distance(s, idx);
         float safe_dist = mppi_params_.collision_radius + mppi_params_.boundary_soft_margin;
@@ -373,7 +376,6 @@ private:
         }
 
         msg.dist_cost       = mppi_params_.q_dist * dist_error;
-        msg.vel_cost        = overspeed;
         msg.steer_rate_cost = mppi_params_.q_du * 2.f * d_steer * d_steer;
         msg.accel_rate_cost = mppi_params_.q_du * std::fabs(d_accel);
         msg.steer_cost      = mppi_params_.q_steer * u.steer * u.steer;

@@ -7,7 +7,7 @@ import os
 
 def generate_launch_description():
     map_name = "map1"
-    
+
     default_param_file = os.path.join(
         get_package_share_directory("smppi_cuda_controller"),
         "config",
@@ -46,7 +46,7 @@ def generate_launch_description():
         "e2e_weights_path": os.path.join(
             config_dir, "E2E.bin"),
     }
-    
+
     return LaunchDescription(
         [
             DeclareLaunchArgument(

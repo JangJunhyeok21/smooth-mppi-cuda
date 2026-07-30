@@ -826,7 +826,7 @@ namespace mppi
         end_lag = fminf(fmaxf(end_lag, -0.15f), 0.15f);
         return fmaxf(0.0f, distance + end_lag - start_lag);
     }
-    
+
     // [수정된 함수] O(N) 바운더리 탐색을 대체하는 O(1) 횡방향 오차 기반 거리 연산
     __device__ float compute_min_boundary_distance(
         const State &s,
@@ -1007,7 +1007,7 @@ namespace mppi
             else x=update_dynamics(x,u_clamped,p);
             apply_rollout_low_speed_vy_prior(x, p);
             states[idx] = x;
-            controls[idx] = u_clamped; 
+            controls[idx] = u_clamped;
 
             float min_dist = compute_min_boundary_distance(
                 x, ref_xs, ref_ys, ref_yaws, left_bnd_xs, left_bnd_ys, right_bnd_xs, right_bnd_ys, path_len, local_path_idx, &local_path_idx);

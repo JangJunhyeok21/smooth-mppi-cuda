@@ -3,6 +3,7 @@
 #include "nav_msgs/msg/odometry.hpp"
 #include "nav_msgs/msg/path.hpp"
 #include "sensor_msgs/msg/laser_scan.hpp"
+#include "sensor_msgs/msg/imu.hpp"
 #include "visualization_msgs/msg/marker_array.hpp"
 #include "geometry_msgs/msg/point.hpp"
 #include "geometry_msgs/msg/pose_stamped.hpp"
@@ -10,6 +11,7 @@
 #include "f1_msgs/msg/f1state_arr.hpp"
 #include "cuda_mppi_controller/cuda_mppi_core.hpp"
 #include "cuda_mppi_controller/overtake_fsm.hpp"
+#include "cuda_mppi_controller/state_estimator.hpp"
 #include "smppi_cuda_controller/msg/mppi_trajectory.hpp"
 #include <algorithm>
 #include <cmath>
@@ -55,10 +57,16 @@ public:
             velocity_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
                 velocity_topic_, 10,
                 std::bind(&MPPINode::velocity_callback, this, std::placeholders::_1));
+            imu_sub_ = this->create_subscription<sensor_msgs::msg::Imu>(
+                imu_topic_, 50,
+                std::bind(&MPPINode::imu_callback, this, std::placeholders::_1));
+
+            state_estimator_.set_alpha(complementary_filter_alpha_);
+            state_estimator_.set_lowpass_cutoff_hz(vy_lowpass_cutoff_hz_);
 
             RCLCPP_INFO(this->get_logger(),
-                "MPPI Node Started — pose: %s | velocity: %s",
-                pose_topic_.c_str(), velocity_topic_.c_str());
+                "MPPI Node Started — pose: %s | velocity: %s | imu: %s",
+                pose_topic_.c_str(), velocity_topic_.c_str(), imu_topic_.c_str());
         } else {
             // ── odom0 단일 구독 (시뮬레이터 모드) ────────────────────
             // /odom0 한 토픽에서 pose(x,y,yaw) + twist(vx,vy,omega) 모두 수신
@@ -89,23 +97,37 @@ private:
         current_state_.y   = static_cast<float>(msg->pose.position.y);
         current_state_.yaw = static_cast<float>(yaw);
 
+        // 상보필터 저주파 성분(위치 미분)용 스냅샷 — 연산은 timer_callback
+        // 시작 시점의 state_estimator_.step()에서 한 번만 수행한다.
+        state_estimator_.on_position(current_state_.x, current_state_.y, current_state_.yaw);
+
         pose_received_ = true;
     }
 
+    // ════════════════════════════════════════════════════════════════════
+    //  imu_callback — 상보필터 고주파 성분(선가속도 ay, 각속도 omega)용
+    //  스냅샷 저장. 연산 없음 (레이스 컨디션 방지, timer_callback 참고).
+    // ════════════════════════════════════════════════════════════════════
+    void imu_callback(const sensor_msgs::msg::Imu::SharedPtr msg)
+    {
+        state_estimator_.on_imu(
+            static_cast<float>(msg->linear_acceleration.y),
+            static_cast<float>(msg->angular_velocity.z));
+        imu_received_ = true;
+    }
+
     // ════════════════════════════════════════════════════════════════
-    //  velocity_callback — 속도만 갱신 (use_mcl_pose 모드)
+    //  velocity_callback — 종방향 속도(v) 및 휠 오도메트리 omega 갱신
+    //  (use_mcl_pose 모드). vy/slip_angle/omega의 최종값은 IMU 고주파
+    //  성분과 결합한 상보필터(state_estimator_)가 timer_callback에서 산출한다.
     //  주의: 이 차량의 휠 오도메트리는 횡슬립을 감지하지 못해
-    //  twist.linear.y가 항상 0이므로 vy/slip_angle은 항상 0이 된다.
+    //  twist.linear.y가 항상 0이므로, IMU 없이는 vy/slip_angle이 항상 0이 된다.
     // ════════════════════════════════════════════════════════════════
     void velocity_callback(const nav_msgs::msg::Odometry::SharedPtr msg)
     {
-        current_state_.v     = static_cast<float>(msg->twist.twist.linear.x);
-        current_state_.vy    = static_cast<float>(msg->twist.twist.linear.y);
-        current_state_.omega = static_cast<float>(msg->twist.twist.angular.z);
-
-        current_state_.slip_angle =
-            std::atan2(current_state_.vy, std::fabs(current_state_.v) + 1e-5f);
-        current_state_.ay = current_state_.v * current_state_.omega;
+        current_state_.v = static_cast<float>(msg->twist.twist.linear.x);
+        // IMU가 아직 수신되지 않았을 때의 폴백(fallback) omega.
+        wheel_omega_fallback_ = static_cast<float>(msg->twist.twist.angular.z);
 
         velocity_received_ = true;
     }
@@ -391,6 +413,15 @@ private:
         pose_topic_     = this->get_parameter("pose_topic").as_string();
         this->declare_parameter("velocity_topic", "/odom");
         velocity_topic_ = this->get_parameter("velocity_topic").as_string();
+        this->declare_parameter("imu_topic", "/imu/data");
+        imu_topic_ = this->get_parameter("imu_topic").as_string();
+
+        // ── 상보필터(complementary filter): vy/slip_angle 추정 ──────────
+        // IMU 고주파(선가속도 적분) + 위치미분 저주파(mcl_pose/odom)를 결합.
+        this->declare_parameter("complementary_filter_alpha", 0.95);
+        complementary_filter_alpha_ = this->get_parameter("complementary_filter_alpha").as_double();
+        this->declare_parameter("vy_lowpass_cutoff_hz", 2.0);
+        vy_lowpass_cutoff_hz_ = this->get_parameter("vy_lowpass_cutoff_hz").as_double();
 
         // ── 추월(Overtake) FSM: 상대차 인지 및 상태별 파라미터 ──────────
         this->declare_parameter("f1_obstacles_topic", "/f1/perception/object/obstacles/arr");
@@ -500,6 +531,19 @@ private:
             return;
         }
         auto start = std::chrono::high_resolution_clock::now();
+
+        // ── 상보필터: 타이머 주기 시작 시점에 최신 콜백 스냅샷을 한 번만
+        //    융합한다. mcl_pose/imu/velocity 콜백은 서로 다른 주기로 들어오므로,
+        //    콜백 도중에 fusion을 하면 갱신 순서에 따라 결과가 달라지는
+        //    레이스 컨디션이 생긴다 — 항상 timer_callback 시작 시점 스냅샷만 사용. ──
+        if (use_mcl_pose_) {
+            auto est = state_estimator_.step(mppi_params_.dt, current_state_.v);
+            current_state_.vy         = est.vy;
+            current_state_.slip_angle = est.slip_angle;
+            current_state_.omega      = state_estimator_.imu_active() ? est.omega : wheel_omega_fallback_;
+            current_state_.ay         = current_state_.v * current_state_.omega;
+        }
+
         update_overtake_fsm();
         solver_->update_params(mppi_params_);
         mppi::Control u = solver_->solve(current_state_);
@@ -607,6 +651,7 @@ private:
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr        odom_sub_;      // 시뮬레이터 모드 단일 구독
     rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr mcl_pose_sub_; // use_mcl_pose 모드
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr        velocity_sub_;  // use_mcl_pose 모드
+    rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr          imu_sub_;       // use_mcl_pose 모드
     rclcpp::Subscription<f1_msgs::msg::F1stateArr>::SharedPtr      f1_obstacles_sub_;
 
     rclcpp::Publisher<ackermann_msgs::msg::AckermannDriveStamped>::SharedPtr drive_pub_;
@@ -617,11 +662,18 @@ private:
     rclcpp::TimerBase::SharedPtr timer_;
 
     std::string odom_topic_, drive_topic_, path_topic_;
-    std::string pose_topic_, velocity_topic_;
+    std::string pose_topic_, velocity_topic_, imu_topic_;
     bool use_mcl_pose_ = true;
     bool odom_received_ = false;
     bool pose_received_ = false;
     bool velocity_received_ = false;
+    bool imu_received_ = false;
+
+    // ── 상보필터 (vy/slip_angle/omega 추정, ekf_pose 대체) ─────────────
+    mppi::ComplementaryStateEstimator state_estimator_;
+    double complementary_filter_alpha_ = 0.95;
+    double vy_lowpass_cutoff_hz_ = 2.0;
+    float  wheel_omega_fallback_ = 0.0f;  // IMU 미수신 시 폴백 (휠 오도메트리)
 
     // ── 추월(Overtake) FSM ────────────────────────────────────────────
     std::unique_ptr<mppi::OvertakeFsm> overtake_fsm_;

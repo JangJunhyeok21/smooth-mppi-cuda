@@ -38,78 +38,108 @@ namespace mppi
         return angle;
     }
 
+    // 저속(kinematic) ↔ 고속(Pacejka dynamic) 모델을 연속적으로 섞는 가중치.
+    // v가 center보다 한참 작으면 0(순수 kinematic), 한참 크면 1(순수 dynamic)에
+    // 수렴하고 그 사이(±width 근방)에서 매끄럽게 전이한다. 기존의
+    // `if (fabsf(vel) < 0.5f)` 하드 분기가 만들던 궤적 불연속(저속 코너
+    // 진입/탈출 시 후보 궤적이 튀는 현상)을 없앤다.
+    __host__ __device__ float blend_sigma(float v, float center, float width)
+    {
+        return 0.5f * (1.0f + tanhf((v - center) / width));
+    }
+
     __host__ __device__ State update_dynamics(const State &s, const Control &u, const Params &p)
     {
         float px = s.x; float py = s.y; float yaw = s.yaw;
         float vel = s.v; float omega = s.omega; float slip_angle = s.slip_angle;
-        
-        // 1. 저속 구간: 순수 운동학 모델 (Kinematic Model)
-        // 분모에 vel이 들어가는 동역학의 특이점(Division by zero)을 방지
-        if (fabsf(vel) < 0.5f) {
-            State next_s;
-            float wheelbase = p.l_f + p.l_r;
+        float wheelbase = p.l_f + p.l_r;
 
-            // 기존 MPC Kinematic 수식 적용
+        // ── 1. 운동학 모델 (Kinematic Model) ──────────────────────────
+        State next_kin;
+        {
             float dot_x = vel * fast_cos(yaw);
             float dot_y = vel * fast_sin(yaw);
             float dot_yaw = vel * tanf(u.steer) / wheelbase;
             float dot_vel = u.accel;
-            
-            next_s.x = px + dot_x * p.dt;
-            next_s.y = py + dot_y * p.dt;
-            next_s.yaw = angle_normalize(yaw + dot_yaw * p.dt);
-            next_s.v = vel + dot_vel * p.dt;
-            
-            // 기존 MPC 기준 미사용 변수 초기화 (omega는 제어 연속성을 위해 dot_yaw 인가)
-            next_s.omega = dot_yaw; 
-            next_s.slip_angle = 0.0f;
-            
-            // MPPI 비용 함수용 보조 변수
-            next_s.vy = 0.0f; 
-            next_s.ay = 0.0f;
 
-            return next_s;
+            next_kin.x = px + dot_x * p.dt;
+            next_kin.y = py + dot_y * p.dt;
+            next_kin.yaw = angle_normalize(yaw + dot_yaw * p.dt);
+            next_kin.v = vel + dot_vel * p.dt;
+
+            // 기존 MPC 기준 미사용 변수 초기화 (omega는 제어 연속성을 위해 dot_yaw 인가)
+            next_kin.omega = dot_yaw;
+            next_kin.slip_angle = 0.0f;
+            next_kin.vy = 0.0f;
+            next_kin.ay = 0.0f;
         }
 
-        // 2. 고속 구간: 파세이카 동역학 모델 (Pacejka Dynamic Model)
-        
-        // 슬립각(beta)으로부터 차량 좌표계 vx, vy 역산 (타이어 슬립각 alpha 연산용)
-        float vx = vel * fast_cos(slip_angle);
-        float vy = vel * fast_sin(slip_angle);
+        // ── 2. 파세이카 동역학 모델 (Pacejka Dynamic Model) ────────────
+        //    이제 저속에서도 항상 계산되므로(가중치만 낮음), 기존에 하드
+        //    분기가 암묵적으로 막아주던 division-by-zero(질량*속도)를
+        //    여기서 별도로 가드한다.
+        State next_dyn;
+        {
+            // 슬립각(beta)으로부터 차량 좌표계 vx, vy 역산 (타이어 슬립각 alpha 연산용)
+            float vx = vel * fast_cos(slip_angle);
+            float vy = vel * fast_sin(slip_angle);
 
-        // 전/후륜 타이어 슬립각 계산
-        float alpha_f = u.steer - atan2f(vy + p.l_f * omega, vx);
-        float alpha_r = -atan2f(vy - p.l_r * omega, vx);
+            // 전/후륜 타이어 슬립각 계산
+            float alpha_f = u.steer - atan2f(vy + p.l_f * omega, vx);
+            float alpha_r = -atan2f(vy - p.l_r * omega, vx);
 
-        // 타이어 횡력 연산 — ForzaETH On-Track-SysID 와 동일한 4-파라미터 매직 포뮬러.
-        //   F_y = F_z * D * sin( C * atan( B*a - E*(B*a - atan(B*a)) ) )
-        // D 는 무차원(마찰계수), 힘의 크기는 정하중 F_z 가 만든다.
-        // E=0 이면 안쪽 괄호가 B*a 로 환원되어 이전 3-파라미터 수식과 완전히 동일해진다.
-        float bf_a = p.B_f * alpha_f;
-        float br_a = p.B_r * alpha_r;
-        float F_fy = p.F_zf * p.D_f * fast_sin(p.C_f * atanf(bf_a - p.E_f * (bf_a - atanf(bf_a))));
-        float F_ry = p.F_zr * p.D_r * fast_sin(p.C_r * atanf(br_a - p.E_r * (br_a - atanf(br_a))));
+            // 타이어 횡력 연산 — ForzaETH On-Track-SysID 와 동일한 4-파라미터 매직 포뮬러.
+            //   F_y = F_z * D * sin( C * atan( B*a - E*(B*a - atan(B*a)) ) )
+            // D 는 무차원(마찰계수), 힘의 크기는 정하중 F_z 가 만든다.
+            // E=0 이면 안쪽 괄호가 B*a 로 환원되어 이전 3-파라미터 수식과 완전히 동일해진다.
+            float bf_a = p.B_f * alpha_f;
+            float br_a = p.B_r * alpha_r;
+            float F_fy = p.F_zf * p.D_f * fast_sin(p.C_f * atanf(bf_a - p.E_f * (bf_a - atanf(bf_a))));
+            float F_ry = p.F_zr * p.D_r * fast_sin(p.C_r * atanf(br_a - p.E_r * (br_a - atanf(br_a))));
 
-        // 기존 MPC 동역학 수식 완벽 적용 (단위 및 로직 동일)
-        float dot_x = vel * fast_cos(yaw + slip_angle);
-        float dot_y = vel * fast_sin(yaw + slip_angle);
-        float dot_yaw = omega;
-        float dot_vel = u.accel * (1.0f - p.Cm0 * vel); // 모터 감쇠 계수 적용
-        float dot_omega = (p.l_f * F_fy * fast_cos(u.steer) - p.l_r * F_ry) / p.I_z; // 토크 / 관성모멘트
-        float dot_slip = ((F_fy + F_ry) / (p.mass * vel)) - omega; // 횡력의 합 / (질량 * 속도)
+            // 기존 MPC 동역학 수식 완벽 적용 (단위 및 로직 동일)
+            float dot_x = vel * fast_cos(yaw + slip_angle);
+            float dot_y = vel * fast_sin(yaw + slip_angle);
+            float dot_yaw = omega;
+            float dot_vel = u.accel * (1.0f - p.Cm0 * vel); // 모터 감쇠 계수 적용
+            float dot_omega = (p.l_f * F_fy * fast_cos(u.steer) - p.l_r * F_ry) / p.I_z; // 토크 / 관성모멘트
 
-        // 상태 업데이트 (Euler Integration)
+            // vel→0 근방에서 1/(mass*vel)이 발산하지 않도록 부호를 보존한 안전항을 둔다
+            // (블렌딩 가중치 sigma가 이미 이 구간의 기여도를 낮춰주지만, 계산 자체가
+            //  NaN/Inf가 되면 블렌딩으로 걸러지지 않으므로 별도 가드가 필요하다).
+            float vel_safe = (vel >= 0.0f) ? fmaxf(vel, 1.0e-3f) : fminf(vel, -1.0e-3f);
+            float dot_slip = ((F_fy + F_ry) / (p.mass * vel_safe)) - omega; // 횡력의 합 / (질량 * 속도)
+
+            next_dyn.x = px + dot_x * p.dt;
+            next_dyn.y = py + dot_y * p.dt;
+            next_dyn.yaw = angle_normalize(yaw + dot_yaw * p.dt);
+            next_dyn.v = vel + dot_vel * p.dt;
+            next_dyn.omega = omega + dot_omega * p.dt;
+            next_dyn.slip_angle = slip_angle + dot_slip * p.dt;
+
+            // MPPI 비용 함수에서 사용하는 보조 변수 도출
+            next_dyn.vy = next_dyn.v * fast_sin(next_dyn.slip_angle); // 슬립각 기반 vy
+            next_dyn.ay = (F_fy * fast_cos(u.steer) + F_ry) / p.mass; // 횡가속도 a_y = F_y / m
+        }
+
+        // ── 3. tanh 연속 블렌딩 ─────────────────────────────────────
+        float sigma = blend_sigma(vel, p.v_blend_center, p.v_blend_width);
+
         State next_s;
-        next_s.x = px + dot_x * p.dt;
-        next_s.y = py + dot_y * p.dt;
-        next_s.yaw = angle_normalize(yaw + dot_yaw * p.dt);
-        next_s.v = vel + dot_vel * p.dt;
-        next_s.omega = omega + dot_omega * p.dt;
-        next_s.slip_angle = slip_angle + dot_slip * p.dt;
+        next_s.x          = sigma * next_dyn.x          + (1.0f - sigma) * next_kin.x;
+        next_s.y          = sigma * next_dyn.y          + (1.0f - sigma) * next_kin.y;
 
-        // MPPI 비용 함수에서 사용하는 보조 변수 도출
-        next_s.vy = next_s.v * fast_sin(next_s.slip_angle); // 슬립각 기반 vy 
-        next_s.ay = (F_fy * fast_cos(u.steer) + F_ry) / p.mass; // 횡가속도 a_y = F_y / m 
+        // yaw는 각도이므로 단순 선형 블렌딩은 wraparound에서 틀린 결과를 낸다
+        // (예: 179°와 -179°의 산술평균은 0°가 아니라 실제로는 180°여야 함).
+        // kin.yaw를 기준으로 dyn과의 최단 각도차를 구해 그 방향으로 sigma만큼만 이동시킨다.
+        float dyaw = angle_normalize(next_dyn.yaw - next_kin.yaw);
+        next_s.yaw         = angle_normalize(next_kin.yaw + sigma * dyaw);
+
+        next_s.v           = sigma * next_dyn.v           + (1.0f - sigma) * next_kin.v;
+        next_s.omega       = sigma * next_dyn.omega       + (1.0f - sigma) * next_kin.omega;
+        next_s.slip_angle  = sigma * next_dyn.slip_angle  + (1.0f - sigma) * next_kin.slip_angle;
+        next_s.vy          = sigma * next_dyn.vy          + (1.0f - sigma) * next_kin.vy;
+        next_s.ay          = sigma * next_dyn.ay          + (1.0f - sigma) * next_kin.ay;
 
         return next_s;
     }

@@ -101,6 +101,11 @@ struct Params {
     float B_r, C_r, D_r, E_r;
     float F_zf, F_zr;
 
+    // 저속(kinematic) / 고속(Pacejka dynamic) 모델을 tanh로 연속 블렌딩하기
+    // 위한 전이 구간 중심 속도와 폭. sigma=0.5*(1+tanh((v-center)/width)).
+    float v_blend_center;
+    float v_blend_width;
+
     ButterworthCoeffs filter_coeffs;
 };
 

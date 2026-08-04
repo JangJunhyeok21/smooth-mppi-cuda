@@ -62,6 +62,11 @@
     D_r: 0.7317
     E_r: 0.0597
 
+    # 저속(kinematic) ↔ 고속(Pacejka dynamic) tanh 블렌딩 전이 구간
+    # sigma = 0.5*(1+tanh((v-v_blend_center)/v_blend_width))
+    v_blend_center: 1.5
+    v_blend_width: 0.5
+
     # --- Topics (공통 키) ---
     odom_topic: /odom0
     pose_topic: /mcl_pose

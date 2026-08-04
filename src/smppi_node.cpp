@@ -386,6 +386,12 @@ private:
         this->declare_parameter("D_r",    0.65);   mppi_params_.D_r  = this->get_parameter("D_r").as_double();
         this->declare_parameter("E_r",    0.0);    mppi_params_.E_r  = this->get_parameter("E_r").as_double();
 
+        // 저속(kinematic) ↔ 고속(Pacejka dynamic) tanh 블렌딩 전이 구간
+        this->declare_parameter("v_blend_center", 1.5);
+        mppi_params_.v_blend_center = this->get_parameter("v_blend_center").as_double();
+        this->declare_parameter("v_blend_width", 0.5);
+        mppi_params_.v_blend_width  = this->get_parameter("v_blend_width").as_double();
+
         // 정하중 (pacejka_sysid/helpers/generate_predictions.py 와 동일한 규약)
         //   F_zf = m*g*l_r/l_wb,  F_zr = m*g*l_f/l_wb,  l_wb = l_f + l_r
         {

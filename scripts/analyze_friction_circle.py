@@ -13,14 +13,19 @@ Task 2(identify_actuator_tau.py)의 bag 읽기 인프라를 재사용한다.
 사용 예:
     python3 analyze_friction_circle.py /home/a/bags/rosbag2_2026_06_22-15_24_36 \
         --cmd-topic /ackermann_cmd --odom-topic /odom --imu-topic /imu/data
+
+여러 bag의 표본을 모아 판단할 수도 있다 — bag 경로를 여러 개 나열하거나, bag들이
+들어있는 상위 디렉토리 하나만 지정하면 그 아래 bag들을 전부 찾아 표본을 풀링한다:
+    python3 analyze_friction_circle.py /home/a/bags/0730
 """
 import argparse
+import os
 import sys
 
 import numpy as np
 import yaml
 
-from identify_actuator_tau import read_series, pick_cmd_topic
+from identify_actuator_tau import read_series, pick_cmd_topic, discover_bags
 
 # smppi_cuda_controller/config/params.yaml 과 동일한 기본값
 # (실차에 배포되는 Pacejka 파라미터 — 여기서 어긋나면 판단 자체가 무의미해진다)
@@ -82,28 +87,21 @@ def complementary_slip_angle(t, ay_imu, x, y, yaw, v, alpha=0.95, fc_hz=2.0):
     return slip_angle, vy_hat
 
 
-def main():
-    ap = argparse.ArgumentParser(description=__doc__,
-                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("bag_path")
-    ap.add_argument("--cmd-topic", default=None)
-    ap.add_argument("--odom-topic", default="/odom")
-    ap.add_argument("--imu-topic", default="/imu/data")
-    ap.add_argument("--high-percentile", type=float, default=80.0,
-                     help="|a_x| 상위 percentile 기준 (기본 80 = 상위 20%%)")
-    ap.add_argument("--diff-pct-thresh", type=float, default=20.0)
-    ap.add_argument("--corr-thresh", type=float, default=0.3)
-    ap.add_argument("--out-yaml", default="friction_circle_judgement.yaml")
-    args = ap.parse_args()
+def process_bag(bag_path, args, p):
+    """단일 bag을 읽어 (유효구간 |a_x|, 유효구간 |오차|, 전체 IMU 샘플 수)를 반환. 실패 시 None."""
+    bag_name = os.path.basename(os.path.normpath(bag_path))
+    try:
+        cmd_topic = pick_cmd_topic(bag_path, args.cmd_topic)
+        raw = read_series(bag_path, [cmd_topic, args.odom_topic, args.imu_topic])
+    except RuntimeError as e:
+        print(f"[WARN] '{bag_name}' 스킵: {e}")
+        return None
 
-    cmd_topic = pick_cmd_topic(args.bag_path, args.cmd_topic)
-    print(f"명령 토픽: {cmd_topic}\n오도메트리 토픽: {args.odom_topic}\nIMU 토픽: {args.imu_topic}")
-
-    raw = read_series(args.bag_path, [cmd_topic, args.odom_topic, args.imu_topic])
+    print(f"  명령 토픽: {cmd_topic} / 오도메트리 토픽: {args.odom_topic} / IMU 토픽: {args.imu_topic}")
     for topic in (cmd_topic, args.odom_topic, args.imu_topic):
         if not raw[topic]:
-            print(f"[ERROR] {topic}에 메시지가 없습니다.", file=sys.stderr)
-            sys.exit(1)
+            print(f"[WARN] '{bag_name}' 스킵: {topic}에 메시지가 없습니다.")
+            return None
 
     t0 = min(raw[cmd_topic][0][0], raw[args.odom_topic][0][0], raw[args.imu_topic][0][0])
 
@@ -134,11 +132,6 @@ def main():
 
     slip_angle_i, vy_hat_i = complementary_slip_angle(t_imu, ay_imu, x_i, y_i, yaw_i, v_i)
 
-    p = dict(DEFAULT_PARAMS)
-    l_wb = p["l_f"] + p["l_r"]
-    p["F_zf"] = p["mass"] * 9.81 * p["l_r"] / l_wb
-    p["F_zr"] = p["mass"] * 9.81 * p["l_f"] / l_wb
-
     ay_pred = pacejka_ay(v_i, omega_imu, slip_angle_i, steer_i, p)
     err = ay_pred - ay_imu
     abs_err = np.abs(err)
@@ -146,6 +139,54 @@ def main():
     # 정지/저속 구간은 모델도 실측도 의미가 없으므로 v > 0.3 m/s만 사용
     valid = v_i > 0.3
     ax_v, abs_err_v = np.abs(ax_imu[valid]), abs_err[valid]
+    return ax_v, abs_err_v, len(v_i)
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__,
+                                  formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("bag_paths", nargs="+",
+                     help="rosbag2 디렉토리 경로 (여러 개 나열 가능, 또는 bag들을 담은 상위 디렉토리 하나)")
+    ap.add_argument("--cmd-topic", default=None)
+    ap.add_argument("--odom-topic", default="/odom")
+    ap.add_argument("--imu-topic", default="/imu/data")
+    ap.add_argument("--high-percentile", type=float, default=80.0,
+                     help="|a_x| 상위 percentile 기준 (기본 80 = 상위 20%%)")
+    ap.add_argument("--diff-pct-thresh", type=float, default=20.0)
+    ap.add_argument("--corr-thresh", type=float, default=0.3)
+    ap.add_argument("--out-yaml", default="friction_circle_judgement.yaml")
+    args = ap.parse_args()
+
+    p = dict(DEFAULT_PARAMS)
+    l_wb = p["l_f"] + p["l_r"]
+    p["F_zf"] = p["mass"] * 9.81 * p["l_r"] / l_wb
+    p["F_zr"] = p["mass"] * 9.81 * p["l_f"] / l_wb
+
+    bag_paths = discover_bags(args.bag_paths)
+    print(f"처리할 bag {len(bag_paths)}개: {[os.path.basename(b) for b in bag_paths]}")
+
+    ax_list, err_list, per_bag = [], [], []
+    n_total = 0
+    skipped = 0
+    for bag_path in bag_paths:
+        print(f"\n=== bag: {os.path.basename(bag_path)} ===")
+        result = process_bag(bag_path, args, p)
+        if result is None:
+            skipped += 1
+            continue
+        ax_v_bag, abs_err_v_bag, n_total_bag = result
+        ax_list.append(ax_v_bag)
+        err_list.append(abs_err_v_bag)
+        n_total += n_total_bag
+        per_bag.append({"bag": os.path.basename(bag_path), "n_valid_samples": int(len(ax_v_bag))})
+
+    print(f"\n처리 완료: {len(bag_paths) - skipped}개 사용, {skipped}개 스킵")
+    if not ax_list:
+        print("[ERROR] 유효한 bag이 없습니다.", file=sys.stderr)
+        sys.exit(1)
+
+    ax_v = np.concatenate(ax_list)
+    abs_err_v = np.concatenate(err_list)
 
     thresh = np.percentile(ax_v, args.high_percentile)
     high_mask = ax_v >= thresh
@@ -158,8 +199,10 @@ def main():
 
     significant = (diff_pct >= args.diff_pct_thresh) or (abs(corr) > args.corr_thresh)
 
+    n_valid = len(ax_v)
+
     print("\n=== 마찰원 커플링 판단 ===")
-    print(f"유효 샘플 수: {valid.sum()} / {len(v_i)} (v > 0.3 m/s)")
+    print(f"유효 샘플 수: {n_valid} / {n_total} (v > 0.3 m/s, bag {len(bag_paths) - skipped}개 풀링)")
     print(f"|a_x| 상위 {100 - args.high_percentile:.0f}% 임계값: {thresh:.3f} m/s^2 "
           f"(n_high={high_mask.sum()}, n_low={low_mask.sum()})")
     print(f"MAE(|a_x| 상위 그룹)  = {mae_high:.4f} m/s^2")
@@ -169,8 +212,8 @@ def main():
     print(f"\n판단: {'유의미 — 2단계(스케일링) 구현 진행' if significant else '유의미하지 않음 — 스킵'}")
 
     out = {
-        "n_valid_samples": int(valid.sum()),
-        "n_total_samples": int(len(v_i)),
+        "n_valid_samples": int(n_valid),
+        "n_total_samples": int(n_total),
         "high_pct_threshold_ax": float(thresh),
         "n_high": int(high_mask.sum()),
         "n_low": int(low_mask.sum()),
@@ -181,7 +224,8 @@ def main():
         "diff_pct_thresh": args.diff_pct_thresh,
         "corr_thresh": args.corr_thresh,
         "significant": bool(significant),
-        "source_bag": args.bag_path,
+        "source_bags": bag_paths,
+        "per_bag": per_bag,
     }
     with open(args.out_yaml, "w") as f:
         yaml.safe_dump(out, f, sort_keys=False)

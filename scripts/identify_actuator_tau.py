@@ -10,10 +10,16 @@
     python3 identify_actuator_tau.py /home/a/bags/rosbag2_2026_06_22-15_24_36 \
         --cmd-topic /ackermann_cmd --odom-topic /odom --out-dir .
 
+여러 bag의 스텝 구간을 모아 평균 tau를 낼 수도 있다 — bag 경로를 여러 개 나열하거나,
+bag들이 들어있는 상위 디렉토리 하나만 지정하면 그 아래 bag들을 전부 찾아 처리한다:
+    python3 identify_actuator_tau.py /home/a/bags/0730 --out-dir .
+    python3 identify_actuator_tau.py bagA bagB bagC --out-dir .
+
 자동 스텝 검출이 실패하는 구간은 --manual-steer-window / --manual-motor-window로
-(start end) 시간 구간을 직접 지정해 보강할 수 있다 (여러 번 지정 가능).
+(start end) 시간 구간을 직접 지정해 보강할 수 있다 (여러 번 지정 가능, 단일 bag에서만).
 """
 import argparse
+import os
 import sys
 from dataclasses import dataclass, field
 
@@ -71,6 +77,34 @@ def pick_cmd_topic(bag_path, override):
     raise RuntimeError(
         f"명령 토픽을 자동으로 찾지 못했습니다. --cmd-topic으로 직접 지정하세요. "
         f"(후보: {CMD_TOPIC_CANDIDATES}, 가용 토픽: {sorted(type_map)})")
+
+
+def discover_bags(paths):
+    """입력 경로들을 실제 rosbag2 디렉토리 목록으로 확장한다.
+
+    각 경로가 그 자체로 bag(metadata.yaml 보유)이면 그대로 쓰고, 아니라면 바로 아래
+    하위 디렉토리들 중 bag인 것들을 전부 찾아 추가한다 (한 단계만 탐색).
+    """
+    bags = []
+    for p in paths:
+        if os.path.isfile(os.path.join(p, "metadata.yaml")):
+            bags.append(os.path.normpath(p))
+        elif os.path.isdir(p):
+            found = sorted(
+                entry.path for entry in os.scandir(p)
+                if entry.is_dir() and os.path.isfile(os.path.join(entry.path, "metadata.yaml")))
+            if not found:
+                raise RuntimeError(f"'{p}' 는 bag도 아니고 bag을 담은 디렉토리도 아닙니다.")
+            bags.extend(os.path.normpath(b) for b in found)
+        else:
+            raise RuntimeError(f"경로를 찾을 수 없습니다: {p}")
+    seen = set()
+    unique_bags = []
+    for b in bags:
+        if b not in seen:
+            seen.add(b)
+            unique_bags.append(b)
+    return unique_bags
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -212,7 +246,8 @@ def make_plot(steer_fits, motor_fits, out_path):
         ax = axes[idx // ncols][idx % ncols]
         ax.plot(f["t_rel"], f["y"], ".", ms=3, label="measured", color="tab:blue")
         ax.plot(f["t_rel"], f["y_fit"], "-", lw=2, label="fit", color="tab:red")
-        ax.set_title(f"{label} @ t0={f['t0']:.1f}s\ntau={f['tau']:.3f}s R2={f['r2']:.2f}",
+        bag_tag = f" [{f['bag']}]" if f.get("bag") else ""
+        ax.set_title(f"{label}{bag_tag} @ t0={f['t0']:.1f}s\ntau={f['tau']:.3f}s R2={f['r2']:.2f}",
                      fontsize=9)
         ax.set_xlabel("t [s]")
         ax.legend(fontsize=7)
@@ -225,10 +260,58 @@ def make_plot(steer_fits, motor_fits, out_path):
     print(f"플롯 저장: {out_path}")
 
 
+def process_bag(bag_path, args, manual_steer, manual_motor):
+    """단일 bag을 읽어 (steer_fits, motor_fits)를 반환. 처리 불가하면 None."""
+    bag_name = os.path.basename(os.path.normpath(bag_path))
+    try:
+        cmd_topic = pick_cmd_topic(bag_path, args.cmd_topic)
+        raw = read_series(bag_path, [cmd_topic, args.odom_topic])
+    except RuntimeError as e:
+        print(f"[WARN] '{bag_name}' 스킵: {e}")
+        return None
+
+    print(f"  명령 토픽: {cmd_topic} / 응답 토픽: {args.odom_topic}")
+
+    if not raw[cmd_topic]:
+        print(f"[WARN] '{bag_name}' 스킵: {cmd_topic}에 메시지가 없습니다.")
+        return None
+    if not raw[args.odom_topic]:
+        print(f"[WARN] '{bag_name}' 스킵: {args.odom_topic}에 메시지가 없습니다.")
+        return None
+
+    t_cmd = np.array([t for t, _ in raw[cmd_topic]])
+    steer_cmd = np.array([m.drive.steering_angle for _, m in raw[cmd_topic]])
+    speed_cmd = np.array([m.drive.speed for _, m in raw[cmd_topic]])
+
+    t_odom = np.array([t for t, _ in raw[args.odom_topic]])
+    omega_resp = np.array([m.twist.twist.angular.z for _, m in raw[args.odom_topic]])
+    v_resp = np.array([m.twist.twist.linear.x for _, m in raw[args.odom_topic]])
+
+    # bag 타임스탬프를 0 기준 상대시간으로 정렬
+    t0_global = min(t_cmd[0], t_odom[0])
+    t_cmd = t_cmd - t0_global
+    t_odom = t_odom - t0_global
+
+    steer_fits, _ = run_channel(
+        "steer", t_cmd, steer_cmd, t_odom, omega_resp,
+        args.steer_step_thresh, args.min_window, args.max_window, manual_steer,
+        args.r2_min, args.tau_max)
+    motor_fits, _ = run_channel(
+        "motor", t_cmd, speed_cmd, t_odom, v_resp,
+        args.speed_step_thresh, args.min_window, args.max_window, manual_motor,
+        args.r2_min, args.tau_max)
+
+    for f in steer_fits + motor_fits:
+        f["bag"] = bag_name
+
+    return steer_fits, motor_fits
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                   formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("bag_path", help="rosbag2 디렉토리 경로")
+    ap.add_argument("bag_paths", nargs="+",
+                     help="rosbag2 디렉토리 경로 (여러 개 나열 가능, 또는 bag들을 담은 상위 디렉토리 하나)")
     ap.add_argument("--cmd-topic", default=None,
                      help=f"명령 토픽 (기본: 자동탐색 {CMD_TOPIC_CANDIDATES})")
     ap.add_argument("--odom-topic", default="/odom", help="응답(omega, v) 소스 토픽")
@@ -260,39 +343,30 @@ def main():
     if args.start is not None and args.end is not None:
         manual_steer.append((args.start, args.end))
 
-    cmd_topic = pick_cmd_topic(args.bag_path, args.cmd_topic)
-    print(f"명령 토픽: {cmd_topic}")
-    print(f"응답 토픽: {args.odom_topic}")
-
-    raw = read_series(args.bag_path, [cmd_topic, args.odom_topic])
-    if not raw[cmd_topic]:
-        print(f"[ERROR] {cmd_topic}에 메시지가 없습니다.", file=sys.stderr)
+    bag_paths = discover_bags(args.bag_paths)
+    if len(bag_paths) > 1 and (manual_steer or manual_motor):
+        print("[ERROR] --manual-steer-window/--manual-motor-window/--start/--end는 "
+              "bag이 1개일 때만 지정할 수 있습니다 (bag마다 상대시간 의미가 달라집니다).",
+              file=sys.stderr)
         sys.exit(1)
-    if not raw[args.odom_topic]:
-        print(f"[ERROR] {args.odom_topic}에 메시지가 없습니다.", file=sys.stderr)
-        sys.exit(1)
+    print(f"처리할 bag {len(bag_paths)}개: {[os.path.basename(b) for b in bag_paths]}")
 
-    t_cmd = np.array([t for t, _ in raw[cmd_topic]])
-    steer_cmd = np.array([m.drive.steering_angle for _, m in raw[cmd_topic]])
-    speed_cmd = np.array([m.drive.speed for _, m in raw[cmd_topic]])
+    steer_fits, motor_fits = [], []
+    per_bag = []
+    skipped = 0
+    for bag_path in bag_paths:
+        print(f"\n=== bag: {os.path.basename(bag_path)} ===")
+        result = process_bag(bag_path, args, manual_steer, manual_motor)
+        if result is None:
+            skipped += 1
+            continue
+        bag_steer, bag_motor = result
+        steer_fits.extend(bag_steer)
+        motor_fits.extend(bag_motor)
+        per_bag.append({"bag": os.path.basename(bag_path),
+                         "n_steer_fits": len(bag_steer), "n_motor_fits": len(bag_motor)})
 
-    t_odom = np.array([t for t, _ in raw[args.odom_topic]])
-    omega_resp = np.array([m.twist.twist.angular.z for _, m in raw[args.odom_topic]])
-    v_resp = np.array([m.twist.twist.linear.x for _, m in raw[args.odom_topic]])
-
-    # bag 타임스탬프를 0 기준 상대시간으로 정렬
-    t0_global = min(t_cmd[0], t_odom[0])
-    t_cmd = t_cmd - t0_global
-    t_odom = t_odom - t0_global
-
-    steer_fits, steer_rejected = run_channel(
-        "steer", t_cmd, steer_cmd, t_odom, omega_resp,
-        args.steer_step_thresh, args.min_window, args.max_window, manual_steer,
-        args.r2_min, args.tau_max)
-    motor_fits, motor_rejected = run_channel(
-        "motor", t_cmd, speed_cmd, t_odom, v_resp,
-        args.speed_step_thresh, args.min_window, args.max_window, manual_motor,
-        args.r2_min, args.tau_max)
+    print(f"\n처리 완료: {len(bag_paths) - skipped}개 사용, {skipped}개 스킵")
 
     def summarize(name, fits, min_count=5):
         if len(fits) == 0:
@@ -319,7 +393,8 @@ def main():
         "tau_motor_std": tau_motor_std,
         "n_steer_fits": n_steer,
         "n_motor_fits": n_motor,
-        "source_bag": args.bag_path,
+        "source_bags": bag_paths,
+        "per_bag": per_bag,
     }
     out_yaml = f"{args.out_dir}/tau_params.yaml"
     with open(out_yaml, "w") as f:

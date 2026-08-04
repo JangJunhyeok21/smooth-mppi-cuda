@@ -3,6 +3,7 @@
 #include "nav_msgs/msg/odometry.hpp"
 #include "nav_msgs/msg/path.hpp"
 #include "sensor_msgs/msg/laser_scan.hpp"
+#include "sensor_msgs/msg/imu.hpp"
 #include "visualization_msgs/msg/marker_array.hpp"
 #include "geometry_msgs/msg/point.hpp"
 #include "geometry_msgs/msg/pose_stamped.hpp"
@@ -70,6 +71,15 @@ public:
                 "MPPI Node Started — single odom topic: %s", odom_topic_.c_str());
         }
 
+        if (kinematic_slip_) {
+            imu_sub_ = this->create_subscription<sensor_msgs::msg::Imu>(
+                imu_topic_, rclcpp::SensorDataQoS(),
+                std::bind(&MPPINode::imu_callback, this, std::placeholders::_1));
+            RCLCPP_INFO(this->get_logger(),
+                "운동학 슬립각 추정 ON — 자이로 %s 구독 (l_r=%.3f, v_min=%.2f)",
+                imu_topic_.c_str(), mppi_params_.l_r, slip_min_speed_);
+        }
+
         timer_ = this->create_wall_timer(
             35ms, std::bind(&MPPINode::timer_callback, this));
     }
@@ -96,6 +106,7 @@ private:
     //  velocity_callback — 속도만 갱신 (use_mcl_pose 모드)
     //  주의: 이 차량의 휠 오도메트리는 횡슬립을 감지하지 못해
     //  twist.linear.y가 항상 0이므로 vy/slip_angle은 항상 0이 된다.
+    //  → kinematic_slip_ 이 true 면 자이로 기반 운동학 추정으로 대체한다.
     // ════════════════════════════════════════════════════════════════
     void velocity_callback(const nav_msgs::msg::Odometry::SharedPtr msg)
     {
@@ -103,11 +114,41 @@ private:
         current_state_.vy    = static_cast<float>(msg->twist.twist.linear.y);
         current_state_.omega = static_cast<float>(msg->twist.twist.angular.z);
 
-        current_state_.slip_angle =
-            std::atan2(current_state_.vy, std::fabs(current_state_.v) + 1e-5f);
+        apply_slip_estimate();
         current_state_.ay = current_state_.v * current_state_.omega;
 
         velocity_received_ = true;
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    //  imu_callback — 자이로만 사용 (운동학 슬립각 추정용)
+    //  /odom 의 angular.z 는 측정이 아니라 vesc_to_odom 의 운동학 재구성
+    //  (v*tan(delta)/L) 이라 코너에서 실제의 0.70~0.80배 + 115ms 지연이다.
+    //  IMU 자이로는 0.85~0.95배 + 5~15ms 로 훨씬 낫다 (실차 bag+mocap 검증).
+    //  가속도계는 축이 뒤집혀 있고 적분도 불가하므로 **쓰지 않는다.**
+    //  근거: ekf_pose/docs/ekf-pose-analysis-2026-08.md §5, §6
+    // ════════════════════════════════════════════════════════════════
+    void imu_callback(const sensor_msgs::msg::Imu::SharedPtr msg)
+    {
+        gyro_z_ = static_cast<float>(msg->angular_velocity.z);
+        gyro_received_ = true;
+    }
+
+    // 운동학 슬립각:  beta = atan(l_r * omega / max(v, v_min))
+    // 자이로(정상)와 휠 오도메트리(정상)만 쓰고 고장난 가속도계를 타지 않는다.
+    // 실측 효과: 슬립각 RMSE 5.61°→2.50° / 9.21°→5.60°, corr +0.89 / +0.95
+    void apply_slip_estimate()
+    {
+        if (kinematic_slip_) {
+            const float w = gyro_received_ ? gyro_z_ : current_state_.omega;
+            if (gyro_received_) current_state_.omega = w;   // 자이로가 더 정확
+            const float v = std::max(std::fabs(current_state_.v), slip_min_speed_);
+            current_state_.slip_angle = std::atan(mppi_params_.l_r * w / v);
+            current_state_.vy = current_state_.v * std::sin(current_state_.slip_angle);
+        } else {
+            current_state_.slip_angle =
+                std::atan2(current_state_.vy, std::fabs(current_state_.v) + 1e-5f);
+        }
     }
 
     // ════════════════════════════════════════════════════════════════
@@ -128,12 +169,11 @@ private:
 
         // 속도 (body 프레임)
         current_state_.v     = static_cast<float>(msg->twist.twist.linear.x);
-        current_state_.vy    = static_cast<float>(msg->twist.twist.linear.y);
+        current_state_.vy    = assume_zero_vy_ ? 0.0f : static_cast<float>(msg->twist.twist.linear.y);
         current_state_.omega = static_cast<float>(msg->twist.twist.angular.z);
 
         // 파생 상태
-        current_state_.slip_angle =
-            std::atan2(current_state_.vy, std::fabs(current_state_.v) + 1e-5f);
+        apply_slip_estimate();
         current_state_.ay = current_state_.v * current_state_.omega;
 
         odom_received_ = true;
@@ -338,6 +378,11 @@ private:
         this->declare_parameter("lat_g_fault_threshold", 9.0);   mppi_params_.lat_g_fault_threshold = this->get_parameter("lat_g_fault_threshold").as_double();
         this->declare_parameter("q_progress",           13.0);   mppi_params_.q_progress    = this->get_parameter("q_progress").as_double();
         this->declare_parameter("q_escape_vel",         6.5);    mppi_params_.q_escape_vel  = this->get_parameter("q_escape_vel").as_double();
+        this->declare_parameter("q_impact",             300.0);  mppi_params_.q_impact      = this->get_parameter("q_impact").as_double();
+        this->declare_parameter("fault_accel",          -2.0);   mppi_params_.fault_accel   = this->get_parameter("fault_accel").as_double();
+        this->declare_parameter("q_barrier",            0.0);    mppi_params_.q_barrier     = this->get_parameter("q_barrier").as_double();
+        this->declare_parameter("boundary_margin",      0.35);   mppi_params_.boundary_margin = this->get_parameter("boundary_margin").as_double();
+        this->declare_parameter("use_curvature_grip",   false);  mppi_params_.use_curvature_grip = this->get_parameter("use_curvature_grip").as_bool();
         this->declare_parameter("collision_radius",     0.19);   mppi_params_.collision_radius = this->get_parameter("collision_radius").as_double();
         this->declare_parameter("car_radius",           0.15);   mppi_params_.car_radius    = this->get_parameter("car_radius").as_double();
         this->declare_parameter("q_obs",                50.0);   mppi_params_.q_obs         = this->get_parameter("q_obs").as_double();
@@ -391,6 +436,24 @@ private:
         pose_topic_     = this->get_parameter("pose_topic").as_string();
         this->declare_parameter("velocity_topic", "/odom");
         velocity_topic_ = this->get_parameter("velocity_topic").as_string();
+
+        // 검증용: 실차 조건(vesc_to_odom 의 twist.linear.y=0 하드코딩 +
+        // ekf_pose_estimator 가 그 0을 vy 측정치로 융합) 을 시뮬(perfect model,
+        // /odom0 가 진짜 vy 를 줌)에 인위로 재현하기 위한 스위치.
+        // docs/smppi-diagnosis-2026-08.md B-2 참고. 기본값 false(정상 동작 불변).
+        this->declare_parameter("assume_zero_vy", false);
+        assume_zero_vy_ = this->get_parameter("assume_zero_vy").as_bool();
+
+        // 운동학 슬립각 추정 (실차 bag+mocap 검증으로 도입).
+        // 실차 /odom 의 linear.y 는 0 하드코딩이라 slip_angle 이 항상 0 이 된다.
+        // IMU 적분으로 vy 를 구하는 건 이 IMU 로는 불가능(오차>신호)하므로,
+        // 자이로 기반 운동학 추정을 쓴다. 시뮬(진짜 vy 존재)에서는 false 권장.
+        this->declare_parameter("kinematic_slip", false);
+        kinematic_slip_ = this->get_parameter("kinematic_slip").as_bool();
+        this->declare_parameter("slip_min_speed", 0.5);
+        slip_min_speed_ = this->get_parameter("slip_min_speed").as_double();
+        this->declare_parameter("imu_topic", "/imu/data");
+        imu_topic_ = this->get_parameter("imu_topic").as_string();
 
         // ── 추월(Overtake) FSM: 상대차 인지 및 상태별 파라미터 ──────────
         this->declare_parameter("f1_obstacles_topic", "/f1/perception/object/obstacles/arr");
@@ -619,6 +682,13 @@ private:
     std::string odom_topic_, drive_topic_, path_topic_;
     std::string pose_topic_, velocity_topic_;
     bool use_mcl_pose_ = true;
+    bool assume_zero_vy_ = false;  // 검증용 — B-2 재현 스위치
+    bool  kinematic_slip_ = false; // 자이로 기반 운동학 슬립각 추정 사용 여부
+    float slip_min_speed_ = 0.5f;
+    std::string imu_topic_;
+    float gyro_z_ = 0.0f;
+    bool  gyro_received_ = false;
+    rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_sub_;
     bool odom_received_ = false;
     bool pose_received_ = false;
     bool velocity_received_ = false;

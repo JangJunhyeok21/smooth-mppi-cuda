@@ -14,17 +14,51 @@
     q_steer: 0.5
     q_collision: 300.0
     q_lat_g: 500.0
-    lat_g_threshold: 5.5        # 횡가속도 소프트 페널티 시작 임계값 [m/s^2]
-    lat_g_fault_threshold: 9.0  # 횡가속도 하드 페일 임계값 [m/s^2]
+    # use_curvature_grip=true 일 때는 "코너에서 쓸 수 있는 횡가속도" 의미가 되어
+    # 속도 한계 v_lim = sqrt(lat_g_threshold/|kappa|) 를 정한다. 모델 상한이 7.38 이므로
+    # 그 아래에서 고른다. 실측 A/B(map1): 5.5 는 너무 보수적(거리 95m), 7.0 이 최적
+    # (거리 114m = base 수준인데 이탈 0%). false 일 때는 기존대로 |s.ay| 임계값.
+    lat_g_threshold: 7.0        # 횡가속도 소프트 페널티 시작 임계값 [m/s^2]
+    # 하드 페일 임계값 [m/s^2]. 타이어 모델이 낼 수 있는 최대 횡가속도는
+    #   (F_zf*D_f + F_zr*D_r)/mass = 7.38 m/s^2
+    # 이므로 이 값이 7.38 이상이면 영원히 발동하지 않는다 (예전 9.0 은 dead code 였다).
+    # 파세이카 D 를 바꾸면 이 상한도 같이 바뀌니 docs/verify_diagnosis.py 로 재확인할 것.
+    lat_g_fault_threshold: 7.0
     collision_radius: 0.3
     q_progress: 36.0  #36.0
     q_escape_vel: 32.0  #32.0
+    q_impact: 300.0    # 충돌 시 v^2 페널티. 전 샘플 fault 시 "느리게 박기"를 유도
+
+    # ── Phase 3 (2026-08-04 시뮬 A/B, 조건당 6회 검증) ────────────────────
+    # [3-C] 트랙 전폭 barrier: q_barrier * (e_y/half_width)^6
+    #   q_dist=0 이면 횡방향으로 비용이 평평해 최적해가 "벽 페널티가 막 켜지는 지점"에
+    #   딱 붙고 robustness margin 이 0 이 된다. 이 항이 최적해를 제약면에서 떼어놓는다.
+    #   |e_norm|<0.8 에서 사실상 0 이라 레이싱 라인 자유도는 그대로 유지된다.
+    #   실측(map1, 60s×6회): 이탈 36.2%→14.2% (t=-2.31 유의), 거리 117→146m,
+    #                        시행간 표준편차 27.2→16.8m 로 재현성도 크게 개선.
+    #   ⚠ 5000 으로 올리면 오히려 나빠진다(이탈 24.3%, std 30.9) — 너무 세면
+    #     센터라인으로 밀어붙여 빠른 라인을 못 쓴다. 2000 근방이 최적.
+    q_barrier: 2000.0
+    # [3-B] 그립 페널티 지표를 "달성값 s.ay"(타이어 상한 7.38에서 포화 → 그 위로는
+    #   속도가 공짜) 대신 "곡률이 정하는 속도 한계 v_lim=sqrt(lat_g_threshold/|kappa|)"로.
+    #   이게 지금까지 비용함수에 없던 "코너 앞에서 감속하라" 항이다.
+    #   실측: 6회 전부 이탈 0.0%, 시행간 표준편차 2.7m (base 27.2m) — 재현성 10배.
+    use_curvature_grip: true
+    fault_accel: -2.0  # fault 이후 유지할 감속 [m/s^2] (감속만 하는 정책은 의도된 동작)
     
     # --- Obstacle Avoidance Params ---
     car_radius: 0.25
     q_obs: 150.0
     
     # --- Noise & Tuning ---
+    # 노이즈는 조향 "증분"에 들어가므로(× dt) 한 스텝이 움직일 수 있는 폭이
+    # noise_steer_std * dt 로 제한된다. 0.4 이면 t=0 탐색 폭이 0.38deg 에 불과해
+    # 8000 샘플이 사실상 전부 이전 계획의 미세 변형이 되고, 회피 기동이 후보 집합에
+    # 아예 존재하지 않는다 (docs/smppi-diagnosis-2026-08.md C-1).
+    # 목표: t=0 에서 max_steer 의 5%(0.024 rad) 이상 → noise_steer_std ≈ 1.5
+    # 다만 실차 조향 떨림에 직결되므로 0.4 → 0.6 → 1.0 → 1.5 로 단계적으로 올리며
+    # /drive 의 steering_angle 을 rosbag 으로 확인할 것. IIR 워밍업(mppi_core.cu)이
+    # 선행되어야 이 값을 올린 효과가 초반 스텝에 실제로 반영된다.
     noise_steer_std: 0.4     # rad/s
     noise_accel_std: 2.0     # m/s^3
     max_steer_rate: 8.0      # rad/s

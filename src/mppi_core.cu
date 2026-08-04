@@ -120,6 +120,8 @@ namespace mppi
         const Control &u, const Control &u_prev,
         const Params &p,
         float min_bnd_dist,
+        float e_norm,
+        const float *ref_kappa,
         int* last_idx)
     {
         float min_dist_sq = 1e9f;
@@ -164,7 +166,12 @@ namespace mppi
         
         // 6. Boundary Collision Cost
         float boundary_cost = 0.0f;
-        float safe_dist = p.collision_radius + 0.35f;
+        // 소프트 페널티 시작 거리. 예전엔 +0.35 하드코딩이었는데, map1 기준
+        // safe_dist=0.65 면 **트랙의 24% 구간에서 남는 주행폭이 0 이하**가 된다
+        // (양쪽 마진이 트랙폭을 다 먹음). 그러면 그 구간에선 어디 있든 항상 페널티라
+        // 횡방향 gradient 가 사라지고, 동시에 out-in-out 으로 반경을 키울 여지도 없어져
+        // 최대조향각으로도 코너 탈출이 불가능해진다. docs D''''' 참고.
+        float safe_dist = p.collision_radius + p.boundary_margin;
 
         if (min_bnd_dist < safe_dist) {
             float penetration = safe_dist - min_bnd_dist;
@@ -199,11 +206,42 @@ namespace mppi
         //    boundary_cost의 soft_cost와 동일하게 제곱 증가 형태를 사용 —
         //    감쇠하는 지수함수를 쓰면 한계에 다가갈수록 오히려 비용이 줄어들어
         //    MPPI가 그립 한계 쪽으로 더 몰리는 역효과가 난다).
-        float ay_abs = fabsf(s.ay);
-        float lat_g_over = ay_abs - p.lat_g_threshold;
-        float lat_g_cost = (lat_g_over > 0.f) ? p.q_lat_g * lat_g_over * lat_g_over : 0.f;
+        //    [3-B] use_curvature_grip 이면 "달성값(s.ay, 타이어 모델 상한 7.38에서 포화)"
+        //    대신 "요구값 v^2*kappa"(포화하지 않음)에 페널티를 건다. 포화하는 지표에
+        //    페널티를 걸면 그립 한계를 넘어선 뒤로는 속도가 공짜가 되어 코너 진입
+        //    감속이 걸리지 않는다. docs/smppi-diagnosis-2026-08.md A-3 참고.
+        float lat_g_cost = 0.0f;
+        if (p.use_curvature_grip && ref_kappa != nullptr) {
+            //  요구 횡가속도 v^2*k 를 그대로 제곱 페널티에 넣으면 map1 처럼 곡률이 큰
+            //  트랙(최소반경 0.70m)에서 v=4 일 때 요구값이 22 m/s^2 까지 올라가
+            //  비용이 폭발한다. 대신 **곡률이 정하는 속도 한계**로 환산해 유계로 만든다:
+            //      v_lim = sqrt(lat_g_threshold / |kappa|)
+            //  이게 곧 "코너 앞에서 감속하라"는, 지금까지 비용함수에 없던 항이다.
+            float k = fabsf(ref_kappa[nearest_idx]);
+            if (k > 1e-3f) {
+                float v_lim = sqrtf(p.lat_g_threshold / k);
+                float over = s.v - v_lim;
+                if (over > 0.f) lat_g_cost = p.q_lat_g * over * over;
+            }
+        } else {
+            //  기존 방식: 모델이 "실제로 낸" s.ay. 타이어 상한(약 7.38)에서 포화하므로
+            //  그 위로는 속도가 공짜가 된다. docs/smppi-diagnosis-2026-08.md A-3
+            float lat_g_over = fabsf(s.ay) - p.lat_g_threshold;
+            if (lat_g_over > 0.f) lat_g_cost = p.q_lat_g * lat_g_over * lat_g_over;
+        }
 
-        return p.q_dist * dist_error + vel_cost + steer_cost + rate_cost + boundary_cost + obs_cost + lat_g_cost;
+        //    [3-C] 트랙 전폭 barrier. q_dist=0 이면 횡방향으로 비용이 평평해서
+        //    최적해가 "벽 페널티가 막 켜지는 지점"에 딱 붙고 robustness margin 이 0 이 된다.
+        //    (2*e_y/w)^6 은 |e_norm|<0.8 에서 거의 0(라인 자유도 유지), 경계 근처에서만
+        //    급격히 커져 최적해를 제약면에서 떼어놓는다. docs A-1(b) 참고.
+        float barrier_cost = 0.0f;
+        if (p.q_barrier > 0.0f) {
+            float en2 = e_norm * e_norm;
+            barrier_cost = p.q_barrier * en2 * en2 * en2;   // e_norm^6
+        }
+
+        return p.q_dist * dist_error + vel_cost + steer_cost + rate_cost
+             + boundary_cost + obs_cost + lat_g_cost + barrier_cost;
     }
     
     // [수정된 함수] O(N) 바운더리 탐색을 대체하는 O(1) 횡방향 오차 기반 거리 연산
@@ -212,8 +250,10 @@ namespace mppi
         const float *ref_xs, const float *ref_ys, const float *ref_yaws,
         const float *left_xs, const float *left_ys,
         const float *right_xs, const float *right_ys,
-        int path_len, int current_path_idx, int *nearest_idx_out) 
+        int path_len, int current_path_idx, int *nearest_idx_out,
+        float *e_norm_out)
     {
+        if (e_norm_out != nullptr) *e_norm_out = 0.0f;
         if (ref_xs == nullptr || left_xs == nullptr || path_len <= 0) return 1e9f;
 
         // 1. 이전 인덱스 근처에서 가장 가까운 중심점(Reference) 탐색
@@ -259,7 +299,14 @@ namespace mppi
         float dy_r = right_ys[nearest_idx] - ref_ys[nearest_idx];
         float w_right = sqrtf(dx_r * dx_r + dy_r * dy_r);
 
-        // 4. 차량에서 양쪽 바운더리까지의 최단 거리 반환
+        // 4-a. 트랙 폭으로 정규화한 횡편차 (barrier 비용용).
+        //      0=센터, ±1=좌/우 경계. 좌우 폭이 다르므로 해당 방향 폭으로 나눈다.
+        if (e_norm_out != nullptr) {
+            float half = (e_y >= 0.0f) ? w_left : w_right;
+            *e_norm_out = (half > 1e-6f) ? (e_y / half) : 0.0f;
+        }
+
+        // 4-b. 차량에서 양쪽 바운더리까지의 최단 거리 반환
         return fminf(w_left - e_y, w_right + e_y);
     }
 
@@ -272,7 +319,8 @@ namespace mppi
     __global__ void rollout_kernel(
         State *states, Control *controls, float *costs, curandState *rng_states,
         const State start_state, const Control *prev_controls, const Params p,
-        const float *ref_xs, const float *ref_ys, const float *ref_yaws, int path_len,
+        const float *ref_xs, const float *ref_ys, const float *ref_yaws,
+        const float *ref_kappa, int path_len,
         const float *left_bnd_xs, const float *left_bnd_ys,
         const float *right_bnd_xs, const float *right_bnd_ys,
         int bnd_len,
@@ -293,6 +341,28 @@ namespace mppi
         float y_steer_prev1 = 0.0f, y_steer_prev2 = 0.0f;
         float x_accel_prev1 = 0.0f, x_accel_prev2 = 0.0f;
         float y_accel_prev1 = 0.0f, y_accel_prev2 = 0.0f;
+
+        // 버터워스 IIR 상태를 정상상태 분포로 워밍업한다.
+        // 0에서 시작하면 b0=0.073 탓에 t=0~2 구간의 노이즈가 10배 이상 감쇠되어,
+        // 정작 차에 나가는 첫 스텝의 조향 탐색 폭이 0.06deg 로 죽는다 (8000 샘플이
+        // 전부 이전 계획의 미세 변형이 되어 회피 기동이 후보 집합에 존재하지 않게 됨).
+        // 필터 시정수가 ~1.5스텝이므로 8스텝이면 정상상태에 충분히 수렴한다.
+        for (int w = 0; w < 8; ++w) {
+            float rs = curand_normal(&rng_states[k * T]) * p.noise_steer_std;
+            float ra = curand_normal(&rng_states[k * T]) * p.noise_accel_std;
+
+            float ws = p.filter_coeffs.b0 * rs
+                     + p.filter_coeffs.b1 * x_steer_prev1 + p.filter_coeffs.b2 * x_steer_prev2
+                     - p.filter_coeffs.a1 * y_steer_prev1 - p.filter_coeffs.a2 * y_steer_prev2;
+            float wa = p.filter_coeffs.b0 * ra
+                     + p.filter_coeffs.b1 * x_accel_prev1 + p.filter_coeffs.b2 * x_accel_prev2
+                     - p.filter_coeffs.a1 * y_accel_prev1 - p.filter_coeffs.a2 * y_accel_prev2;
+
+            x_steer_prev2 = x_steer_prev1; x_steer_prev1 = rs;
+            y_steer_prev2 = y_steer_prev1; y_steer_prev1 = ws;
+            x_accel_prev2 = x_accel_prev1; x_accel_prev1 = ra;
+            y_accel_prev2 = y_accel_prev1; y_accel_prev1 = wa;
+        }
 
         for (int t = 0; t < T; ++t)
         {
@@ -349,31 +419,27 @@ namespace mppi
                 is_fault = true;
             }
 
+            float e_norm = 0.0f;
             float min_dist = compute_min_boundary_distance(
-                x, ref_xs, ref_ys, ref_yaws, left_bnd_xs, left_bnd_ys, right_bnd_xs, right_bnd_ys, path_len, local_path_idx, &local_path_idx);
+                x, ref_xs, ref_ys, ref_yaws, left_bnd_xs, left_bnd_ys, right_bnd_xs, right_bnd_ys,
+                path_len, local_path_idx, &local_path_idx, &e_norm);
             
             if (min_dist < p.collision_radius) {
                 is_fault = true;
             }
 
             if (is_fault) {
-                // 기본 패널티를 10000으로 낮추고, 오래 버틸수록 패널티를 50씩 대폭 깎아줍니다.
-                // 이로 인해 어차피 박을 상황이면 풀브레이킹+조향으로 1틱이라도 더 버티는 샘플의 가중치가 높아집니다.
-                total_cost += 10000.0f - (float)t * 50.0f; 
-                
-                // 충돌했더라도, 그때까지 더 멀리 전진했다면 보상을 줍니다.
-                if (path_len > 0) {
-                    int progress = local_path_idx - initial_path_idx;
-                    if (progress < -path_len / 2) progress += path_len; 
-                    int max_possible_progress = T + 10; 
-                    progress = max(0, min(progress, max_possible_progress));
-                    total_cost -= p.q_v * (float)progress * 5.0f; 
-                }
+                // 전 샘플이 fault 나면(코너에서 상시 발생) 아래 항들만으로 순위가 정해지므로,
+                // 여기서 무엇을 보상하느냐가 곧 비상시 정책이 된다.
+                //   - 오래 버틸수록 이득 (-50t)      : 회피/감속 유도
+                //   - 느리게 박을수록 이득 (+q_impact*v^2) : 충돌 에너지 최소화
+                // 예전에 있던 progress 보상은 "더 멀리 가서 박기"를 유도해 코너 안쪽으로
+                // 파고드는 원인이 되므로 제거했다 (진행 보상은 무사 완주 경로에만 준다).
+                total_cost += 10000.0f - (float)t * 50.0f + p.q_impact * x.v * x.v;
 
-                // 현재 틱(t)에서 사용한 제어 입력(u)의 조향각을 가져옵니다.
-                float survival_steer = controls[k * T + t].steer * 0.1; 
-                // 속도는 0.0f (또는 마찰원 한계 내의 급제동 -1.0f)로 설정하고 조향은 살립니다.
-                Control safe_control = {survival_steer, -2.0f};
+                // 감속 정책(fault_accel)은 의도된 동작이라 유지하되, 조향은 죽이지 않는다.
+                // 예전 코드는 steer*0.1 로 조향을 1/10 로 깎아 벽에서 벗어날 방법을 없앴다.
+                Control safe_control = {u_clamped.steer, p.fault_accel};
 
                 for (int fill_t = t + 1; fill_t < T; ++fill_t) {
                     states[k * T + fill_t] = x;
@@ -387,16 +453,22 @@ namespace mppi
                 total_cost += compute_cost_cuda(
                     x,
                     ref_xs, ref_ys, ref_yaws, path_len,
-                    u_clamped, last_u, p, min_dist, &local_path_idx);
+                    u_clamped, last_u, p, min_dist, e_norm, ref_kappa, &local_path_idx);
             }
 
             // 종점 진행도 보상
             if (t == T - 1 && path_len > 0) {
                 int progress = local_path_idx - initial_path_idx;
-                if (progress < -path_len / 2) progress += path_len; 
-                int max_possible_progress = T + 10; 
+                if (progress < -path_len / 2) progress += path_len;
+                // 랩어라운드 방어용 상한. T+10(=60칸=5.9m)이면 3.39 m/s 에서 이미 포화해
+                // 모든 샘플이 같은 값으로 잘리고 progress 항이 샘플을 구분하지 못했다
+                // (max_speed=4.0 이므로 정작 빠른 구간에서 gradient 가 0). 2T 로 올려
+                // 5.6 m/s 까지 살려둔다.
+                // ponytail: 칸 수 대신 CSV 누적 arc-length(m)를 올려 쓰는 게 제대로 된 수정이다.
+                //           지금은 웨이포인트 간격(map1=0.099m)에 q_progress 가 암묵적으로 묶여 있다.
+                int max_possible_progress = 2 * T;
                 progress = max(0, min(progress, max_possible_progress));
-                
+
                 // 1. 기존 로직: 무사히 완주한 경우 진행 칸수에 비례해 보상
                 total_cost -= p.q_progress * (float)progress; 
 
@@ -449,6 +521,8 @@ namespace mppi
         CUDA_CHECK(cudaMalloc(&d_ref_xs_, max_path * sizeof(float)));
         CUDA_CHECK(cudaMalloc(&d_ref_ys_, max_path * sizeof(float)));
         CUDA_CHECK(cudaMalloc(&d_ref_yaws_, max_path * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&d_ref_kappa_, max_path * sizeof(float)));
+        CUDA_CHECK(cudaMemset(d_ref_kappa_, 0, max_path * sizeof(float)));
 
         CUDA_CHECK(cudaMalloc(&d_left_bnd_xs_, max_path * sizeof(float)));
         CUDA_CHECK(cudaMalloc(&d_left_bnd_ys_, max_path * sizeof(float)));
@@ -464,7 +538,7 @@ namespace mppi
     void MPPISolver::cleanup_cuda_memory() {
         cudaFree(d_states_); cudaFree(d_controls_); cudaFree(d_prev_controls_);
         cudaFree(d_costs_); cudaFree(d_rng_states_);
-        cudaFree(d_ref_xs_); cudaFree(d_ref_ys_); cudaFree(d_ref_yaws_);
+        cudaFree(d_ref_xs_); cudaFree(d_ref_ys_); cudaFree(d_ref_yaws_); cudaFree(d_ref_kappa_);
         cudaFree(d_left_bnd_xs_); cudaFree(d_left_bnd_ys_);
         cudaFree(d_right_bnd_xs_); cudaFree(d_right_bnd_ys_);
     }
@@ -483,6 +557,28 @@ namespace mppi
             CUDA_CHECK(cudaMemcpy(d_ref_xs_, xs.data(), ref_path_len_ * sizeof(float), cudaMemcpyHostToDevice));
             CUDA_CHECK(cudaMemcpy(d_ref_ys_, ys.data(), ref_path_len_ * sizeof(float), cudaMemcpyHostToDevice));
             CUDA_CHECK(cudaMemcpy(d_ref_yaws_, yaws.data(), ref_path_len_ * sizeof(float), cudaMemcpyHostToDevice));
+
+            // [3-B] 곡률 kappa 계산 후 업로드. 폐곡선 가정(랩어라운드).
+            //   kappa = d(psi)/ds  — 이웃 3점의 헤딩 변화를 호길이로 나눈다.
+            //   요구 횡가속도 v^2*kappa 를 그립 페널티 지표로 쓰기 위함.
+            std::vector<float> kappa(ref_path_len_, 0.0f);
+            const int n = ref_path_len_;
+            for (int i = 0; i < n; ++i) {
+                int im = (i - 1 + n) % n, ip = (i + 1) % n;
+                float dpsi = yaws[ip] - yaws[im];
+                while (dpsi >  M_PI) dpsi -= 2.0f * M_PI;
+                while (dpsi < -M_PI) dpsi += 2.0f * M_PI;
+                float ds = std::hypot(xs[ip] - xs[im], ys[ip] - ys[im]);
+                kappa[i] = (ds > 1e-6f) ? (dpsi / ds) : 0.0f;
+            }
+            // 이산 미분 노이즈 억제용 이동평균 (반경 2)
+            std::vector<float> ks(kappa);
+            for (int i = 0; i < n; ++i) {
+                float acc = 0.0f;
+                for (int d = -2; d <= 2; ++d) acc += kappa[(i + d + n) % n];
+                ks[i] = acc / 5.0f;
+            }
+            CUDA_CHECK(cudaMemcpy(d_ref_kappa_, ks.data(), n * sizeof(float), cudaMemcpyHostToDevice));
         }
     }
 
@@ -518,7 +614,7 @@ namespace mppi
         rollout_kernel<<<blocksPerGrid, threadsPerBlock>>>(
             d_states_, d_controls_, d_costs_, (curandState *)d_rng_states_,
             current_state, d_prev_controls_, params_,
-            d_ref_xs_, d_ref_ys_, d_ref_yaws_, ref_path_len_,
+            d_ref_xs_, d_ref_ys_, d_ref_yaws_, d_ref_kappa_, ref_path_len_,
             d_left_bnd_xs_, d_left_bnd_ys_, d_right_bnd_xs_, d_right_bnd_ys_, bnd_len_, 
             K_, T_, start_path_idx);
         

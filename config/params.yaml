@@ -1,7 +1,7 @@
 /**:
   ros__parameters:
     # --- Limits ---
-    max_steer: 0.4788        # rad
+    max_steer: 0.47        # rad
     min_accel: -8.0          # m/s^2
     max_accel: 8.5           # m/s^2
     min_speed: 0.5           # m/s
@@ -17,6 +17,8 @@
     lat_g_threshold: 5.5        # 횡가속도 소프트 페널티 시작 임계값 [m/s^2]
     lat_g_fault_threshold: 9.0  # 횡가속도 하드 페일 임계값 [m/s^2]
     collision_radius: 0.3
+    boundary_margin: 0.35       # collision_radius에 더해지는 소프트 페널티 시작 여유거리 [m]
+    boundary_soft_gain: 70.0    # 소프트 페널티 이차항 계수
     q_progress: 36.0  #36.0
     q_escape_vel: 32.0  #32.0
     
@@ -27,7 +29,7 @@
     # --- Noise & Tuning ---
     noise_steer_std: 0.4     # rad/s
     noise_accel_std: 2.0     # m/s^3
-    max_steer_rate: 8.0      # rad/s
+    max_steer_rate: 3.5      # rad/s
     max_accel_rate: 100.0    # m/s^3
     lambda: 15.0
     visualize_candidates: true

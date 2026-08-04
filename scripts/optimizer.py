@@ -14,7 +14,8 @@ import signal
 from ament_index_python.packages import get_package_share_directory
 
 CSV_FIELDNAMES = [
-    'q_v', 'q_dist', 'q_du', 'q_steer', 'q_lat_g', 'q_collision', 'q_progress', 'q_escape_vel',
+    'q_v', 'q_dist', 'q_du', 'q_steer', 'q_lat_g', 'q_collision', 'boundary_margin',
+    'q_progress', 'q_escape_vel',
     'lat_g_threshold', 'lat_g_fault_threshold',
     'status', 'lap_time', 'max_distance',
 ]
@@ -30,6 +31,10 @@ class MPPIOptimizer(Node):
         self.q_steer_list = [3.0, 5.0, 7.0 ]
         self.q_lat_g_list = [200.0, 250.0, 300.0]
         self.q_collision_list = [200.0, 150.0]
+        # 소프트 경계비용 시작 여유거리(collision_radius에 더해짐). S자 등 폭이 좁은 구간에서
+        # 값이 너무 크면(기존 고정값 0.35) 바깥쪽 벽에 붙는 아웃인아웃 라인을 못 그려 오히려
+        # 곡률 초과로 충돌하므로 탐색 대상에 포함
+        self.boundary_margin_list = [0.15, 0.25, 0.35]
         self.q_progress_list = [10.0, 13.0, 16.0]
         self.q_escape_vel_list = [5.0, 6.5, 8.0]
         # 지난 세션에 수동으로 튜닝했던 횡가속도(그립) 임계값도 탐색 대상에 포함
@@ -38,15 +43,16 @@ class MPPIOptimizer(Node):
 
         self.param_combinations = list(itertools.product(
             self.q_v_list, self.q_dist_list, self.q_du_list,
-            self.q_steer_list, self.q_lat_g_list, self.q_collision_list, self.q_progress_list, self.q_escape_vel_list,
+            self.q_steer_list, self.q_lat_g_list, self.q_collision_list, self.boundary_margin_list,
+            self.q_progress_list, self.q_escape_vel_list,
             self.lat_g_threshold_list, self.lat_g_fault_threshold_list,
         ))
         self.get_logger().info(f"Total Combinations to run: {len(self.param_combinations)}")
 
-        # 완주 기준: 10바퀴 이상 코스이탈/충돌 없이 주행
-        self.required_laps = 10
-        # 10바퀴 기준 타임아웃 (기존 3바퀴=60s에서 새 타이어 모델 기준으로 넉넉히 연장)
-        self.run_timeout_sec = 300.0
+        # 완주 기준: 3바퀴 이상 코스이탈/충돌 없이 주행
+        self.required_laps = 3
+        # 3바퀴 기준 타임아웃 (넉넉히 여유를 둠)
+        self.run_timeout_sec = 90.0
 
         # 원본 yaml 경로 캐싱
         self.base_yaml_path = os.path.join(
@@ -73,7 +79,6 @@ class MPPIOptimizer(Node):
         self.has_crashed = False
         self.max_distance = 0.0
         self.mppi_process = None
-        self.mppi_log_file = None
 
         # per-run lap counting and departure-wait flag
         self.lap_count = 0
@@ -154,8 +159,8 @@ class MPPIOptimizer(Node):
         self.reset_pending = True
         self.reset_deadline = time.time() + 1.0
 
-    def start_mppi_node(self, q_v, q_dist, q_du, q_steer, q_lat_g, q_collision, q_progress, q_escape_vel,
-                         lat_g_threshold, lat_g_fault_threshold):
+    def start_mppi_node(self, q_v, q_dist, q_du, q_steer, q_lat_g, q_collision, boundary_margin,
+                         q_progress, q_escape_vel, lat_g_threshold, lat_g_fault_threshold):
         """🚨 ros2 run으로 제어기만 단독 실행. 베이스 yaml 위에 최적화 변수만 덮어씌움"""
         cmd = [
             "ros2", "run", "smppi_cuda_controller", "smppi_node",
@@ -167,6 +172,7 @@ class MPPIOptimizer(Node):
             "-p", f"q_steer:={q_steer}",
             "-p", f"q_lat_g:={q_lat_g}",
             "-p", f"q_collision:={q_collision}",
+            "-p", f"boundary_margin:={boundary_margin}",
             "-p", f"q_progress:={q_progress}",
             "-p", f"q_escape_vel:={q_escape_vel}",
             "-p", f"lat_g_threshold:={lat_g_threshold}",
@@ -176,17 +182,13 @@ class MPPIOptimizer(Node):
 
         self.get_logger().info(
             f"Run {self.current_run + 1}/{len(self.param_combinations)}: q_v={q_v}, lat_g={q_lat_g}, "
-            f"col={q_collision}, progress={q_progress}, escape_vel={q_escape_vel}, "
-            f"lat_g_thr={lat_g_threshold}, lat_g_fault={lat_g_fault_threshold}")
-
-        os.makedirs("result", exist_ok=True)
-        log_path = f"result/mppi_node_run_{self.current_run + 1}.log"
-        self.mppi_log_file = open(log_path, "w")
+            f"col={q_collision}, boundary_margin={boundary_margin}, progress={q_progress}, "
+            f"escape_vel={q_escape_vel}, lat_g_thr={lat_g_threshold}, lat_g_fault={lat_g_fault_threshold}")
 
         self.mppi_process = subprocess.Popen(
             cmd,
-            stdout=self.mppi_log_file,
-            stderr=subprocess.STDOUT,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
             start_new_session=True
         )
         self.start_time = time.time()
@@ -220,9 +222,6 @@ class MPPIOptimizer(Node):
                     pass
             self.mppi_process = None
 
-        if self.mppi_log_file:
-            self.mppi_log_file.close()
-            self.mppi_log_file = None
         self.is_running = False
 
     def optimization_loop(self):
@@ -277,11 +276,13 @@ class MPPIOptimizer(Node):
                 self._finish_run('Timeout', 999.0)
 
     def _finish_run(self, status: str, lap_time: float):
-        q_v, q_dist, q_du, q_steer, q_lat_g, q_col, q_progress, q_escape_vel, lat_g_threshold, lat_g_fault_threshold = \
+        (q_v, q_dist, q_du, q_steer, q_lat_g, q_col, boundary_margin,
+         q_progress, q_escape_vel, lat_g_threshold, lat_g_fault_threshold) = \
             self.param_combinations[self.current_run]
         row = {
             'q_v': q_v, 'q_dist': q_dist, 'q_du': q_du, 'q_steer': q_steer,
-            'q_lat_g': q_lat_g, 'q_collision': q_col, 'q_progress': q_progress, 'q_escape_vel': q_escape_vel,
+            'q_lat_g': q_lat_g, 'q_collision': q_col, 'boundary_margin': boundary_margin,
+            'q_progress': q_progress, 'q_escape_vel': q_escape_vel,
             'lat_g_threshold': lat_g_threshold, 'lat_g_fault_threshold': lat_g_fault_threshold,
             'status': status, 'lap_time': lap_time, 'max_distance': self.max_distance,
         }

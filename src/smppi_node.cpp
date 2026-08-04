@@ -298,7 +298,7 @@ private:
         float lat_g = (lat_g_over > 0.f) ? mppi_params_.q_lat_g * lat_g_over * lat_g_over : 0.f;
 
         float min_bnd   = compute_min_boundary_distance(s, idx);
-        float safe_dist = mppi_params_.collision_radius + 0.4f;
+        float safe_dist = mppi_params_.collision_radius + mppi_params_.boundary_margin;
         float bnd_cost  = 0.f;
         if (min_bnd < safe_dist) {
             float pen = safe_dist - min_bnd;
@@ -306,7 +306,7 @@ private:
             if (min_bnd < mppi_params_.collision_radius * 1.2f)
                 hrd = mppi_params_.q_collision *
                       std::log(1.f + std::exp(-40.f*(min_bnd - mppi_params_.collision_radius)));
-            bnd_cost = 150.f * pen * pen + hrd;
+            bnd_cost = mppi_params_.boundary_soft_gain * pen * pen + hrd;
         }
 
         msg.dist_cost       = mppi_params_.q_dist * dist_error;
@@ -340,6 +340,11 @@ private:
         this->declare_parameter("q_escape_vel",         6.5);    mppi_params_.q_escape_vel  = this->get_parameter("q_escape_vel").as_double();
         this->declare_parameter("collision_radius",     0.19);   mppi_params_.collision_radius = this->get_parameter("collision_radius").as_double();
         this->declare_parameter("car_radius",           0.15);   mppi_params_.car_radius    = this->get_parameter("car_radius").as_double();
+        // 소프트 경계비용 시작 여유거리/게인. 좁은 구간(예: S자 코너)에서 collision_radius+margin이
+        // 실제 트랙 폭의 상당 부분을 차지하면 아웃인아웃 라인을 쓸 여유가 사라져 오히려 곡률 초과로
+        // 충돌하게 된다 — margin/gain을 좁혀 바깥쪽 벽 근접을 허용해야 하는 경우 이 값들을 낮춘다.
+        this->declare_parameter("boundary_margin",      0.35);   mppi_params_.boundary_margin    = this->get_parameter("boundary_margin").as_double();
+        this->declare_parameter("boundary_soft_gain",   70.0);   mppi_params_.boundary_soft_gain = this->get_parameter("boundary_soft_gain").as_double();
         this->declare_parameter("q_obs",                50.0);   mppi_params_.q_obs         = this->get_parameter("q_obs").as_double();
         this->declare_parameter("noise_steer_std",      0.4);    mppi_params_.noise_steer_std  = this->get_parameter("noise_steer_std").as_double();
         this->declare_parameter("noise_accel_std",      2.0);    mppi_params_.noise_accel_std  = this->get_parameter("noise_accel_std").as_double();

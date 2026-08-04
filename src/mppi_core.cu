@@ -97,6 +97,28 @@ namespace mppi
             float F_fy = p.F_zf * p.D_f * fast_sin(p.C_f * atanf(bf_a - p.E_f * (bf_a - atanf(bf_a))));
             float F_ry = p.F_zr * p.D_r * fast_sin(p.C_r * atanf(br_a - p.E_r * (br_a - atanf(br_a))));
 
+            // 마찰원(friction circle) 커플링 — bag 분석(analyze_friction_circle.py,
+            // rosbag2_2026_06_22-15_24_36) 결과 |a_x| 상위 20% 구간의 a_y 예측
+            // 평균절대오차가 나머지 구간보다 57.5% 크고(기준 20%), |a_x|와 예측오차의
+            // 상관계수가 0.330(기준 0.3)으로 두 기준 모두 초과해 "유의미"로 판단했다.
+            // 종방향 힘이 클수록 같은 타이어가 낼 수 있는 최대 횡력이 줄어드는 효과를
+            // 반영한다. 주의: D_f/D_r은 무차원 마찰계수이고(뉴턴 단위였던 예전 3-파라미터
+            // 형태에서 이관됨, 위 F_fy/F_ry 계산 참고) 실제 힘은 F_z를 곱해야 나오므로,
+            // 태스크 스펙의 의사코드처럼 mu_Fz_*에 D_f/D_r을 그대로 쓰면 Fx_approx(힘,
+            // 뉴턴 단위)와 단위가 맞지 않아 scale이 사실상 항상 0으로 붕괴한다 —
+            // F_zf*D_f / F_zr*D_r(뉴턴 단위 최대 횡력)로 정규화해야 한다.
+            float Fx_approx = p.mass * u.accel;       // 종방향 힘 근사 [N]
+            float mu_Fz_f = p.F_zf * p.D_f;           // 전륜 최대 횡력(마찰원 반경) [N]
+            float mu_Fz_r = p.F_zr * p.D_r;           // 후륜 최대 횡력(마찰원 반경) [N]
+
+            float ratio_f = Fx_approx / mu_Fz_f;
+            float ratio_r = Fx_approx / mu_Fz_r;
+            float scale_f = sqrtf(fmaxf(0.0f, 1.0f - ratio_f * ratio_f));
+            float scale_r = sqrtf(fmaxf(0.0f, 1.0f - ratio_r * ratio_r));
+
+            F_fy *= scale_f;
+            F_ry *= scale_r;
+
             // 기존 MPC 동역학 수식 완벽 적용 (단위 및 로직 동일)
             float dot_x = vel * fast_cos(yaw + slip_angle);
             float dot_y = vel * fast_sin(yaw + slip_angle);

@@ -41,6 +41,11 @@ def generate_launch_description():
             "use_mcl_pose": True,
             "pose_topic": "/newmcl_pose",
             "velocity_topic": "/odom",
+            # 실차 /odom 은 linear.y=0 하드코딩, angular.z 는 운동학 재구성(0.7~0.8배·115ms 지연).
+            # 자이로 기반 운동학 슬립각 추정으로 대체한다.
+            # 근거: ekf_pose/docs/ekf-pose-analysis-2026-08.md §5, §6
+            "kinematic_slip": True,
+            "imu_topic": "/imu/data",
             "drive_topic": "/drive",
             "num_samples": 10000,             # 🚨 Jetson Nano 최적화 (5000개)
             "publish_debug_info": False,     # 🚨 디버그 토픽 발행 스킵

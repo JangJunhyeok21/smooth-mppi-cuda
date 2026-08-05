@@ -76,6 +76,17 @@ struct Params {
     float lat_g_fault_threshold; // 횡가속도 하드 페일(is_fault) 임계값 [m/s^2]
     float q_progress;
     float q_escape_vel;
+    float q_impact;      // 충돌 시 v^2 페널티 — 전 샘플 fault 상황에서 "느리게 박기"를 유도
+    // [3-C] 트랙 전폭 barrier 가중치. (2*e_y/w)^6 형태로 최적해가 제약면에 붙는 걸 막는다.
+    //       0 이면 비활성(기존 동작). docs/smppi-diagnosis-2026-08.md A-1(b)
+    float q_barrier;
+    // 경계 소프트 페널티 시작 여유거리 [m]. safe_dist = collision_radius + boundary_margin.
+    // 너무 크면 마진이 트랙폭을 다 먹어 out-in-out 라인 자체가 불가능해진다.
+    float boundary_margin;
+    // [3-B] true 면 그립 페널티 지표를 s.ay(포화함) 대신 v^2*kappa(포화 안 함)로.
+    //       docs/smppi-diagnosis-2026-08.md A-3
+    bool  use_curvature_grip;
+    float fault_accel;   // fault 이후 유지할 감속 [m/s^2] (의도된 감속 정책, 음수)
     float collision_radius;
     
     // Obstacle Avoidance Params
@@ -177,6 +188,7 @@ private:
     float* d_ref_xs_;
     float* d_ref_ys_;
     float* d_ref_yaws_;
+    float* d_ref_kappa_;
     int ref_path_len_ = 0;
 
     // Boundary Device Memory

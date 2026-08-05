@@ -601,17 +601,28 @@ namespace mppi
             }
         }
 
-        float lambda = params_.lambda; 
+        float lambda = params_.lambda;
         float sum_weights = 0.0f;
+        double sum_weights_sq = 0.0;   // ESS 계산용 — K가 커서 float 누적오차 방지
+        double sum_dcost = 0.0;
         for (int k = 0; k < K_; ++k) {
+            float dcost = h_costs_[k] - min_cost;
+            sum_dcost += dcost;
             if (std::isinf(h_costs_[k])) {
-                h_weights_[k] = 0.0f; 
+                h_weights_[k] = 0.0f;
             } else {
-                h_weights_[k] = fast_exp(-(h_costs_[k] - min_cost) / lambda);
+                h_weights_[k] = fast_exp(-dcost / lambda);
             }
             sum_weights += h_weights_[k];
+            sum_weights_sq += static_cast<double>(h_weights_[k]) * h_weights_[k];
         }
         if (sum_weights < 1e-6) sum_weights = 1e-6;
+
+        // ── λ 튠 진단: ESS = (Σw)^2 / Σw^2 (Kish's effective sample size) ──────
+        ess_stats_.mean_dcost = static_cast<float>(sum_dcost / K_);
+        ess_stats_.ess = static_cast<float>(
+            (static_cast<double>(sum_weights) * sum_weights) / std::max(sum_weights_sq, 1e-12));
+        ess_stats_.ess_ratio = ess_stats_.ess / static_cast<float>(K_);
 
         std::vector<Control> weighted_controls(T_, {0.0f, 0.0f});
         for (int k = 0; k < K_; ++k) {
@@ -646,4 +657,5 @@ namespace mppi
     const std::vector<float>& MPPISolver::get_costs() const { return h_costs_; }
     int MPPISolver::get_K() const { return K_; }
     int MPPISolver::get_T() const { return T_; }
+    const EssStats& MPPISolver::get_ess_stats() const { return ess_stats_; }
 }

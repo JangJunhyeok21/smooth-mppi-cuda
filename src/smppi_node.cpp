@@ -570,8 +570,13 @@ private:
         auto end = std::chrono::high_resolution_clock::now();
         std::chrono::duration<double, std::milli> elapsed = end - start;
         static int count = 0;
-        if (count++ % 10 == 0)
-            RCLCPP_INFO(this->get_logger(), "MPPI: %.2fms | V: %.2f", elapsed.count(), current_state_.v);
+        if (count++ % 10 == 0) {
+            const auto &ess = solver_->get_ess_stats();
+            RCLCPP_INFO(this->get_logger(),
+                "MPPI: %.2fms | V: %.2f | ESS: %.0f/%d (%.1f%%) meanΔC=%.2f λ=%.2f",
+                elapsed.count(), current_state_.v,
+                ess.ess, solver_->get_K(), ess.ess_ratio * 100.0f, ess.mean_dcost, mppi_params_.lambda);
+        }
     }
 
     void publish_mppi_trajectory() {

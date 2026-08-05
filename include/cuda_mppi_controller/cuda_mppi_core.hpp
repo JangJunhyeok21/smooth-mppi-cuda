@@ -29,6 +29,16 @@ struct alignas(16) ButterworthCoeffs {
     float b0, b1, b2, a1, a2;
 };
 
+// λ(lambda) 튠 진단용 — compute_optimal_control()에서 매 틱 K개 샘플에 대해 계산.
+// ESS(Kish's effective sample size) = (Σw_k)^2 / Σw_k^2 : λ가 너무 작으면 최소비용
+// 샘플 근처로만 쏠려 ESS가 작아지고(과적합), 너무 크면 균등가중(ESS→K)에 가까워져
+// 비용 정보를 거의 반영하지 못한다.
+struct EssStats {
+    float mean_dcost = 0.0f;  // K개 샘플의 평균 코스트 갭 mean(C_k - C_min)
+    float ess = 0.0f;         // 유효 샘플 수
+    float ess_ratio = 0.0f;   // ess / K
+};
+
 struct alignas(16) State {
     float x;
     float y;
@@ -128,10 +138,11 @@ public:
     const std::vector<State>& get_best_trajectory() const;
     const std::vector<Control>& get_optimal_controls() const;
     const std::vector<float>& get_costs() const;
-    
+
     int get_best_k() const;
     int get_K() const;
     int get_T() const;
+    const EssStats& get_ess_stats() const;
 
 private:
     void allocate_cuda_memory();
@@ -146,8 +157,9 @@ private:
     std::vector<Control> h_controls_;   
     std::vector<Control> h_prev_controls_; 
     std::vector<float> h_costs_;        
-    std::vector<float> h_weights_;      
+    std::vector<float> h_weights_;
     int best_k_ = 0;
+    EssStats ess_stats_;
     std::vector<State> best_trajectory_;
     std::vector<Control> optimal_controls_;
 

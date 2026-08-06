@@ -509,7 +509,12 @@ private:
         solver_->update_params(mppi_params_);
         mppi::Control u = solver_->solve(current_state_);
         float next_v = current_state_.v + u.accel * mppi_params_.dt;
-        if      (next_v <= mppi_params_.min_speed) { u.accel = (mppi_params_.min_speed - current_state_.v) / mppi_params_.dt; next_v = mppi_params_.min_speed; }
+        // min_speed is only meant to keep the *internal* rollout dynamics away
+        // from the Pacejka model's 1/v slip-angle singularity (see mppi_core.cu's
+        // own accel clamp near min_speed). It must not override a legitimate
+        // stop/decelerate decision on the *published* command, so the floor here
+        // is the true physical minimum (0), not min_speed.
+        if      (next_v <= 0.0f) { u.accel = (0.0f - current_state_.v) / mppi_params_.dt; next_v = 0.0f; }
         else if (next_v >= mppi_params_.max_speed) { u.accel = (mppi_params_.max_speed - current_state_.v) / mppi_params_.dt; next_v = mppi_params_.max_speed; }
 
         ackermann_msgs::msg::AckermannDriveStamped drive_msg;

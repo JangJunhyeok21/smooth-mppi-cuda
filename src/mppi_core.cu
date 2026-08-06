@@ -230,9 +230,14 @@ namespace mppi
         const float *ref_xs, const float *ref_ys, const float *ref_yaws,
         const float *left_xs, const float *left_ys,
         const float *right_xs, const float *right_ys,
-        int path_len, int current_path_idx, int *nearest_idx_out)
+        int path_len, int bnd_len, int current_path_idx, int *nearest_idx_out)
     {
-        if (ref_xs == nullptr || left_xs == nullptr || path_len <= 0)
+        // bnd_len tracks how many entries of left_xs/right_xs have actually been
+        // filled via set_boundaries(); the buffers are cudaMalloc'd (uninitialized)
+        // at startup, so without this guard every rollout reads garbage device
+        // memory before the first boundary message arrives, which can make every
+        // sample's cost blow up to inf/NaN simultaneously.
+        if (ref_xs == nullptr || left_xs == nullptr || path_len <= 0 || bnd_len <= 0)
             return 1e9f;
 
         // 1. 이전 인덱스 근처에서 가장 가까운 중심점(Reference) 탐색
@@ -265,6 +270,12 @@ namespace mppi
         // 찾은 인덱스를 외부로 반환하여 compute_cost_cuda의 탐색 속도도 높임
         if (nearest_idx_out != nullptr)
             *nearest_idx_out = nearest_idx;
+
+        // left_xs/right_xs may be shorter than ref_xs/ref_ys (bnd_len vs path_len
+        // come from independent topics) — guard against indexing past what's
+        // actually been copied into the boundary buffers.
+        if (nearest_idx >= bnd_len)
+            return 1e9f;
 
         // 2. 중심선 기준 법선 벡터를 통한 횡방향 편차(e_y) 도출
         float dx = s.x - ref_xs[nearest_idx];
@@ -381,7 +392,7 @@ namespace mppi
             }
 
             float min_dist = compute_min_boundary_distance(
-                x, ref_xs, ref_ys, ref_yaws, left_bnd_xs, left_bnd_ys, right_bnd_xs, right_bnd_ys, path_len, local_path_idx, &local_path_idx);
+                x, ref_xs, ref_ys, ref_yaws, left_bnd_xs, left_bnd_ys, right_bnd_xs, right_bnd_ys, path_len, bnd_len, local_path_idx, &local_path_idx);
 
             if (min_dist < p.collision_radius)
             {
@@ -606,8 +617,22 @@ namespace mppi
 
         if (std::isinf(min_cost) || min_cost >= 1.0e8f)
         {
+            // All K rollouts faulted (collision / lat-g / boundary). Still populate
+            // best_trajectory_/optimal_controls_ with the stop rollout so
+            // publish_mppi_trajectory()/publish_path_visualization() (which
+            // early-return on empty vectors) keep publishing instead of going
+            // permanently silent from the first faulted cycle onward.
             Control stop_control = {0.0f, -5.0f};
             std::fill(h_prev_controls_.begin(), h_prev_controls_.end(), stop_control);
+
+            optimal_controls_.assign(T_, stop_control);
+            best_trajectory_.resize(T_);
+            State sim_state = current_state;
+            for (int t = 0; t < T_; ++t)
+            {
+                sim_state = update_dynamics(sim_state, stop_control, params_);
+                best_trajectory_[t] = sim_state;
+            }
             return stop_control;
         }
         for (int k = 0; k < K_; ++k)

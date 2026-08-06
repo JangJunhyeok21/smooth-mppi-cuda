@@ -63,6 +63,7 @@ target_include_directories(smppi_lib PUBLIC
 # 실행 파일 생성
 add_executable(smppi_node
   src/smppi_node.cpp
+  src/overtake_fsm.cpp
 )
 
 target_compile_options(smppi_node PRIVATE

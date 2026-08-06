@@ -67,6 +67,8 @@ struct Params {
     float q_progress;
     float q_escape_vel;
     float collision_radius;
+    float boundary_margin;     // collision_radius에 더해지는 소프트 페널티 시작 여유거리 [m]
+    float boundary_soft_gain;  // 소프트 페널티 이차항 계수
     
     // Obstacle Avoidance Params
     int num_obstacles;

@@ -10,3 +10,4 @@ install/
 *.DS_Store
 *.idea/
 *.iml
+model_tuning/**

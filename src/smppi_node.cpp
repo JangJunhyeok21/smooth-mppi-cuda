@@ -3,13 +3,17 @@
 #include "nav_msgs/msg/odometry.hpp"
 #include "nav_msgs/msg/path.hpp"
 #include "sensor_msgs/msg/laser_scan.hpp"
+#include "sensor_msgs/msg/imu.hpp"
 #include "visualization_msgs/msg/marker_array.hpp"
 #include "geometry_msgs/msg/point.hpp"
 #include "geometry_msgs/msg/pose_stamped.hpp"
 #include "cuda_mppi_controller/cuda_mppi_core.hpp"
+#include "cuda_mppi_controller/kinematic_residual_weights.hpp"
 #include "smppi_cuda_controller/msg/mppi_trajectory.hpp"
 #include <algorithm>
 #include <cmath>
+#include <array>
+#include <deque>
 
 using namespace std::chrono_literals;
 
@@ -20,13 +24,20 @@ public:
         validate_parameters();
 
         solver_ = std::make_unique<mppi::MPPISolver>(num_samples_, 50, mppi_params_);
+        if (mppi_params_.dynamics_model == mppi::KINEMATIC_RESIDUAL)
+            solver_->load_residual_weights(residual_weights_path_);
+        if (mppi_params_.dynamics_model == mppi::KINEMATIC_MLP_RESIDUAL)
+            solver_->load_mlp_residual_weights(mlp_weights_path_);
+        if (mppi_params_.dynamics_model == mppi::KINEMATIC_MLP_NO_IMU_RESIDUAL)
+            solver_->load_mlp_no_imu_residual_weights(mlp_weights_path_);
 
         drive_pub_ = this->create_publisher<ackermann_msgs::msg::AckermannDriveStamped>(drive_topic_, 10);
         vis_pub_   = this->create_publisher<visualization_msgs::msg::MarkerArray>("/mppi_viz", 50);
         traj_pub_  = this->create_publisher<smppi_cuda_controller::msg::MppiTrajectory>("/mppi_optimal_trajectory", 10);
 
+        auto path_qos = rclcpp::QoS(rclcpp::KeepLast(1)).reliable().transient_local();
         path_sub_ = this->create_subscription<nav_msgs::msg::Path>(
-            path_topic_, 1,
+            path_topic_, path_qos,
             std::bind(&MPPINode::path_callback, this, std::placeholders::_1));
 
         auto qos = rclcpp::QoS(rclcpp::KeepLast(1)).reliable().transient_local();
@@ -42,41 +53,122 @@ public:
         odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
             odom_topic_, 10,
             std::bind(&MPPINode::odom_callback, this, std::placeholders::_1));
+        // The no-IMU rollout neither subscribes to nor waits for IMU.  Keep the
+        // subscription only for the legacy 21-feature MLP checkpoint.
+        if (mppi_params_.dynamics_model == mppi::KINEMATIC_MLP_RESIDUAL) {
+            imu_sub_ = this->create_subscription<sensor_msgs::msg::Imu>(
+                imu_topic_, 20, std::bind(&MPPINode::imu_callback,this,std::placeholders::_1));
+        }
 
+        const auto control_period = std::chrono::milliseconds(static_cast<int>(1000.0 / std::max(1.0, control_rate_hz_)));
         timer_ = this->create_wall_timer(
-            35ms, std::bind(&MPPINode::timer_callback, this));
+            control_period, std::bind(&MPPINode::timer_callback, this));
 
         RCLCPP_INFO(this->get_logger(),
             "MPPI Node Started — single EKF odom topic: %s", odom_topic_.c_str());
     }
 
 private:
+    void imu_callback(const sensor_msgs::msg::Imu::SharedPtr msg) {
+        rclcpp::Time stamp(msg->header.stamp);
+        if (stamp.nanoseconds() == 0) stamp = this->now();
+        imu_buffer_.push_back({stamp,static_cast<float>(msg->angular_velocity.z),
+                              static_cast<float>(msg->linear_acceleration.x),
+                              static_cast<float>(msg->linear_acceleration.y)});
+        while(imu_buffer_.size()>imu_buffer_capacity_) imu_buffer_.pop_front();
+        imu_received_=true;
+    }
+
+    void align_imu_to_pose(const rclcpp::Time &pose_stamp) {
+        // Online-causal alignment: newest IMU whose timestamp is <= pose time.
+        // Do not interpolate with a future message, which would add control
+        // latency and leak unavailable information relative to deployment.
+        const ImuSample *chosen=nullptr;
+        for(const auto &sample:imu_buffer_) {
+            if(sample.stamp<=pose_stamp) chosen=&sample;
+            else break;
+        }
+        if(!chosen) { aligned_imu_valid_=false; return; }
+        const double age=(pose_stamp-chosen->stamp).seconds();
+        if(age<0. || age>imu_sync_max_age_s_) { aligned_imu_valid_=false; return; }
+        const float raw[3]={chosen->wz,chosen->ax,chosen->ay};
+        if(!imu_ema_initialized_) {
+            for(int i=0;i<3;++i) aligned_imu_[i]=raw[i];
+            imu_ema_initialized_=true;
+        } else {
+            for(int i=0;i<3;++i)
+                aligned_imu_[i]=imu_ema_alpha_*raw[i]+(1.f-imu_ema_alpha_)*aligned_imu_[i];
+        }
+        aligned_imu_valid_=true;
+        while(imu_buffer_.size()>1 && imu_buffer_[1].stamp<=pose_stamp) imu_buffer_.pop_front();
+    }
     // ════════════════════════════════════════════════════════════════
     //  단일 odom_callback
     //  /ekf_odom 에서 pose(x,y,yaw) + twist(vx,vy,omega) 동시 처리
     // ════════════════════════════════════════════════════════════════
     void odom_callback(const nav_msgs::msg::Odometry::SharedPtr msg)
     {
+        rclcpp::Time pose_stamp(msg->header.stamp);
+        if(pose_stamp.nanoseconds()==0) pose_stamp=this->now();
+        align_imu_to_pose(pose_stamp);
         // 위치 & 헤딩 (EKF가 map 프레임으로 보장)
         const auto &ori = msg->pose.pose.orientation;
         double yaw = std::atan2(
             2.0 * (ori.w * ori.z + ori.x * ori.y),
             1.0 - 2.0 * (ori.y * ori.y + ori.z * ori.z));
 
-        current_state_.x   = static_cast<float>(msg->pose.pose.position.x);
-        current_state_.y   = static_cast<float>(msg->pose.pose.position.y);
+        const double x = msg->pose.pose.position.x;
+        const double y = msg->pose.pose.position.y;
+        const double measured_vx = msg->twist.twist.linear.x;
+        const double measured_vy = msg->twist.twist.linear.y;
+        const double measured_omega = msg->twist.twist.angular.z;
+
+        current_state_.x   = static_cast<float>(x);
+        current_state_.y   = static_cast<float>(y);
         current_state_.yaw = static_cast<float>(yaw);
 
-        // 속도 (body 프레임)
-        current_state_.v     = static_cast<float>(msg->twist.twist.linear.x);
-        current_state_.vy    = static_cast<float>(msg->twist.twist.linear.y);
-        current_state_.omega = static_cast<float>(msg->twist.twist.angular.z);
+        double estimated_vx = measured_vx;
+        double estimated_vy = measured_vy;
+        double estimated_omega = measured_omega;
+
+        if (has_prev_odom_) {
+            const rclcpp::Time current_stamp(msg->header.stamp);
+            const double dt = (current_stamp - last_odom_stamp_).seconds();
+            if (dt > 1e-6 && std::isfinite(dt)) {
+                current_ax_ = static_cast<float>((estimated_vx - last_body_vx_) / dt);
+                const double dx = x - last_odom_x_;
+                const double dy = y - last_odom_y_;
+                const double world_vx = dx / dt;
+                const double world_vy = dy / dt;
+                const double body_vx = world_vx * std::cos(last_odom_yaw_) + world_vy * std::sin(last_odom_yaw_);
+                const double body_vy = -world_vx * std::sin(last_odom_yaw_) + world_vy * std::cos(last_odom_yaw_);
+                const double yaw_rate = (yaw - last_odom_yaw_) / dt;
+
+                if (std::fabs(measured_vx) < 1e-3 && std::fabs(measured_vy) < 1e-3) {
+                    estimated_vx = body_vx;
+                    estimated_vy = body_vy;
+                }
+                if (std::fabs(measured_omega) < 1e-3) {
+                    estimated_omega = yaw_rate;
+                }
+            }
+        }
+
+        current_state_.v     = static_cast<float>(estimated_vx);
+        current_state_.vy    = static_cast<float>(estimated_vy);
+        current_state_.omega = static_cast<float>(estimated_omega);
+        last_body_vx_ = estimated_vx;
 
         // 파생 상태
         current_state_.slip_angle =
             std::atan2(current_state_.vy, std::fabs(current_state_.v) + 1e-5f);
         current_state_.ay = current_state_.v * current_state_.omega;
 
+        last_odom_stamp_ = rclcpp::Time(msg->header.stamp);
+        last_odom_x_ = x;
+        last_odom_y_ = y;
+        last_odom_yaw_ = yaw;
+        has_prev_odom_ = true;
         odom_received_ = true;
     }
 
@@ -155,6 +247,25 @@ private:
     }
 
     void load_parameters() {
+        this->declare_parameter("dynamics_model", "legacy_hybrid");
+        dynamics_model_name_ = this->get_parameter("dynamics_model").as_string();
+        this->declare_parameter("residual_weights_path", "/home/a/smooth-mppi-cuda/config/kinematic_residual_gru.bin");
+        residual_weights_path_ = this->get_parameter("residual_weights_path").as_string();
+        this->declare_parameter("mlp_weights_path", "/home/a/smooth-mppi-cuda/config/kinematic_mlp_residual.bin");
+        mlp_weights_path_=this->get_parameter("mlp_weights_path").as_string();
+        if (dynamics_model_name_ == "legacy_hybrid") {
+            mppi_params_.dynamics_model = mppi::LEGACY_HYBRID;
+        } else if (dynamics_model_name_ == "kinematic") {
+            mppi_params_.dynamics_model = mppi::KINEMATIC;
+        } else if (dynamics_model_name_ == "kinematic_residual") {
+            mppi_params_.dynamics_model = mppi::KINEMATIC_RESIDUAL;
+        } else if (dynamics_model_name_ == "kinematic_mlp_residual") {
+            mppi_params_.dynamics_model = mppi::KINEMATIC_MLP_RESIDUAL;
+        } else if (dynamics_model_name_ == "kinematic_mlp_no_imu_residual") {
+            mppi_params_.dynamics_model = mppi::KINEMATIC_MLP_NO_IMU_RESIDUAL;
+        } else {
+            throw std::invalid_argument("Unknown dynamics_model: " + dynamics_model_name_);
+        }
         this->declare_parameter("num_samples",          8000);
         num_samples_ = this->get_parameter("num_samples").as_int();
         this->declare_parameter("max_steer",            0.507);  mppi_params_.max_steer     = this->get_parameter("max_steer").as_double();
@@ -164,6 +275,8 @@ private:
         this->declare_parameter("target_speed",         6.0);    mppi_params_.target_speed  = this->get_parameter("target_speed").as_double();
         this->declare_parameter("max_speed",            10.0);   mppi_params_.max_speed     = this->get_parameter("max_speed").as_double();
         this->declare_parameter("q_dist",               1.5);    mppi_params_.q_dist        = this->get_parameter("q_dist").as_double();
+        this->declare_parameter("q_contour",            0.5);    mppi_params_.q_contour     = this->get_parameter("q_contour").as_double();
+        this->declare_parameter("q_lag",                5.0);    mppi_params_.q_lag         = this->get_parameter("q_lag").as_double();
         this->declare_parameter("q_v",                  2.0);    mppi_params_.q_v           = this->get_parameter("q_v").as_double();
         this->declare_parameter("q_du",                 0.8);    mppi_params_.q_du          = this->get_parameter("q_du").as_double();
         this->declare_parameter("q_steer",              0.3);    mppi_params_.q_steer       = this->get_parameter("q_steer").as_double();
@@ -184,6 +297,12 @@ private:
         this->declare_parameter("l_f",    0.163);  mppi_params_.l_f  = this->get_parameter("l_f").as_double();
         this->declare_parameter("l_r",    0.162);  mppi_params_.l_r  = this->get_parameter("l_r").as_double();
         this->declare_parameter("I_z",    0.04712);mppi_params_.I_z  = this->get_parameter("I_z").as_double();
+        this->declare_parameter("kinematic_steer_scale",1.2896732099);
+        mppi_params_.kinematic_steer_scale=this->get_parameter("kinematic_steer_scale").as_double();
+        this->declare_parameter("kinematic_steer_bias",-0.0347926021);
+        mppi_params_.kinematic_steer_bias=this->get_parameter("kinematic_steer_bias").as_double();
+        this->declare_parameter("kinematic_no_slip",true);
+        mppi_params_.kinematic_no_slip=this->get_parameter("kinematic_no_slip").as_bool();
         this->declare_parameter("Cm0",    0.04);   mppi_params_.Cm0  = this->get_parameter("Cm0").as_double();
         // Pacejka 4-파라미터 (ForzaETH On-Track-SysID 규약).
         // D 는 무차원 마찰계수이며 실제 힘은 아래에서 계산하는 정하중 F_z 가 만든다.
@@ -210,15 +329,24 @@ private:
                         mppi_params_.mass, mppi_params_.l_f, mppi_params_.l_r);
         }
 
-        // 기본값을 /ekf_odom 으로 변경 — EKF가 pose+twist를 하나로 발행
-        this->declare_parameter("odom_topic",   "/ekf_odom");
+        this->declare_parameter("control_rate_hz", 50.0);
+        control_rate_hz_ = this->get_parameter("control_rate_hz").as_double();
+
+        // simulator 기본 토픽
+        this->declare_parameter("odom_topic",   "/ego_racecar/odom");
         odom_topic_  = this->get_parameter("odom_topic").as_string();
-        this->declare_parameter("drive_topic",  "/ackermann_cmd0");
+        this->declare_parameter("drive_topic",  "/drive");
         drive_topic_ = this->get_parameter("drive_topic").as_string();
+        this->declare_parameter("imu_topic","/imu/data");imu_topic_=this->get_parameter("imu_topic").as_string();
+        this->declare_parameter("imu_sync_max_age_s",0.05);
+        imu_sync_max_age_s_=this->get_parameter("imu_sync_max_age_s").as_double();
+        this->declare_parameter("imu_ema_alpha",0.25);
+        imu_ema_alpha_=static_cast<float>(std::clamp(
+            this->get_parameter("imu_ema_alpha").as_double(),0.0,1.0));
         this->declare_parameter("path_topic",   "/mppi_target_path");
         path_topic_  = this->get_parameter("path_topic").as_string();
 
-        mppi_params_.dt            = 0.035;
+        mppi_params_.dt            = 1.0 / std::max(1.0, control_rate_hz_);
         mppi_params_.num_obstacles = 0;
     }
 
@@ -276,7 +404,49 @@ private:
                 "Waiting for EKF odom (%s)...", odom_topic_.c_str());
             return;
         }
+        if (!path_received_ || !left_bnd_received_ || !right_bnd_received_) {
+            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                "Waiting for path/boundaries (%s)...", path_topic_.c_str());
+            return;
+        }
         auto start = std::chrono::high_resolution_clock::now();
+        if(mppi_params_.dynamics_model==mppi::KINEMATIC_MLP_RESIDUAL) {
+            mppi_params_.residual_imu[0]=aligned_imu_valid_?aligned_imu_[0]:current_state_.omega;
+            mppi_params_.residual_imu[1]=aligned_imu_valid_?aligned_imu_[1]:current_ax_;
+            mppi_params_.residual_imu[2]=aligned_imu_valid_?aligned_imu_[2]:current_state_.ay;
+            if(command_history_.empty()) command_history_.push_back({last_steer_cmd_,last_speed_cmd_});
+            while(command_history_.size()<5) command_history_.push_front(command_history_.front());
+            for(int i=0;i<5;++i){mppi_params_.residual_command_history[2*i]=command_history_[i][0];mppi_params_.residual_command_history[2*i+1]=command_history_[i][1];}
+        }
+        if(mppi_params_.dynamics_model==mppi::KINEMATIC_MLP_NO_IMU_RESIDUAL) {
+            if(command_history_.empty()) command_history_.push_back({last_steer_cmd_,last_speed_cmd_});
+            while(command_history_.size()<5) command_history_.push_front(command_history_.front());
+            for(int i=0;i<5;++i){mppi_params_.residual_command_history[2*i]=command_history_[i][0];mppi_params_.residual_command_history[2*i+1]=command_history_[i][1];}
+        }
+        if (mppi_params_.dynamics_model == mppi::KINEMATIC_RESIDUAL) {
+            const float wb=mppi_params_.l_f+mppi_params_.l_r;
+            const float beta=std::atan((mppi_params_.l_r/wb)*std::tan(last_steer_cmd_));
+            const float classic_v=std::min(mppi_params_.max_speed,std::max(mppi_params_.min_speed,last_speed_cmd_));
+            const float classic_w=current_state_.v*std::cos(beta)*std::tan(last_steer_cmd_)/wb;
+            std::array<float,11> raw={current_state_.v,current_state_.vy,current_state_.omega,
+                // The selected checkpoint's three IMU channels are effectively
+                // constant in the extracted training set (std was clipped to
+                // 1e-5). Keep them at the training mean; feeding odometry into
+                // those slots would create O(1e5) normalized outliers.
+                last_steer_cmd_,last_speed_cmd_,mppi::residual_weights::feature_mean[5],
+                mppi::residual_weights::feature_mean[6],mppi::residual_weights::feature_mean[7],
+                classic_v,classic_v*std::sin(beta),classic_w};
+            std::array<float,11> normalized{};
+            for(int i=0;i<11;++i) normalized[i]=(raw[i]-mppi::residual_weights::feature_mean[i])/
+                                                   mppi::residual_weights::feature_std[i];
+            residual_history_.push_back(normalized);
+            while(residual_history_.size()>RESIDUAL_HISTORY) residual_history_.pop_front();
+            std::vector<float> flat; flat.reserve(RESIDUAL_HISTORY*RESIDUAL_FEATURES);
+            const auto &pad=residual_history_.front();
+            for(size_t n=residual_history_.size();n<RESIDUAL_HISTORY;++n) flat.insert(flat.end(),pad.begin(),pad.end());
+            for(const auto &f:residual_history_) flat.insert(flat.end(),f.begin(),f.end());
+            solver_->set_residual_history(flat);
+        }
         solver_->update_params(mppi_params_);
         mppi::Control u = solver_->solve(current_state_);
         float next_v = current_state_.v + u.accel * mppi_params_.dt;
@@ -290,6 +460,8 @@ private:
         drive_msg.drive.speed                   = next_v;
         drive_msg.drive.acceleration            = u.accel;
         drive_pub_->publish(drive_msg);
+        last_steer_cmd_=u.steer; last_speed_cmd_=next_v;
+        command_history_.push_back({last_steer_cmd_,last_speed_cmd_});while(command_history_.size()>5)command_history_.pop_front();
 
         if (mppi_params_.visualize_candidates) { publish_path_visualization(); publish_mppi_trajectory(); }
 
@@ -308,7 +480,15 @@ private:
         msg.header.stamp = this->now(); msg.header.frame_id = "map";
         int T = solver_->get_T();
         msg.steer.reserve(T); msg.accel.reserve(T);
-        for (int t = 0; t < T; ++t) { msg.steer.push_back(oc[t].steer); msg.accel.push_back(oc[t].accel); }
+        msg.predicted_x.reserve(T); msg.predicted_y.reserve(T);
+        msg.predicted_yaw.reserve(T); msg.predicted_v.reserve(T);
+        msg.predicted_vy.reserve(T); msg.predicted_yaw_rate.reserve(T);
+        for (int t = 0; t < T; ++t) {
+            msg.steer.push_back(oc[t].steer); msg.accel.push_back(oc[t].accel);
+            msg.predicted_x.push_back(bt[t].x); msg.predicted_y.push_back(bt[t].y);
+            msg.predicted_yaw.push_back(bt[t].yaw); msg.predicted_v.push_back(bt[t].v);
+            msg.predicted_vy.push_back(bt[t].vy); msg.predicted_yaw_rate.push_back(bt[t].omega);
+        }
         append_best_traj_costs(bt, oc, msg);
         traj_pub_->publish(msg);
     }
@@ -381,6 +561,7 @@ private:
     rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr     left_bnd_sub_;
     rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr     right_bnd_sub_;
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;  // 단일 구독
+    rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_sub_;
 
     rclcpp::Publisher<ackermann_msgs::msg::AckermannDriveStamped>::SharedPtr drive_pub_;
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr       vis_pub_;
@@ -388,8 +569,25 @@ private:
 
     rclcpp::TimerBase::SharedPtr timer_;
 
-    std::string odom_topic_, drive_topic_, path_topic_;
+    std::string odom_topic_, drive_topic_, path_topic_, imu_topic_, dynamics_model_name_, residual_weights_path_,mlp_weights_path_;
     bool odom_received_ = false;
+    bool has_prev_odom_{false};
+    rclcpp::Time last_odom_stamp_{0, 0, RCL_ROS_TIME};
+    double last_odom_x_{0.0};
+    double last_odom_y_{0.0};
+    double last_odom_yaw_{0.0};
+    double control_rate_hz_{50.0};
+    double last_body_vx_{0.0};
+    float last_steer_cmd_{0.f}, last_speed_cmd_{0.f}, current_ax_{0.f};
+    std::deque<std::array<float,RESIDUAL_FEATURES>> residual_history_;
+    std::deque<std::array<float,2>> command_history_;
+    struct ImuSample { rclcpp::Time stamp; float wz,ax,ay; };
+    std::deque<ImuSample> imu_buffer_;
+    static constexpr std::size_t imu_buffer_capacity_=400;
+    std::array<float,3> aligned_imu_{0.f,0.f,0.f};
+    double imu_sync_max_age_s_{0.05};
+    float imu_ema_alpha_{0.25f};
+    bool imu_received_{false},aligned_imu_valid_{false},imu_ema_initialized_{false};
 };
 
 int main(int argc, char **argv) {

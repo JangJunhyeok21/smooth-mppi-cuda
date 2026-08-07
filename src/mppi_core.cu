@@ -1,12 +1,58 @@
 #include "cuda_mppi_controller/cuda_mppi_core.hpp"
+#include "cuda_mppi_controller/kinematic_residual_weights.hpp"
+#include "cuda_mppi_controller/kinematic_mlp_weights.hpp"
+#include "cuda_mppi_controller/kinematic_mlp_no_imu_weights.hpp"
 #include <cuda_runtime.h>
 #include <curand_kernel.h>
 #include <algorithm>
 #include <cmath>
 #include <iostream>
+#include <fstream>
+#include <stdexcept>
 
 namespace mppi
 {
+    __device__ float rw_enc_w_ih[288*11], rw_enc_w_hh[288*96], rw_enc_b_ih[288], rw_enc_b_hh[288];
+    __device__ float rw_dec_w_ih[288*8], rw_dec_w_hh[288*96], rw_dec_b_ih[288], rw_dec_b_hh[288];
+    __device__ float rw_head_w[3*96], rw_head_b[3];
+    __device__ float rw_feature_mean[11], rw_feature_std[11];
+    __device__ float mlp_w1[64*21],mlp_b1[64],mlp_w2[32*64],mlp_b2[32],mlp_w3[3*32],mlp_b3[3];
+    __device__ float mlp_feature_mean[11],mlp_feature_std[11];
+    __device__ float mlp_noimu_w1[64*18],mlp_noimu_b1[64],mlp_noimu_w2[32*64],mlp_noimu_b2[32],mlp_noimu_w3[3*32],mlp_noimu_b3[3];
+    __device__ float mlp_noimu_feature_mean[8],mlp_noimu_feature_std[8];
+
+    __device__ inline float sigmoidf_fast(float x) { return 1.f/(1.f+__expf(-x)); }
+
+    template<int INPUT>
+    __device__ void gru_step(const float *input, float *h, const float *wih,
+                             const float *whh, const float *bih, const float *bhh) {
+        float reset[RESIDUAL_HIDDEN], update[RESIDUAL_HIDDEN], candidate[RESIDUAL_HIDDEN];
+        for(int j=0;j<RESIDUAL_HIDDEN;++j) {
+            float ir=bih[j], iz=bih[RESIDUAL_HIDDEN+j], in=bih[2*RESIDUAL_HIDDEN+j];
+            float hr=bhh[j], hz=bhh[RESIDUAL_HIDDEN+j], hn=bhh[2*RESIDUAL_HIDDEN+j];
+            for(int i=0;i<INPUT;++i) {
+                ir += wih[j*INPUT+i]*input[i];
+                iz += wih[(RESIDUAL_HIDDEN+j)*INPUT+i]*input[i];
+                in += wih[(2*RESIDUAL_HIDDEN+j)*INPUT+i]*input[i];
+            }
+            for(int i=0;i<RESIDUAL_HIDDEN;++i) {
+                hr += whh[j*RESIDUAL_HIDDEN+i]*h[i];
+                hz += whh[(RESIDUAL_HIDDEN+j)*RESIDUAL_HIDDEN+i]*h[i];
+                hn += whh[(2*RESIDUAL_HIDDEN+j)*RESIDUAL_HIDDEN+i]*h[i];
+            }
+            reset[j]=sigmoidf_fast(ir+hr); update[j]=sigmoidf_fast(iz+hz);
+            candidate[j]=tanhf(in+reset[j]*hn);
+        }
+        for(int j=0;j<RESIDUAL_HIDDEN;++j) h[j]=(1.f-update[j])*candidate[j]+update[j]*h[j];
+    }
+
+    __global__ void encode_residual_history(const float *history, float *hidden) {
+        if(threadIdx.x||blockIdx.x) return;
+        for(int i=0;i<RESIDUAL_HIDDEN;++i) hidden[i]=0.f;
+        for(int t=0;t<RESIDUAL_HISTORY;++t)
+            gru_step<RESIDUAL_FEATURES>(history+t*RESIDUAL_FEATURES,hidden,
+                rw_enc_w_ih,rw_enc_w_hh,rw_enc_b_ih,rw_enc_b_hh);
+    }
     __host__ __device__ inline float fast_cos(float x) {
     #ifdef __CUDA_ARCH__
         return __cosf(x); 
@@ -38,7 +84,108 @@ namespace mppi
         return angle;
     }
 
-    __host__ __device__ State update_dynamics(const State &s, const Control &u, const Params &p)
+    __host__ __device__ State update_kinematic(const State &s, const Control &u, const Params &p)
+    {
+        const float wheelbase = p.l_f + p.l_r;
+        // Identified mapping from /drive steering command to effective tire
+        // angle.  The selected checkpoint was trained with the no-slip branch.
+        const float steer = fminf(.55f,fmaxf(-.55f,
+            p.kinematic_steer_scale*u.steer+p.kinematic_steer_bias));
+        const float beta = p.kinematic_no_slip ? 0.f :
+            atanf((p.l_r / wheelbase) * tanf(steer));
+        const float next_v = fminf(p.max_speed, fmaxf(p.min_speed, s.v + u.accel * p.dt));
+        const float yaw_rate = s.v * fast_cos(beta) * tanf(steer) / wheelbase;
+
+        State next_s{};
+        next_s.x = s.x + s.v * fast_cos(s.yaw + beta) * p.dt;
+        next_s.y = s.y + s.v * fast_sin(s.yaw + beta) * p.dt;
+        next_s.yaw = angle_normalize(s.yaw + yaw_rate * p.dt);
+        next_s.v = next_v;
+        next_s.vy = next_v * fast_sin(beta);
+        next_s.omega = yaw_rate;
+        next_s.ay = next_v * yaw_rate;
+        next_s.slip_angle = beta;
+        return next_s;
+    }
+
+    __device__ State update_kinematic_residual(const State &s, const Control &u,
+                                                const Params &p, float *hidden)
+    {
+        State classic_s=update_kinematic(s,u,p);
+        const float speed_cmd=fminf(p.max_speed,fmaxf(p.min_speed,s.v+u.accel*p.dt));
+        const int norm_index[8]={0,1,2,3,4,8,9,10};
+        float raw[8]={s.v,s.vy,s.omega,u.steer,speed_cmd,
+                      classic_s.v,classic_s.vy,classic_s.omega};
+        float input[8];
+        for(int i=0;i<8;++i) input[i]=(raw[i]-rw_feature_mean[norm_index[i]])/
+                                      rw_feature_std[norm_index[i]];
+        gru_step<8>(input,hidden,rw_dec_w_ih,rw_dec_w_hh,rw_dec_b_ih,rw_dec_b_hh);
+        float correction[3];
+        const float scale[3]={8.f,8.f,30.f};
+        for(int o=0;o<3;++o){
+            float z=rw_head_b[o];
+            for(int i=0;i<RESIDUAL_HIDDEN;++i) z+=rw_head_w[o*RESIDUAL_HIDDEN+i]*hidden[i];
+            correction[o]=tanhf(z)*scale[o];
+        }
+        State next_s=classic_s;
+        next_s.v=classic_s.v+correction[0]*p.dt;
+        next_s.vy=classic_s.vy+correction[1]*p.dt;
+        next_s.omega=classic_s.omega+correction[2]*p.dt;
+        next_s.x=s.x+(next_s.v*fast_cos(s.yaw)-next_s.vy*fast_sin(s.yaw))*p.dt;
+        next_s.y=s.y+(next_s.v*fast_sin(s.yaw)+next_s.vy*fast_cos(s.yaw))*p.dt;
+        next_s.yaw=angle_normalize(s.yaw+next_s.omega*p.dt);
+        next_s.slip_angle=atan2f(next_s.vy,fabsf(next_s.v)+1e-5f);
+        next_s.ay=(next_s.vy-s.vy)/p.dt+next_s.v*next_s.omega;
+        return next_s;
+    }
+
+    __device__ State update_kinematic_mlp_residual(const State &s,const Control &u,
+                                                    const Params &p,float *command_history)
+    {
+        State classic_s=update_kinematic(s,u,p);
+        float speed_cmd=fminf(p.max_speed,fmaxf(p.min_speed,s.v+u.accel*p.dt));
+        float raw[21]={s.v,s.vy,s.omega,p.residual_imu[0],p.residual_imu[1],p.residual_imu[2],
+                       u.steer,speed_cmd,classic_s.v,classic_s.vy,classic_s.omega};
+        for(int i=0;i<10;++i) raw[11+i]=command_history[i];
+        const int ni[21]={0,1,2,5,6,7,3,4,8,9,10,3,4,3,4,3,4,3,4,3,4};
+        float in[21],h1[64],h2[32];
+        for(int i=0;i<21;++i) in[i]=(raw[i]-mlp_feature_mean[ni[i]])/mlp_feature_std[ni[i]];
+        for(int o=0;o<64;++o){float z=mlp_b1[o];for(int i=0;i<21;++i)z+=mlp_w1[o*21+i]*in[i];h1[o]=z*sigmoidf_fast(z);}
+        for(int o=0;o<32;++o){float z=mlp_b2[o];for(int i=0;i<64;++i)z+=mlp_w2[o*64+i]*h1[i];h2[o]=z*sigmoidf_fast(z);}
+        float corr[3],scale[3]={8.f,8.f,30.f};
+        for(int o=0;o<3;++o){float z=mlp_b3[o];for(int i=0;i<32;++i)z+=mlp_w3[o*32+i]*h2[i];corr[o]=tanhf(z)*scale[o];}
+        State n=classic_s;n.v+=corr[0]*p.dt;n.vy+=corr[1]*p.dt;n.omega+=corr[2]*p.dt;
+        n.x=s.x+(n.v*fast_cos(s.yaw)-n.vy*fast_sin(s.yaw))*p.dt;
+        n.y=s.y+(n.v*fast_sin(s.yaw)+n.vy*fast_cos(s.yaw))*p.dt;n.yaw=angle_normalize(s.yaw+n.omega*p.dt);
+        n.slip_angle=atan2f(n.vy,fabsf(n.v)+1e-5f);n.ay=(n.vy-s.vy)/p.dt+n.v*n.omega;
+        for(int i=0;i<8;++i)command_history[i]=command_history[i+2];command_history[8]=u.steer;command_history[9]=speed_cmd;
+        return n;
+    }
+
+    __device__ State update_kinematic_mlp_no_imu_residual(const State &s,const Control &u,
+                                                           const Params &p,float *command_history)
+    {
+        State classic_s=update_kinematic(s,u,p);
+        float speed_cmd=fminf(p.max_speed,fmaxf(p.min_speed,s.v+u.accel*p.dt));
+        float raw[18]={s.v,s.vy,s.omega,u.steer,speed_cmd,
+                       classic_s.v,classic_s.vy,classic_s.omega};
+        for(int i=0;i<10;++i) raw[8+i]=command_history[i];
+        const int ni[18]={0,1,2,3,4,5,6,7,3,4,3,4,3,4,3,4,3,4};
+        float in[18],h1[64],h2[32];
+        for(int i=0;i<18;++i) in[i]=(raw[i]-mlp_noimu_feature_mean[ni[i]])/mlp_noimu_feature_std[ni[i]];
+        for(int o=0;o<64;++o){float z=mlp_noimu_b1[o];for(int i=0;i<18;++i)z+=mlp_noimu_w1[o*18+i]*in[i];h1[o]=z*sigmoidf_fast(z);}
+        for(int o=0;o<32;++o){float z=mlp_noimu_b2[o];for(int i=0;i<64;++i)z+=mlp_noimu_w2[o*64+i]*h1[i];h2[o]=z*sigmoidf_fast(z);}
+        float corr[3],scale[3]={8.f,8.f,30.f};
+        for(int o=0;o<3;++o){float z=mlp_noimu_b3[o];for(int i=0;i<32;++i)z+=mlp_noimu_w3[o*32+i]*h2[i];corr[o]=tanhf(z)*scale[o];}
+        State n=classic_s;n.v+=corr[0]*p.dt;n.vy+=corr[1]*p.dt;n.omega+=corr[2]*p.dt;
+        n.x=s.x+(n.v*fast_cos(s.yaw)-n.vy*fast_sin(s.yaw))*p.dt;
+        n.y=s.y+(n.v*fast_sin(s.yaw)+n.vy*fast_cos(s.yaw))*p.dt;n.yaw=angle_normalize(s.yaw+n.omega*p.dt);
+        n.slip_angle=atan2f(n.vy,fabsf(n.v)+1e-5f);n.ay=(n.vy-s.vy)/p.dt+n.v*n.omega;
+        for(int i=0;i<8;++i)command_history[i]=command_history[i+2];command_history[8]=u.steer;command_history[9]=speed_cmd;
+        return n;
+    }
+
+    __host__ __device__ State update_legacy_hybrid(const State &s, const Control &u, const Params &p)
     {
         float px = s.x; float py = s.y; float yaw = s.yaw;
         float vel = s.v; float omega = s.omega; float slip_angle = s.slip_angle;
@@ -114,6 +261,22 @@ namespace mppi
         return next_s;
     }
 
+    __host__ __device__ State update_dynamics(const State &s, const Control &u, const Params &p)
+    {
+        if (p.dynamics_model == KINEMATIC) {
+            return update_kinematic(s, u, p);
+        }
+
+        // The trained GRU residual is intentionally not approximated here. Its
+        // 96-dimensional recurrent state must be owned by each CUDA rollout;
+        // silently calling the kinematic model would make YAML claim a model
+        // that is not actually running.
+        if (p.dynamics_model == KINEMATIC_RESIDUAL) {
+            return update_kinematic(s, u, p);
+        }
+        return update_legacy_hybrid(s, u, p);
+    }
+
     __device__ float compute_cost_cuda(
         const State &s,
         const float *ref_xs, const float *ref_ys, const float *ref_yaws, int path_len,
@@ -150,11 +313,35 @@ namespace mppi
         if (nearest_idx == -1) nearest_idx = start_search;
         *last_idx = nearest_idx; 
 
-        // 1. Reference Tracking Cost
-        float dist_error = min_dist_sq;
+        // 1. MPCC path errors
+        // 논문의 contouring/lag error를 경로 접선 좌표계에 투영한다.
+        // contour는 racing line 탐색을 허용하도록 작게, lag는 기하 progress가
+        // 실제 차량 위치보다 앞서 나가는 것을 막도록 상대적으로 크게 둔다.
+        float dx_ref = s.x - ref_xs[nearest_idx];
+        float dy_ref = s.y - ref_ys[nearest_idx];
+        float ref_cos = fast_cos(ref_yaws[nearest_idx]);
+        float ref_sin = fast_sin(ref_yaws[nearest_idx]);
+        float contour_error = -ref_sin * dx_ref + ref_cos * dy_ref;
+        float lag_error = ref_cos * dx_ref + ref_sin * dy_ref;
+        float dist_error = min_dist_sq;  // 이전 설정과의 호환용
+        float path_cost = p.q_dist * dist_error
+                        + p.q_contour * contour_error * contour_error
+                        + p.q_lag * lag_error * lag_error;
 
-        // 2. 속도 보상
-        float vel_cost = - (p.q_v * 0.2f) * (s.v * fast_cos(s.yaw - ref_yaws[nearest_idx]));    //전체적인 직진성 유도
+        // 2. 랩타임 속도 비용
+        // 경로 접선 방향 속도는 보상하되 target_speed를 넘는 속도는 제곱 비용으로
+        // 억제한다. 기존 구현은 target_speed를 전혀 사용하지 않아 max_speed까지
+        // 무조건 가속하는 것이 유리했다.
+        float forward_v = s.v * fast_cos(s.yaw - ref_yaws[nearest_idx]);
+        float overspeed = fmaxf(0.0f, s.v - p.target_speed);
+        float vel_cost = -(p.q_v * 0.2f) * forward_v
+                       +  p.q_v * overspeed * overspeed;
+
+        // hard fault(1.3 g)에 닿기 전에 부드럽게 감속 후보를 선택하게 한다.
+        // q_lat_g는 기존에는 파라미터만 있고 실제 rollout 비용에는 빠져 있었다.
+        constexpr float LAT_G_SOFT_LIMIT = 9.81f;  // 1.0 g
+        float lat_g_excess = fmaxf(0.0f, fabsf(s.ay) - LAT_G_SOFT_LIMIT);
+        float lat_g_cost = p.q_lat_g * 0.02f * lat_g_excess * lat_g_excess;
 
         // 4. Control Input Cost
         float d_steer = u.steer - u_prev.steer;
@@ -191,7 +378,50 @@ namespace mppi
             }
         }
 
-        return p.q_dist * dist_error + vel_cost + steer_cost + rate_cost + boundary_cost + obs_cost;
+        return path_cost + vel_cost + lat_g_cost
+             + steer_cost + rate_cost + boundary_cost + obs_cost;
+    }
+
+    // 두 경로 인덱스 사이의 실제 중심선 arc length. 경로점 개수 대신 m 단위
+    // 진행도를 쓰므로 centerline CSV의 샘플 간격이 바뀌어도 비용 의미가 유지된다.
+    __device__ float compute_progress_distance(
+        const State &start_state, const State &end_state,
+        int start_idx, int end_idx,
+        const float *ref_xs, const float *ref_ys, const float *ref_yaws,
+        int path_len)
+    {
+        if (path_len <= 1) return 0.0f;
+
+        int steps = end_idx - start_idx;
+        if (steps < 0) steps += path_len;
+        // 한 번의 1초 horizon에서 반 바퀴 이상 순간이동한 인덱스는 역주행/오탐이다.
+        if (steps > path_len / 2) return 0.0f;
+
+        float distance = 0.0f;
+        int prev = start_idx;
+        for (int n = 0; n < steps; ++n) {
+            int next = prev + 1;
+            if (next >= path_len) next = 0;
+            float dx = ref_xs[next] - ref_xs[prev];
+            float dy = ref_ys[next] - ref_ys[prev];
+            distance += sqrtf(dx * dx + dy * dy);
+            prev = next;
+        }
+        // 최근접 waypoint 사이의 sub-sample 진행도를 접선 투영으로 보간한다.
+        // 이 항이 없으면 약 0.1 m마다 비용이 계단식으로 변한다.
+        float start_dx = start_state.x - ref_xs[start_idx];
+        float start_dy = start_state.y - ref_ys[start_idx];
+        float end_dx = end_state.x - ref_xs[end_idx];
+        float end_dy = end_state.y - ref_ys[end_idx];
+        float start_lag = start_dx * fast_cos(ref_yaws[start_idx])
+                        + start_dy * fast_sin(ref_yaws[start_idx]);
+        float end_lag = end_dx * fast_cos(ref_yaws[end_idx])
+                      + end_dy * fast_sin(ref_yaws[end_idx]);
+
+        // 투영 오차가 비정상적으로 큰 경우 progress 보상을 악용하지 못하게 제한.
+        start_lag = fminf(fmaxf(start_lag, -0.15f), 0.15f);
+        end_lag = fminf(fmaxf(end_lag, -0.15f), 0.15f);
+        return fmaxf(0.0f, distance + end_lag - start_lag);
     }
     
     // [수정된 함수] O(N) 바운더리 탐색을 대체하는 O(1) 횡방향 오차 기반 거리 연산
@@ -263,6 +493,7 @@ namespace mppi
         const float *ref_xs, const float *ref_ys, const float *ref_yaws, int path_len,
         const float *left_bnd_xs, const float *left_bnd_ys,
         const float *right_bnd_xs, const float *right_bnd_ys,
+        const float *residual_hidden,
         int bnd_len,
         int K, int T, int start_path_idx)
     {
@@ -276,6 +507,12 @@ namespace mppi
         int local_path_idx = start_path_idx;
         int initial_path_idx = start_path_idx; 
         bool is_fault = false;
+        float gru_hidden[RESIDUAL_HIDDEN];
+        float mlp_command_history[10];
+        if(p.dynamics_model==KINEMATIC_RESIDUAL)
+            for(int i=0;i<RESIDUAL_HIDDEN;++i) gru_hidden[i]=residual_hidden[i];
+        if(p.dynamics_model==KINEMATIC_MLP_RESIDUAL || p.dynamics_model==KINEMATIC_MLP_NO_IMU_RESIDUAL)
+            for(int i=0;i<10;++i) mlp_command_history[i]=p.residual_command_history[i];
         
         float x_steer_prev1 = 0.0f, x_steer_prev2 = 0.0f;
         float y_steer_prev1 = 0.0f, y_steer_prev2 = 0.0f;
@@ -329,7 +566,13 @@ namespace mppi
 
             current_action = u_clamped; 
 
-            x = update_dynamics(x, u_clamped, p);
+            if(p.dynamics_model==KINEMATIC_RESIDUAL)
+                x=update_kinematic_residual(x,u_clamped,p,gru_hidden);
+            else if(p.dynamics_model==KINEMATIC_MLP_RESIDUAL)
+                x=update_kinematic_mlp_residual(x,u_clamped,p,mlp_command_history);
+            else if(p.dynamics_model==KINEMATIC_MLP_NO_IMU_RESIDUAL)
+                x=update_kinematic_mlp_no_imu_residual(x,u_clamped,p,mlp_command_history);
+            else x=update_dynamics(x,u_clamped,p);
             states[idx] = x;
             controls[idx] = u_clamped; 
 
@@ -349,15 +592,6 @@ namespace mppi
                 // 이로 인해 어차피 박을 상황이면 풀브레이킹+조향으로 1틱이라도 더 버티는 샘플의 가중치가 높아집니다.
                 total_cost += 10000.0f - (float)t * 50.0f; 
                 
-                // 충돌했더라도, 그때까지 더 멀리 전진했다면 보상을 줍니다.
-                if (path_len > 0) {
-                    int progress = local_path_idx - initial_path_idx;
-                    if (progress < -path_len / 2) progress += path_len; 
-                    int max_possible_progress = T + 10; 
-                    progress = max(0, min(progress, max_possible_progress));
-                    total_cost -= p.q_v * (float)progress * 5.0f; 
-                }
-
                 // 현재 틱(t)에서 사용한 제어 입력(u)의 조향각을 가져옵니다.
                 float survival_steer = controls[k * T + t].steer * 0.1; 
                 // 속도는 0.0f (또는 마찰원 한계 내의 급제동 -1.0f)로 설정하고 조향은 살립니다.
@@ -380,17 +614,19 @@ namespace mppi
 
             // 종점 진행도 보상
             if (t == T - 1 && path_len > 0) {
-                int progress = local_path_idx - initial_path_idx;
-                if (progress < -path_len / 2) progress += path_len; 
-                int max_possible_progress = T + 10; 
-                progress = max(0, min(progress, max_possible_progress));
+                float progress_m = compute_progress_distance(
+                    start_state, x, initial_path_idx, local_path_idx,
+                    ref_xs, ref_ys, ref_yaws, path_len);
                 
-                // 1. 기존 로직: 무사히 완주한 경우 진행 칸수에 비례해 보상
-                total_cost -= p.q_progress * (float)progress; 
+                // 실제 진행 거리[m]를 직접 최대화한다. 이것이 랩타임 최소화의
+                // receding-horizon 근사 목적이다.
+                total_cost -= p.q_progress * progress_m;
 
-                // 2. 탈출 속도 강력 보상 (Out-In-Out 유도)
-                // 속도의 제곱을 사용하여 코너 탈출 시 고속을 유지하는 궤적에 압도적인 가산점을 줍니다.
-                total_cost -= p.q_escape_vel * (x.v * x.v); 
+                // 종단 속도는 경로 방향 성분만 선형 보상한다. 기존 v^2 보상은
+                // 진행 방향과 무관한 고속 슬라이드까지 과도하게 선호했다.
+                float terminal_forward_v = x.v * fast_cos(
+                    x.yaw - ref_yaws[local_path_idx]);
+                total_cost -= p.q_escape_vel * fmaxf(0.0f, terminal_forward_v);
             }
 
             last_u = u_clamped;
@@ -418,7 +654,22 @@ namespace mppi
         params_.filter_coeffs = compute_butterworth_coeffs(3.0f, params_.dt);
         h_states_.resize(K * T);
         h_controls_.resize(K * T);
-        h_prev_controls_.resize(T, {0.0f, 0.0f});
+        // A zero steering command is not physically neutral when the
+        // identified command mapping contains a bias.  Starting every rollout
+        // at zero therefore makes the car curve while the low-pass exploration
+        // noise is still too small to compensate.  Warm-start at the command
+        // whose effective tire angle is zero and use a modest acceleration so
+        // the first horizon can optimize a moving trajectory immediately.
+        float neutral_steer = 0.0f;
+        if (fabsf(params_.kinematic_steer_scale) > 1.0e-6f) {
+            neutral_steer = -params_.kinematic_steer_bias /
+                            params_.kinematic_steer_scale;
+        }
+        neutral_steer = fminf(params_.max_steer,
+                              fmaxf(-params_.max_steer, neutral_steer));
+        const float initial_accel =
+            (params_.dynamics_model == KINEMATIC) ? 1.0f : 0.0f;
+        h_prev_controls_.resize(T, {neutral_steer, initial_accel});
         h_costs_.resize(K);
         h_weights_.resize(K);
         allocate_cuda_memory();
@@ -432,6 +683,15 @@ namespace mppi
         CUDA_CHECK(cudaMalloc(&d_prev_controls_, T_ * sizeof(Control)));
         CUDA_CHECK(cudaMalloc(&d_costs_, K_ * sizeof(float)));
         CUDA_CHECK(cudaMalloc(&d_rng_states_, K_ * T_ * sizeof(curandState)));
+        CUDA_CHECK(cudaMalloc(&d_residual_history_, RESIDUAL_HISTORY*RESIDUAL_FEATURES*sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&d_residual_hidden_, RESIDUAL_HIDDEN*sizeof(float)));
+        CUDA_CHECK(cudaMemset(d_residual_history_,0,RESIDUAL_HISTORY*RESIDUAL_FEATURES*sizeof(float)));
+        CUDA_CHECK(cudaMemcpyToSymbol(rw_feature_mean,residual_weights::feature_mean,sizeof(residual_weights::feature_mean)));
+        CUDA_CHECK(cudaMemcpyToSymbol(rw_feature_std,residual_weights::feature_std,sizeof(residual_weights::feature_std)));
+        CUDA_CHECK(cudaMemcpyToSymbol(mlp_feature_mean,mlp_residual_weights::feature_mean,sizeof(mlp_residual_weights::feature_mean)));
+        CUDA_CHECK(cudaMemcpyToSymbol(mlp_feature_std,mlp_residual_weights::feature_std,sizeof(mlp_residual_weights::feature_std)));
+        CUDA_CHECK(cudaMemcpyToSymbol(mlp_noimu_feature_mean,mlp_no_imu_residual_weights::feature_mean,sizeof(mlp_no_imu_residual_weights::feature_mean)));
+        CUDA_CHECK(cudaMemcpyToSymbol(mlp_noimu_feature_std,mlp_no_imu_residual_weights::feature_std,sizeof(mlp_no_imu_residual_weights::feature_std)));
         
         int max_path = 1000;
         CUDA_CHECK(cudaMalloc(&d_ref_xs_, max_path * sizeof(float)));
@@ -452,6 +712,7 @@ namespace mppi
     void MPPISolver::cleanup_cuda_memory() {
         cudaFree(d_states_); cudaFree(d_controls_); cudaFree(d_prev_controls_);
         cudaFree(d_costs_); cudaFree(d_rng_states_);
+        cudaFree(d_residual_history_); cudaFree(d_residual_hidden_);
         cudaFree(d_ref_xs_); cudaFree(d_ref_ys_); cudaFree(d_ref_yaws_);
         cudaFree(d_left_bnd_xs_); cudaFree(d_left_bnd_ys_);
         cudaFree(d_right_bnd_xs_); cudaFree(d_right_bnd_ys_);
@@ -461,6 +722,47 @@ namespace mppi
         params_ = p; 
         params_.filter_coeffs = compute_butterworth_coeffs(3.0f, params_.dt);
     }   
+
+    void MPPISolver::set_residual_history(const std::vector<float>& features) {
+        if(features.size()!=RESIDUAL_HISTORY*RESIDUAL_FEATURES)
+            throw std::invalid_argument("residual history must contain 50x11 normalized floats");
+        CUDA_CHECK(cudaMemcpy(d_residual_history_,features.data(),features.size()*sizeof(float),cudaMemcpyHostToDevice));
+    }
+
+    void MPPISolver::load_residual_weights(const std::string& path) {
+        std::ifstream file(path,std::ios::binary);
+        if(!file) throw std::runtime_error("cannot open residual weights: "+path);
+        std::vector<float> w(62211);
+        file.read(reinterpret_cast<char*>(w.data()),w.size()*sizeof(float));
+        if(file.gcount()!=static_cast<std::streamsize>(w.size()*sizeof(float)))
+            throw std::runtime_error("invalid residual weight file size: "+path);
+        size_t o=0;
+#define LOAD_RW(symbol,count) CUDA_CHECK(cudaMemcpyToSymbol(symbol,w.data()+o,(count)*sizeof(float))); o+=(count)
+        LOAD_RW(rw_enc_w_ih,288*11); LOAD_RW(rw_enc_w_hh,288*96); LOAD_RW(rw_enc_b_ih,288); LOAD_RW(rw_enc_b_hh,288);
+        LOAD_RW(rw_dec_w_ih,288*8); LOAD_RW(rw_dec_w_hh,288*96); LOAD_RW(rw_dec_b_ih,288); LOAD_RW(rw_dec_b_hh,288);
+        LOAD_RW(rw_head_w,3*96); LOAD_RW(rw_head_b,3);
+#undef LOAD_RW
+    }
+
+    void MPPISolver::load_mlp_residual_weights(const std::string& path) {
+        std::ifstream file(path,std::ios::binary);if(!file)throw std::runtime_error("cannot open MLP weights: "+path);
+        std::vector<float>w(3587);file.read(reinterpret_cast<char*>(w.data()),w.size()*sizeof(float));
+        if(file.gcount()!=static_cast<std::streamsize>(w.size()*sizeof(float)))throw std::runtime_error("invalid MLP weight file: "+path);
+        size_t o=0;
+#define LOAD_MLP(symbol,count) CUDA_CHECK(cudaMemcpyToSymbol(symbol,w.data()+o,(count)*sizeof(float)));o+=(count)
+        LOAD_MLP(mlp_w1,64*21);LOAD_MLP(mlp_b1,64);LOAD_MLP(mlp_w2,32*64);LOAD_MLP(mlp_b2,32);LOAD_MLP(mlp_w3,3*32);LOAD_MLP(mlp_b3,3);
+#undef LOAD_MLP
+    }
+
+    void MPPISolver::load_mlp_no_imu_residual_weights(const std::string& path) {
+        std::ifstream file(path,std::ios::binary);if(!file)throw std::runtime_error("cannot open no-IMU MLP weights: "+path);
+        std::vector<float>w(3395);file.read(reinterpret_cast<char*>(w.data()),w.size()*sizeof(float));
+        if(file.gcount()!=static_cast<std::streamsize>(w.size()*sizeof(float)))throw std::runtime_error("invalid no-IMU MLP weight file: "+path);
+        size_t o=0;
+#define LOAD_MLP_NOIMU(symbol,count) CUDA_CHECK(cudaMemcpyToSymbol(symbol,w.data()+o,(count)*sizeof(float)));o+=(count)
+        LOAD_MLP_NOIMU(mlp_noimu_w1,64*18);LOAD_MLP_NOIMU(mlp_noimu_b1,64);LOAD_MLP_NOIMU(mlp_noimu_w2,32*64);LOAD_MLP_NOIMU(mlp_noimu_b2,32);LOAD_MLP_NOIMU(mlp_noimu_w3,3*32);LOAD_MLP_NOIMU(mlp_noimu_b3,3);
+#undef LOAD_MLP_NOIMU
+    }
 
     void MPPISolver::set_reference_path(const std::vector<float> &xs, const std::vector<float> &ys,
                                         const std::vector<float> &yaws) {
@@ -502,12 +804,15 @@ namespace mppi
 
         int threadsPerBlock = 128;
         int blocksPerGrid = (K_ + threadsPerBlock - 1) / threadsPerBlock;
+        if(params_.dynamics_model==KINEMATIC_RESIDUAL)
+            encode_residual_history<<<1,1>>>(d_residual_history_,d_residual_hidden_);
 
         rollout_kernel<<<blocksPerGrid, threadsPerBlock>>>(
             d_states_, d_controls_, d_costs_, (curandState *)d_rng_states_,
             current_state, d_prev_controls_, params_,
             d_ref_xs_, d_ref_ys_, d_ref_yaws_, ref_path_len_,
-            d_left_bnd_xs_, d_left_bnd_ys_, d_right_bnd_xs_, d_right_bnd_ys_, bnd_len_, 
+            d_left_bnd_xs_, d_left_bnd_ys_, d_right_bnd_xs_, d_right_bnd_ys_,
+            d_residual_hidden_, bnd_len_,
             K_, T_, start_path_idx);
         
         CUDA_CHECK(cudaGetLastError());
@@ -566,11 +871,17 @@ namespace mppi
         h_prev_controls_[T_ - 1] = weighted_controls[T_ - 1];
 
         best_trajectory_.resize(T_);
-        State sim_state = current_state; 
-
-        for (int t = 0; t < T_; ++t) {
-            sim_state = update_dynamics(sim_state, weighted_controls[t], params_);
-            best_trajectory_[t] = sim_state;
+        State sim_state = current_state;
+        if((params_.dynamics_model==KINEMATIC_RESIDUAL || params_.dynamics_model==KINEMATIC_MLP_RESIDUAL || params_.dynamics_model==KINEMATIC_MLP_NO_IMU_RESIDUAL) && params_.visualize_candidates) {
+            // Host update_dynamics has no recurrent state. Use the actual
+            // residual CUDA rollout selected by minimum cost for visualization
+            // instead of drawing a misleading pure-kinematic trajectory.
+            for(int t=0;t<T_;++t) best_trajectory_[t]=h_states_[best_k_*T_+t];
+        } else {
+            for (int t = 0; t < T_; ++t) {
+                sim_state = update_dynamics(sim_state, weighted_controls[t], params_);
+                best_trajectory_[t] = sim_state;
+            }
         }
         return output;
     }

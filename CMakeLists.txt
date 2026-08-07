@@ -1,8 +1,11 @@
 cmake_minimum_required(VERSION 3.8)
 project(smppi_cuda_controller LANGUAGES C CXX CUDA)
 
-# [수정 1] GPU 연산 속도를 위해 반드시 Release 모드 사용
-set(CMAKE_BUILD_TYPE Release) 
+# colcon / VS Code tasks 에서 Debug 또는 Release 를 선택할 수 있도록
+# 사용자가 지정하지 않은 경우에만 Release 를 기본값으로 둔다.
+if(NOT CMAKE_BUILD_TYPE)
+  set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+endif()
 
 set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -34,16 +37,16 @@ find_package(ackermann_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(visualization_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
+find_package(sensor_msgs REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 # [수정 3] fastrtps_cpp 종속성 제거 (기본 typesupport가 알아서 처리함)
 find_package(std_msgs REQUIRED)
-find_package(f1_msgs REQUIRED)
 
 # CUDA 라이브러리 찾기
 find_package(CUDAToolkit REQUIRED)
 
 # 라이브러리 생성 (.cpp 대신 .cu 포함)
-add_library(smppi_lib
+add_library(smppi_lib STATIC
   src/mppi_core.cu
 )
 
@@ -90,7 +93,7 @@ ament_target_dependencies(smppi_node
   nav_msgs
   visualization_msgs
   geometry_msgs
-  f1_msgs
+  sensor_msgs
 )
 
 # 라이브러리 링크 (CUDA 링크)
@@ -115,8 +118,12 @@ ament_target_dependencies(path_publisher
   geometry_msgs
 )
 
-install(TARGETS smppi_node smppi_lib path_publisher
-  DESTINATION lib/${PROJECT_NAME})
+install(TARGETS smppi_node path_publisher
+  RUNTIME DESTINATION lib/${PROJECT_NAME})
+install(TARGETS smppi_lib
+  ARCHIVE DESTINATION lib
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION bin)
 
 install(DIRECTORY launch config data msg
   DESTINATION share/${PROJECT_NAME})

@@ -1,6 +1,12 @@
 std_msgs/Header header
 float32[] steer
 float32[] accel
+float32[] predicted_x
+float32[] predicted_y
+float32[] predicted_yaw
+float32[] predicted_v
+float32[] predicted_vy
+float32[] predicted_yaw_rate
 float32 dist_cost
 float32 vel_cost
 float32 steer_rate_cost

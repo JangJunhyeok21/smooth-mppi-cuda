@@ -1,23 +1,37 @@
 /**:
   ros__parameters:
+    # legacy_hybrid | kinematic | kinematic_residual | kinematic_mlp_residual | kinematic_mlp_no_imu_residual
+    # kinematic_residual은 아래 binary GRU checkpoint를 CUDA rollout 안에서 실행한다.
+    # Keep the controller rollout identical to the simulator plant. The MLP
+    # residual produced a persistent yaw-rate bias in closed-loop simulation.
+    dynamics_model: kinematic
+    residual_weights_path: /home/a/smooth-mppi-cuda/config/kinematic_residual_gru.bin
+    mlp_weights_path: /home/a/smooth-mppi-cuda/config/kinematic_mlp_no_imu.bin
+    # 아래 IMU 설정은 legacy kinematic_mlp_residual 선택 시에만 사용된다.
+    # 현재 no-IMU 모델에서는 IMU subscription 자체를 생성하지 않는다.
+    imu_topic: /imu/data
+    imu_sync_max_age_s: 0.05
+    imu_ema_alpha: 0.25
     # --- Limits ---
     max_steer: 0.4788        # rad
     min_accel: -8.0          # m/s^2
     max_accel: 8.5           # m/s^2
     min_speed: 0.5           # m/s
-    target_speed: 5.5        # m/s
-    max_speed: 2.0           # m/s
+    target_speed: 3.0        # m/s, Map1 안정 완주 우선 목표 속도
+    max_speed: 4.0           # m/s; simulator mppi_max_speed와 동일
 
     # --- Costs (최적화 결과 반영) ---
-    q_v: 1.0
-    q_dist: 0.0
+    q_v: 2.0
+    q_dist: 0.0             # legacy Euclidean path cost (MPCC에서는 0 유지)
+    q_contour: 0.6          # 횡방향 오차; 낮게 두어 racing line 탐색 허용
+    q_lag: 6.0              # 진행방향 오차; 연속 progress와 차량 위치 결합
     q_du: 0.2
     q_steer: 0.5
     q_collision: 300.0
     q_lat_g: 200.0
     collision_radius: 0.3
-    q_progress: 32.0  #36.0
-    q_escape_vel: 28.0  #32.0
+    q_progress: 220.0        # 실제 진행 거리[m] 보상
+    q_escape_vel: 18.0       # 종단 경로방향 속도[m/s] 보상(선형)
     
     # --- Obstacle Avoidance Params ---
     car_radius: 0.25
@@ -30,11 +44,16 @@
     max_accel_rate: 100.0    # m/s^3
     lambda: 15.0
     visualize_candidates: true
+    control_rate_hz: 50.0
     
     # --- Dynamic Model Params (Pacejka & Kinematics) ---
     mass: 3.74
     l_f: 0.163
     l_r: 0.161
+    # tiv_imu_bagdisjoint_kinematic_classic 식별 결과. l_f/l_r/mass는 학습 시 고정값.
+    kinematic_steer_scale: 1.1058064699   # Sa, current-MPPI rollout 재식별
+    kinematic_steer_bias: -0.0300696939   # Sb [rad]
+    kinematic_no_slip: true               # residual checkpoint 학습 조건(beta=0)
     I_z: 0.04712
     Cm0: 0.04                # 고속 감쇠용 모터 역기전력 계수
     
@@ -62,10 +81,9 @@
     E_r: 0.0597
 
     # --- Topics (공통 키) ---
-    odom_topic: /odom0
+    odom_topic: /ego_racecar/odom
     pose_topic: /mcl_pose
     velocity_topic: /odom
-    drive_topic: /ackermann_cmd0
+    drive_topic: /sim_drive
     path_topic: /mppi_target_path
     use_mcl_pose: false      # 시뮬레이터 구동 모드
-

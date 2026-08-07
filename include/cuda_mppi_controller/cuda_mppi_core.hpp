@@ -6,6 +6,7 @@
 #include <memory>
 #include <iostream>
 #include <cstdio>
+#include <string>
 
 #ifdef __CUDACC__
 #define HOST_DEVICE __host__ __device__
@@ -22,8 +23,19 @@
     } while (0)
 
 #define MAX_OBS 5 // 처리 가능한 최대 장애물 개수
+#define RESIDUAL_HISTORY 50
+#define RESIDUAL_FEATURES 11
+#define RESIDUAL_HIDDEN 96
 
 namespace mppi {
+
+enum DynamicsModel : int {
+    LEGACY_HYBRID = 0,
+    KINEMATIC = 1,
+    KINEMATIC_RESIDUAL = 2,
+    KINEMATIC_MLP_RESIDUAL = 3,
+    KINEMATIC_MLP_NO_IMU_RESIDUAL = 4,
+};
 
 struct alignas(16) ButterworthCoeffs {
     float b0, b1, b2, a1, a2;
@@ -47,6 +59,11 @@ struct alignas(8) Control {
 
 struct Params {
     float dt;
+
+    // Runtime-selectable rollout model (DynamicsModel).
+    int dynamics_model;
+    float residual_imu[3];
+    float residual_command_history[10];
     
     // Limits
     float max_steer;
@@ -58,6 +75,8 @@ struct Params {
     
     // Cost Weights
     float q_dist;
+    float q_contour;
+    float q_lag;
     float q_v;
     float q_du;
     float q_steer;
@@ -85,6 +104,9 @@ struct Params {
     // Dynamics
     float mass;
     float I_z;
+    float kinematic_steer_scale;
+    float kinematic_steer_bias;
+    bool kinematic_no_slip;
     float l_f;
     float l_r;
     float Cm0;
@@ -109,6 +131,10 @@ public:
     ~MPPISolver();
 
     void update_params(Params p);
+    void set_residual_history(const std::vector<float>& normalized_features);
+    void load_residual_weights(const std::string& path);
+    void load_mlp_residual_weights(const std::string& path);
+    void load_mlp_no_imu_residual_weights(const std::string& path);
     
     // 경로 및 바운더리 설정
     void set_reference_path(const std::vector<float>& xs, const std::vector<float>& ys,
@@ -155,6 +181,8 @@ private:
     Control* d_controls_;    
     Control* d_prev_controls_; 
     float* d_costs_;         
+    float* d_residual_history_;
+    float* d_residual_hidden_;
     
     float* d_ref_xs_;
     float* d_ref_ys_;

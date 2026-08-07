@@ -40,11 +40,11 @@ class MPPIOptimizer(Node):
             "params.yaml"
         )
         
-        self.odom_sub = self.create_subscription(Odometry, '/odom0', self.odom_callback, 10)
+        self.odom_sub = self.create_subscription(Odometry, '/ego_racecar/odom', self.odom_callback, 10)
         self.collision_sub = self.create_subscription(Bool, '/collision0', self.collision_callback, 10)
         
         self.init_pose_pub = self.create_publisher(PoseWithCovarianceStamped, '/initialpose', 10)
-        self.drive_pub = self.create_publisher(AckermannDriveStamped, '/ackermann_cmd0', 10)
+        self.drive_pub = self.create_publisher(AckermannDriveStamped, '/drive', 10)
         
         self.results = []
         self.current_run = 0

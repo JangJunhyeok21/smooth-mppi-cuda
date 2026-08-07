@@ -1,7 +1,5 @@
 # smppi_cuda_controller
 
-Simulator counterpart: [Ros2-F1tenth-Simulator — no-slip kinematic version](https://github.com/kms8527/Ros2-F1tenth-Simulator/tree/986fe88c7bb5e5c8506b0ad31d330875b2a3d66c)
-
 F1TENTH 자율주행을 위한 CUDA 가속 MPPI(Model Predictive Path Integral) 컨트롤러.  
 NVIDIA GPU에서 대규모 병렬 샘플링으로 실시간 궤적을 최적화하고 조향/가속 명령을 출력한다.
 
@@ -399,19 +397,53 @@ python3 model_tuning/test_mppi_sim_step.py
 command history와 action에 대해 CUDA MPPI와 simulator의
 `x,y,yaw,vx,vy,yaw_rate` 단일-step 출력이 허용 오차 안에서 같은지 확인한다.
 
-### Simulator IMU-free plant 선택
 
-실차 IMU로 학습한 21-input MLP를 simulator plant로 재귀 실행하면, MLP 출력에서 만든
-synthetic `ax/ay/yaw_rate`가 다음 MLP 입력으로 되먹임되어 진동할 수 있다. 현재 simulator는
-이 feedback을 제거한 18-input 모델을 사용한다.
+## 학습 요약
+[extract_training_data.py](/home/a/smooth-mppi-cuda/model_tuning/extract_training_data.py)
+bag 탐색, /drive 및 odom 정렬, 충돌 구간 제거, train/test 데이터 생성
 
-```yaml
-dynamics_model: kinematic_mlp
-mlp_weights_path: /home/a/smooth-mppi-cuda/config/kinematic_mlp_no_imu.bin
-```
+[visualize_driving_data.py](/home/a/smooth-mppi-cuda/model_tuning/visualize_driving_data.py)
+추출된 모든 bag/segment의 GT trajectory 시각화
 
-입력은 `[vx,vy,odom_yaw_rate,steer_cmd,speed_cmd,classic_next(3),과거 command(10)]`이다.
-여기서 `odom_yaw_rate`는 차량 상태이며, 제거된 값은 별도 IMU 채널
-`[imu_yaw_rate,imu_ax,imu_ay]`이다. MPPI controller rollout은 센서-aware 21-input 모델을
-계속 사용할 수 있고, simulator plant와 controller 내부 prediction model이 반드시 같은
-checkpoint일 필요는 없다.
+[train_model.py](/home/a/smooth-mppi-cuda/model_tuning/train_model.py)
+kinematic_noimu 또는 dynamic_imu residual MLP 학습
+
+[evaluate_model.py](/home/a/smooth-mppi-cuda/model_tuning/evaluate_model.py)
+trajectory, velocity, yaw-rate 오차와 best/median/worst 시각화
+
+학습 모델을 CUDA MPPI 에 추가
+[import_model_to_mppi.py](/home/a/smooth-mppi-cuda/model_tuning/import_model_to_mppi.py)
+
+python model_tuning/extract_training_data.py BAG_ROOT \
+  -o model_tuning/data/training_data.npz
+
+python model_tuning/visualize_driving_data.py \
+  model_tuning/data/training_data.npz \
+  -o model_tuning/results/dataset
+
+python model_tuning/train_model.py \
+  model_tuning/data/training_data.npz \
+  -o model_tuning/results/kinematic_noimu \
+  --model kinematic_noimu \
+  --yaw-target odom
+
+python model_tuning/evaluate_model.py \
+  model_tuning/results/kinematic_noimu \
+  -o model_tuning/results/kinematic_noimu/visualization
+
+python model_tuning/import_model_to_mppi.py \
+  model_tuning_utils/ifac0807_strict_kinematic_noimu_samebag \
+  --name ifac0807_strict_noimu \
+  --activate
+(하는 역할 :
+model.pt의 MLP weight를 CUDA용 .bin으로 변환
+normalization.npz의 평균·표준편차를 같은 .bin 뒤에 저장
+모델 종류를 metrics.json에서 자동 판별
+--activate 사용 시 config/params.yaml의 다음 항목 자동 변경dynamics_model
+해당 모델의 weights path)
+
+현재 runtime binary 형식은 `[MLP weights][feature mean][feature std]`이다.
+MPPI 노드가 시작될 때 weight와 정규화 변수를 함께 GPU 메모리로 읽으므로,
+새 모델을 학습·변환한 뒤에는 `colcon build`가 필요 없다. `.bin`을 새로 만들고
+`params.yaml`의 경로를 변경한 다음 노드만 재시작하면 된다. 이 runtime loader를
+처음 도입하거나 C++/CUDA 소스를 변경한 경우에만 한 번 빌드한다.

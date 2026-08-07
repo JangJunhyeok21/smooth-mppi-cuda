@@ -2,16 +2,13 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 from ament_index_python.packages import get_package_share_directory
 import os
 
 def generate_launch_description():
     map_name = "map1"
     
-    # F1TENTH simulator 기본 실행 모드
-    is_simulation = True
-
-
     default_param_file = os.path.join(
         get_package_share_directory("smppi_cuda_controller"),
         "config",
@@ -27,22 +24,16 @@ def generate_launch_description():
     )
     centerline_csv = os.path.join(data_dir, f"{map_name}_centerline.csv")
 
-    if is_simulation:
-        controller_overrides = {
-            "use_mcl_pose": False,
-            "odom_topic": "/ego_racecar/odom",
-            "drive_topic": "/sim_drive",
-            "num_samples": 10000,            # 데스크톱(시뮬)은 10000개
-            "visualize_candidates": True,    # CPU <-> GPU 메모리 복사 발생
-        }
-    else:
-        controller_overrides = {
-            "use_mcl_pose": True,
-            "odom_topic": "/ekf_odom",
-            "drive_topic": "/drive",
-            "num_samples": 10000,             # 🚨 Jetson Nano 최적화 (5000개)
-            "visualize_candidates": True,   # 🚨 GPU 연산 결과(h_states)의 호스트 복사 원천 차단
-        }
+    # Defaults retain simulator behavior. Real-car topics can be selected at
+    # launch time without editing this file.
+    controller_overrides = {
+        "odom_topic": LaunchConfiguration("odom_topic"),
+        "drive_topic": LaunchConfiguration("drive_topic"),
+        "imu_topic": LaunchConfiguration("imu_topic"),
+        "num_samples": ParameterValue(LaunchConfiguration("num_samples"), value_type=int),
+        "visualize_candidates": ParameterValue(
+            LaunchConfiguration("visualize_candidates"), value_type=bool),
+    }
     
     return LaunchDescription(
         [
@@ -51,6 +42,11 @@ def generate_launch_description():
                 default_value=default_param_file,
                 description="Path to the MPPI parameters YAML file",
             ),
+            DeclareLaunchArgument("odom_topic", default_value="/ego_racecar/odom"),
+            DeclareLaunchArgument("drive_topic", default_value="/sim_drive"),
+            DeclareLaunchArgument("imu_topic", default_value="/imu/data"),
+            DeclareLaunchArgument("num_samples", default_value="10000"),
+            DeclareLaunchArgument("visualize_candidates", default_value="true"),
             Node(
                 package="smppi_cuda_controller",
                 executable="path_publisher",

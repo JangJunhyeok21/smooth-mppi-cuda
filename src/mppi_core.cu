@@ -2,6 +2,8 @@
 #include "cuda_mppi_controller/kinematic_residual_weights.hpp"
 #include "cuda_mppi_controller/kinematic_mlp_weights.hpp"
 #include "cuda_mppi_controller/kinematic_mlp_no_imu_weights.hpp"
+#include "cuda_mppi_controller/kinematic_noimu_direct_weights.hpp"
+#include "cuda_mppi_controller/dynamic_imu_recursive_weights.hpp"
 #include <cuda_runtime.h>
 #include <curand_kernel.h>
 #include <algorithm>
@@ -20,6 +22,10 @@ namespace mppi
     __device__ float mlp_feature_mean[11],mlp_feature_std[11];
     __device__ float mlp_noimu_w1[64*18],mlp_noimu_b1[64],mlp_noimu_w2[32*64],mlp_noimu_b2[32],mlp_noimu_w3[3*32],mlp_noimu_b3[3];
     __device__ float mlp_noimu_feature_mean[8],mlp_noimu_feature_std[8];
+    __device__ float knd_w1[64*18],knd_b1[64],knd_w2[32*64],knd_b2[32],knd_w3[3*32],knd_b3[3];
+    __device__ float knd_mean[18],knd_std[18];
+    __device__ float dir_w1[64*20],dir_b1[64],dir_w2[32*64],dir_b2[32],dir_w3[3*32],dir_b3[3];
+    __device__ float dir_mean[20],dir_std[20];
 
     __device__ inline float sigmoidf_fast(float x) { return 1.f/(1.f+__expf(-x)); }
 
@@ -101,6 +107,7 @@ namespace mppi
         next_s.y = s.y + s.v * fast_sin(s.yaw + beta) * p.dt;
         next_s.yaw = angle_normalize(s.yaw + yaw_rate * p.dt);
         next_s.v = next_v;
+        next_s.ax = u.accel;
         next_s.vy = next_v * fast_sin(beta);
         next_s.omega = yaw_rate;
         next_s.ay = next_v * yaw_rate;
@@ -185,6 +192,56 @@ namespace mppi
         return n;
     }
 
+    template<int N>
+    __device__ void split_mlp(const float *raw,const float *mean,const float *std,
+                              const float *w1,const float *b1,const float *w2,const float *b2,
+                              const float *w3,const float *b3,float *out)
+    {
+        float in[N],h1[64],h2[32];
+        for(int i=0;i<N;++i)in[i]=(raw[i]-mean[i])/std[i];
+        for(int o=0;o<64;++o){float z=b1[o];for(int i=0;i<N;++i)z+=w1[o*N+i]*in[i];h1[o]=z*sigmoidf_fast(z);}
+        for(int o=0;o<32;++o){float z=b2[o];for(int i=0;i<64;++i)z+=w2[o*64+i]*h1[i];h2[o]=z*sigmoidf_fast(z);}
+        const float scale[3]={8.f,8.f,30.f};
+        for(int o=0;o<3;++o){float z=b3[o];for(int i=0;i<32;++i)z+=w3[o*32+i]*h2[i];out[o]=tanhf(z)*scale[o];}
+    }
+
+    __device__ State update_kinematic_noimu_direct(const State &s,const Control &u,
+                                                    const Params &p,float *history)
+    {
+        const float speed_cmd=fminf(p.max_speed,fmaxf(p.min_speed,u.accel));
+        const float steer=fminf(.55f,fmaxf(-.55f,p.kinematic_steer_scale*u.steer+p.kinematic_steer_bias));
+        const float base_ax=fminf(p.max_accel,fmaxf(p.min_accel,p.speed_servo_kp*(speed_cmd-s.v)));
+        const float base_v=fminf(p.max_speed,fmaxf(p.min_speed,s.v+base_ax*p.dt));
+        const float base_w=s.v*tanf(steer)/(p.l_f+p.l_r);
+        float raw[18]={s.v,s.vy,s.omega,u.steer,speed_cmd,base_v,0.f,base_w};
+        for(int i=0;i<10;++i)raw[8+i]=history[i];
+        float corr[3];split_mlp<18>(raw,knd_mean,knd_std,knd_w1,knd_b1,knd_w2,knd_b2,knd_w3,knd_b3,corr);
+        State n=s;n.v=base_v+corr[0]*p.dt;n.vy=0.f;n.omega=base_w+corr[2]*p.dt;
+        n.ax=(n.v-s.v)/p.dt;n.ay=(n.vy-s.vy)/p.dt+n.v*n.omega;
+        n.x=s.x+(n.v*fast_cos(s.yaw)-n.vy*fast_sin(s.yaw))*p.dt;
+        n.y=s.y+(n.v*fast_sin(s.yaw)+n.vy*fast_cos(s.yaw))*p.dt;n.yaw=angle_normalize(s.yaw+n.omega*p.dt);
+        n.slip_angle=atan2f(n.vy,fabsf(n.v)+1e-5f);
+        for(int i=0;i<8;++i)history[i]=history[i+2];history[8]=u.steer;history[9]=speed_cmd;return n;
+    }
+
+    __device__ State update_dynamic_imu_recursive(const State &s,const Control &u,
+                                                   const Params &p,float *history)
+    {
+        const float speed_cmd=fminf(p.max_speed,fmaxf(p.min_speed,u.accel));
+        const float steer=fminf(.55f,fmaxf(-.55f,p.kinematic_steer_scale*u.steer+p.kinematic_steer_bias));
+        const float base_ax=fminf(p.max_accel,fmaxf(p.min_accel,p.speed_servo_kp*(speed_cmd-s.v)));
+        const float base_w=s.v*tanf(steer)/(p.l_f+p.l_r),base_ay=s.v*base_w;
+        float raw[20]={s.v,s.vy,s.omega,s.ax,s.ay,u.steer,speed_cmd,base_ax,base_ay,base_w};
+        for(int i=0;i<10;++i)raw[10+i]=history[i];
+        float pred[3];split_mlp<20>(raw,dir_mean,dir_std,dir_w1,dir_b1,dir_w2,dir_b2,dir_w3,dir_b3,pred);
+        State n=s;n.ax=pred[0];n.ay=pred[1];n.omega=pred[2];
+        n.v=s.v+(n.ax+s.vy*s.omega)*p.dt;n.vy=s.vy+(n.ay-s.v*s.omega)*p.dt;
+        n.x=s.x+(n.v*fast_cos(s.yaw)-n.vy*fast_sin(s.yaw))*p.dt;
+        n.y=s.y+(n.v*fast_sin(s.yaw)+n.vy*fast_cos(s.yaw))*p.dt;n.yaw=angle_normalize(s.yaw+n.omega*p.dt);
+        n.slip_angle=atan2f(n.vy,fabsf(n.v)+1e-5f);
+        for(int i=0;i<8;++i)history[i]=history[i+2];history[8]=u.steer;history[9]=speed_cmd;return n;
+    }
+
     __host__ __device__ State update_legacy_hybrid(const State &s, const Control &u, const Params &p)
     {
         float px = s.x; float py = s.y; float yaw = s.yaw;
@@ -213,6 +270,7 @@ namespace mppi
             
             // MPPI 비용 함수용 보조 변수
             next_s.vy = 0.0f; 
+            next_s.ax = dot_vel;
             next_s.ay = 0.0f;
 
             return next_s;
@@ -251,6 +309,7 @@ namespace mppi
         next_s.y = py + dot_y * p.dt;
         next_s.yaw = angle_normalize(yaw + dot_yaw * p.dt);
         next_s.v = vel + dot_vel * p.dt;
+        next_s.ax = dot_vel;
         next_s.omega = omega + dot_omega * p.dt;
         next_s.slip_angle = slip_angle + dot_slip * p.dt;
 
@@ -511,7 +570,8 @@ namespace mppi
         float mlp_command_history[10];
         if(p.dynamics_model==KINEMATIC_RESIDUAL)
             for(int i=0;i<RESIDUAL_HIDDEN;++i) gru_hidden[i]=residual_hidden[i];
-        if(p.dynamics_model==KINEMATIC_MLP_RESIDUAL || p.dynamics_model==KINEMATIC_MLP_NO_IMU_RESIDUAL)
+        if(p.dynamics_model==KINEMATIC_MLP_RESIDUAL || p.dynamics_model==KINEMATIC_MLP_NO_IMU_RESIDUAL ||
+           p.dynamics_model==KINEMATIC_NO_IMU_DIRECT_SPEED || p.dynamics_model==DYNAMIC_IMU_RECURSIVE)
             for(int i=0;i<10;++i) mlp_command_history[i]=p.residual_command_history[i];
         
         float x_steer_prev1 = 0.0f, x_steer_prev2 = 0.0f;
@@ -559,10 +619,15 @@ namespace mppi
             Control u_clamped = current_action;
             u_clamped.steer = fminf(fmaxf(u_clamped.steer, -p.max_steer), p.max_steer);
             
-            float v_next = x.v + u_clamped.accel * p.dt;
-            if (v_next >= p.max_speed && u_clamped.accel > 0.0f) u_clamped.accel = 0.0;
-            else if (v_next <= p.min_speed + 0.1f && u_clamped.accel < 0.0f) u_clamped.accel = 0.0;
-            else u_clamped.accel = fminf(fmaxf(u_clamped.accel, p.min_accel), p.max_accel);
+            const bool direct_speed=(p.dynamics_model==KINEMATIC_NO_IMU_DIRECT_SPEED ||
+                                     p.dynamics_model==DYNAMIC_IMU_RECURSIVE);
+            if(direct_speed) u_clamped.accel=fminf(p.max_speed,fmaxf(p.min_speed,u_clamped.accel));
+            else {
+                float v_next = x.v + u_clamped.accel * p.dt;
+                if (v_next >= p.max_speed && u_clamped.accel > 0.0f) u_clamped.accel = 0.0;
+                else if (v_next <= p.min_speed + 0.1f && u_clamped.accel < 0.0f) u_clamped.accel = 0.0;
+                else u_clamped.accel = fminf(fmaxf(u_clamped.accel, p.min_accel), p.max_accel);
+            }
 
             current_action = u_clamped; 
 
@@ -572,6 +637,10 @@ namespace mppi
                 x=update_kinematic_mlp_residual(x,u_clamped,p,mlp_command_history);
             else if(p.dynamics_model==KINEMATIC_MLP_NO_IMU_RESIDUAL)
                 x=update_kinematic_mlp_no_imu_residual(x,u_clamped,p,mlp_command_history);
+            else if(p.dynamics_model==KINEMATIC_NO_IMU_DIRECT_SPEED)
+                x=update_kinematic_noimu_direct(x,u_clamped,p,mlp_command_history);
+            else if(p.dynamics_model==DYNAMIC_IMU_RECURSIVE)
+                x=update_dynamic_imu_recursive(x,u_clamped,p,mlp_command_history);
             else x=update_dynamics(x,u_clamped,p);
             states[idx] = x;
             controls[idx] = u_clamped; 
@@ -667,8 +736,10 @@ namespace mppi
         }
         neutral_steer = fminf(params_.max_steer,
                               fmaxf(-params_.max_steer, neutral_steer));
-        const float initial_accel =
-            (params_.dynamics_model == KINEMATIC) ? 1.0f : 0.0f;
+        const bool direct_speed=(params_.dynamics_model==KINEMATIC_NO_IMU_DIRECT_SPEED ||
+                                 params_.dynamics_model==DYNAMIC_IMU_RECURSIVE);
+        const float initial_accel = direct_speed ? params_.target_speed :
+            ((params_.dynamics_model == KINEMATIC) ? 1.0f : 0.0f);
         h_prev_controls_.resize(T, {neutral_steer, initial_accel});
         h_costs_.resize(K);
         h_weights_.resize(K);
@@ -692,6 +763,10 @@ namespace mppi
         CUDA_CHECK(cudaMemcpyToSymbol(mlp_feature_std,mlp_residual_weights::feature_std,sizeof(mlp_residual_weights::feature_std)));
         CUDA_CHECK(cudaMemcpyToSymbol(mlp_noimu_feature_mean,mlp_no_imu_residual_weights::feature_mean,sizeof(mlp_no_imu_residual_weights::feature_mean)));
         CUDA_CHECK(cudaMemcpyToSymbol(mlp_noimu_feature_std,mlp_no_imu_residual_weights::feature_std,sizeof(mlp_no_imu_residual_weights::feature_std)));
+        CUDA_CHECK(cudaMemcpyToSymbol(knd_mean,kinematic_noimu_direct_weights::feature_mean,sizeof(kinematic_noimu_direct_weights::feature_mean)));
+        CUDA_CHECK(cudaMemcpyToSymbol(knd_std,kinematic_noimu_direct_weights::feature_std,sizeof(kinematic_noimu_direct_weights::feature_std)));
+        CUDA_CHECK(cudaMemcpyToSymbol(dir_mean,dynamic_imu_recursive_weights::feature_mean,sizeof(dynamic_imu_recursive_weights::feature_mean)));
+        CUDA_CHECK(cudaMemcpyToSymbol(dir_std,dynamic_imu_recursive_weights::feature_std,sizeof(dynamic_imu_recursive_weights::feature_std)));
         
         int max_path = 1000;
         CUDA_CHECK(cudaMalloc(&d_ref_xs_, max_path * sizeof(float)));
@@ -762,6 +837,39 @@ namespace mppi
 #define LOAD_MLP_NOIMU(symbol,count) CUDA_CHECK(cudaMemcpyToSymbol(symbol,w.data()+o,(count)*sizeof(float)));o+=(count)
         LOAD_MLP_NOIMU(mlp_noimu_w1,64*18);LOAD_MLP_NOIMU(mlp_noimu_b1,64);LOAD_MLP_NOIMU(mlp_noimu_w2,32*64);LOAD_MLP_NOIMU(mlp_noimu_b2,32);LOAD_MLP_NOIMU(mlp_noimu_w3,3*32);LOAD_MLP_NOIMU(mlp_noimu_b3,3);
 #undef LOAD_MLP_NOIMU
+    }
+
+    void MPPISolver::load_kinematic_noimu_direct_weights(const std::string& path) {
+        std::ifstream file(path,std::ios::binary);if(!file)throw std::runtime_error("cannot open direct-speed MLP weights: "+path);
+        file.seekg(0,std::ios::end);const std::streamoff bytes=file.tellg();file.seekg(0);
+        // Legacy files contain weights only (3395 floats). New files append
+        // feature mean[18] and std[18], allowing model replacement at runtime.
+        const size_t count=static_cast<size_t>(bytes)/sizeof(float);
+        if(bytes%sizeof(float)!=0 || (count!=3395 && count!=3395+36))
+            throw std::runtime_error("invalid direct-speed MLP weight/normalization file: "+path);
+        std::vector<float>w(count);file.read(reinterpret_cast<char*>(w.data()),bytes);
+        if(file.gcount()!=bytes)throw std::runtime_error("truncated direct-speed MLP file: "+path);
+        size_t o=0;
+#define LOAD_KND(symbol,count) CUDA_CHECK(cudaMemcpyToSymbol(symbol,w.data()+o,(count)*sizeof(float)));o+=(count)
+        LOAD_KND(knd_w1,64*18);LOAD_KND(knd_b1,64);LOAD_KND(knd_w2,32*64);LOAD_KND(knd_b2,32);LOAD_KND(knd_w3,3*32);LOAD_KND(knd_b3,3);
+        if(w.size()==3395+36){LOAD_KND(knd_mean,18);LOAD_KND(knd_std,18);}
+#undef LOAD_KND
+    }
+
+    void MPPISolver::load_dynamic_imu_recursive_weights(const std::string& path) {
+        std::ifstream file(path,std::ios::binary);if(!file)throw std::runtime_error("cannot open recursive-IMU MLP weights: "+path);
+        file.seekg(0,std::ios::end);const std::streamoff bytes=file.tellg();file.seekg(0);
+        // Legacy: weights only. New: weights followed by mean[20], std[20].
+        const size_t count=static_cast<size_t>(bytes)/sizeof(float);
+        if(bytes%sizeof(float)!=0 || (count!=3523 && count!=3523+40))
+            throw std::runtime_error("invalid recursive-IMU weight/normalization file: "+path);
+        std::vector<float>w(count);file.read(reinterpret_cast<char*>(w.data()),bytes);
+        if(file.gcount()!=bytes)throw std::runtime_error("truncated recursive-IMU file: "+path);
+        size_t o=0;
+#define LOAD_DIR(symbol,count) CUDA_CHECK(cudaMemcpyToSymbol(symbol,w.data()+o,(count)*sizeof(float)));o+=(count)
+        LOAD_DIR(dir_w1,64*20);LOAD_DIR(dir_b1,64);LOAD_DIR(dir_w2,32*64);LOAD_DIR(dir_b2,32);LOAD_DIR(dir_w3,3*32);LOAD_DIR(dir_b3,3);
+        if(w.size()==3523+40){LOAD_DIR(dir_mean,20);LOAD_DIR(dir_std,20);}
+#undef LOAD_DIR
     }
 
     void MPPISolver::set_reference_path(const std::vector<float> &xs, const std::vector<float> &ys,
@@ -872,7 +980,10 @@ namespace mppi
 
         best_trajectory_.resize(T_);
         State sim_state = current_state;
-        if((params_.dynamics_model==KINEMATIC_RESIDUAL || params_.dynamics_model==KINEMATIC_MLP_RESIDUAL || params_.dynamics_model==KINEMATIC_MLP_NO_IMU_RESIDUAL) && params_.visualize_candidates) {
+        if((params_.dynamics_model==KINEMATIC_RESIDUAL || params_.dynamics_model==KINEMATIC_MLP_RESIDUAL ||
+            params_.dynamics_model==KINEMATIC_MLP_NO_IMU_RESIDUAL ||
+            params_.dynamics_model==KINEMATIC_NO_IMU_DIRECT_SPEED ||
+            params_.dynamics_model==DYNAMIC_IMU_RECURSIVE) && params_.visualize_candidates) {
             // Host update_dynamics has no recurrent state. Use the actual
             // residual CUDA rollout selected by minimum cost for visualization
             // instead of drawing a misleading pure-kinematic trajectory.

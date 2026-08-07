@@ -1,17 +1,37 @@
 /**:
   ros__parameters:
-    # legacy_hybrid | kinematic | kinematic_residual | kinematic_mlp_residual | kinematic_mlp_no_imu_residual
+    # Recommended split models:
+    #   kinematic_noimu_direct_speed : no IMU/KF, /drive.speed setpoint
+    #   dynamic_imu_recursive        : IMU initializes ax/ay; future ax/ay are recursively predicted
     # kinematic_residual은 아래 binary GRU checkpoint를 CUDA rollout 안에서 실행한다.
     # Keep the controller rollout identical to the simulator plant. The MLP
     # residual produced a persistent yaw-rate bias in closed-loop simulation.
-    dynamics_model: kinematic
+    dynamics_model: kinematic_noimu_direct_speed
     residual_weights_path: /home/a/smooth-mppi-cuda/config/kinematic_residual_gru.bin
-    mlp_weights_path: /home/a/smooth-mppi-cuda/config/kinematic_mlp_no_imu.bin
-    # 아래 IMU 설정은 legacy kinematic_mlp_residual 선택 시에만 사용된다.
-    # 현재 no-IMU 모델에서는 IMU subscription 자체를 생성하지 않는다.
+    kinematic_noimu_weights_path: /home/a/smooth-mppi-cuda/config/ifac0807_strict_noimu.bin
+    dynamic_imu_weights_path: /home/a/smooth-mppi-cuda/config/ifac2026_dynamic_imu_recursive.bin
+    # IMU is causally aligned to odometry and is also used by the 2-state vy KF.
     imu_topic: /imu/data
     imu_sync_max_age_s: 0.05
     imu_ema_alpha: 0.25
+    require_imu_for_mlp: true  # do not run an IMU-trained MLP with fallback placeholders
+    lateral_velocity_kf_enabled: false  # dynamic_imu_recursive selects the KF automatically
+    # Linear-tire cornering stiffness [N/rad]. These are NOT the Pacejka C shape factors.
+    kf_cornering_stiffness_front: 110.0
+    kf_cornering_stiffness_rear: 199.0
+    kf_min_vx: 0.5
+    kf_low_speed_threshold: 1.5  # below this, use the no-slip prior vy=0
+    kf_max_abs_vy: 2.0
+    kf_q_vy: 0.02
+    kf_q_yaw_rate: 0.02
+    kf_r_lateral_accel: 0.5
+    kf_r_yaw_rate: 0.01
+    kf_initial_p_vy: 0.25
+    kf_initial_p_yaw_rate: 0.10
+    kf_reset_gap_s: 0.5
+    # +1 assumes sensor_msgs/Imu.linear_acceleration.y is vehicle body +Y (left).
+    # Set -1 only if the installed IMU's +Y axis points to vehicle right.
+    imu_lateral_accel_sign: 1.0
     # --- Limits ---
     max_steer: 0.4788        # rad
     min_accel: -8.0          # m/s^2
@@ -51,9 +71,10 @@
     l_f: 0.163
     l_r: 0.161
     # tiv_imu_bagdisjoint_kinematic_classic 식별 결과. l_f/l_r/mass는 학습 시 고정값.
-    kinematic_steer_scale: 1.1058064699   # Sa, current-MPPI rollout 재식별
-    kinematic_steer_bias: -0.0300696939   # Sb [rad]
+    kinematic_steer_scale: 0.8954927921   # Sa, IFAC KF-vy MPPI-exact 식별
+    kinematic_steer_bias: -0.0036726743   # Sb [rad]
     kinematic_no_slip: true               # residual checkpoint 학습 조건(beta=0)
+    speed_servo_kp: 8.0                   # [1/s], direct /drive.speed response
     I_z: 0.04712
     Cm0: 0.04                # 고속 감쇠용 모터 역기전력 계수
     

@@ -35,6 +35,8 @@ enum DynamicsModel : int {
     KINEMATIC_RESIDUAL = 2,
     KINEMATIC_MLP_RESIDUAL = 3,
     KINEMATIC_MLP_NO_IMU_RESIDUAL = 4,
+    KINEMATIC_NO_IMU_DIRECT_SPEED = 5,
+    DYNAMIC_IMU_RECURSIVE = 6,
 };
 
 struct alignas(16) ButterworthCoeffs {
@@ -48,6 +50,7 @@ struct alignas(16) State {
     float v;
     float vy;
     float omega;
+    float ax;
     float ay; 
     float slip_angle;
 };
@@ -110,6 +113,7 @@ struct Params {
     float l_f;
     float l_r;
     float Cm0;
+    float speed_servo_kp;
     
     // Pacejka (ForzaETH On-Track-SysID 와 동일한 4-파라미터 매직 포뮬러)
     //   F_y = F_z * D * sin( C * atan( B*a - E*(B*a - atan(B*a)) ) )
@@ -135,6 +139,8 @@ public:
     void load_residual_weights(const std::string& path);
     void load_mlp_residual_weights(const std::string& path);
     void load_mlp_no_imu_residual_weights(const std::string& path);
+    void load_kinematic_noimu_direct_weights(const std::string& path);
+    void load_dynamic_imu_recursive_weights(const std::string& path);
     
     // 경로 및 바운더리 설정
     void set_reference_path(const std::vector<float>& xs, const std::vector<float>& ys,

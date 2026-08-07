@@ -11,3 +11,10 @@ install/
 *.idea/
 *.iml
 model_tuning/**
+model_tuning_utils/tiv_collision_vesc_p_focus3x/history.csv
+model_tuning_utils/__pycache__/**
+model_tuning_utils/all_bags_tuned_lstm_finetune/**.json
+
+config/ifac2026_dynamic_imu_recursive.bin
+config/ifac2026_kinematic_mlp_residual.bin
+config/ifac2026_kinematic_noimu_direct_speed.bin

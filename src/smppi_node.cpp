@@ -480,15 +480,7 @@ private:
         msg.header.stamp = this->now(); msg.header.frame_id = "map";
         int T = solver_->get_T();
         msg.steer.reserve(T); msg.accel.reserve(T);
-        msg.predicted_x.reserve(T); msg.predicted_y.reserve(T);
-        msg.predicted_yaw.reserve(T); msg.predicted_v.reserve(T);
-        msg.predicted_vy.reserve(T); msg.predicted_yaw_rate.reserve(T);
-        for (int t = 0; t < T; ++t) {
-            msg.steer.push_back(oc[t].steer); msg.accel.push_back(oc[t].accel);
-            msg.predicted_x.push_back(bt[t].x); msg.predicted_y.push_back(bt[t].y);
-            msg.predicted_yaw.push_back(bt[t].yaw); msg.predicted_v.push_back(bt[t].v);
-            msg.predicted_vy.push_back(bt[t].vy); msg.predicted_yaw_rate.push_back(bt[t].omega);
-        }
+        for (int t = 0; t < T; ++t) { msg.steer.push_back(oc[t].steer); msg.accel.push_back(oc[t].accel); }
         append_best_traj_costs(bt, oc, msg);
         traj_pub_->publish(msg);
     }

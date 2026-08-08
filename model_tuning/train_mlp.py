@@ -50,7 +50,7 @@ def main():
     p.add_argument('--normalization',choices=('zscore','none'),default='zscore',
                    help='input feature transform; none feeds physical raw values directly')
     p.add_argument('--disable-velocity-residual',action='store_true',
-                   help='kinematic_noslip_noimu only: use classic base_v without MLP correction')
+                   help='kinematic models: use classic base_vx without the first MLP correction')
     p.add_argument('--yaw-target',choices=('imu','odom'),default='imu',
                    help='kinematic_noslip_noimu supervision only; never changes inference inputs')
     p.add_argument('--imu-wz-sign',type=float,choices=(-1.,1.),default=1.)
@@ -191,7 +191,10 @@ def main():
                 fbase=torch.cat((s,u,classic),1)
                 pred=torch.tanh(net(torch.cat(((fbase-mean_t)/std_t,
                     ((hist-cm_t)/cs_t).reshape(b,-1)),1)))*scale
-                ns=classic+pred*dt
+                next_vx=(classic[:,0] if a.disable_velocity_residual
+                         else classic[:,0]+pred[:,0]*dt)
+                ns=torch.stack((next_vx,classic[:,1]+pred[:,1]*dt,
+                                classic[:,2]+pred[:,2]*dt),1) # ns : vx,vy,r
                 next_axay=torch.stack(((ns[:,0]-s[:,0])/dt-s[:,1]*s[:,2],
                     (ns[:,1]-s[:,1])/dt+s[:,0]*s[:,2]),1)
             else:

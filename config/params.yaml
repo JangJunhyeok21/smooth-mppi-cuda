@@ -1,14 +1,16 @@
 /**:
   ros__parameters:
     # Recommended split models:
-    #   kinematic_noimu_direct_speed : no IMU/KF, /drive.speed setpoint
+    #   kinematic_noslip_noimu_direct_speed : no IMU/KF, /drive.speed setpoint
+    #   kinematic_slip_noimu_direct_speed   : 2-state IMU KF supplies initial vy; MLP has no direct IMU feature
     #   dynamic_imu_recursive        : IMU initializes ax/ay; future ax/ay are recursively predicted
     # kinematic_residual은 아래 binary GRU checkpoint를 CUDA rollout 안에서 실행한다.
     # Keep the controller rollout identical to the simulator plant. The MLP
     # residual produced a persistent yaw-rate bias in closed-loop simulation.
-    dynamics_model: kinematic_noimu_direct_speed
+    dynamics_model: kinematic_noslip_noimu_direct_speed
     residual_weights_path: /home/a/smooth-mppi-cuda/config/kinematic_residual_gru.bin
-    kinematic_noimu_weights_path: /home/a/smooth-mppi-cuda/config/ifac0807_strict_noimu.bin
+    kinematic_noslip_noimu_weights_path: /home/a/smooth-mppi-cuda/config/ifac0807_strict_noslip_noimu_16d.bin
+    kinematic_slip_noimu_weights_path: /home/a/smooth-mppi-cuda/config/kinematic_slip_noimu_direct_speed.bin
     dynamic_imu_weights_path: /home/a/smooth-mppi-cuda/config/ifac2026_dynamic_imu_recursive.bin
     # IMU is causally aligned to odometry and is also used by the 2-state vy KF.
     imu_topic: /imu/data
@@ -32,6 +34,10 @@
     # +1 assumes sensor_msgs/Imu.linear_acceleration.y is vehicle body +Y (left).
     # Set -1 only if the installed IMU's +Y axis points to vehicle right.
     imu_lateral_accel_sign: 1.0
+    # Must match model_tuning_utils/lateral_velocity_kf.py::estimate_dataset.
+    kf_steer_scale: 1.1058064699
+    kf_steer_bias: -0.0300696939
+    kf_max_steer: 0.4788
     # --- Limits ---
     max_steer: 0.4788        # rad
     min_accel: -8.0          # m/s^2

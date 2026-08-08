@@ -1,0 +1,3 @@
+[submodule "f1tenth_gym_ros"]
+	path = f1tenth_gym_ros
+	url = git@github.com:kms8527/Ros2-F1tenth-Simulator.git

@@ -30,7 +30,7 @@ def prepare(path, args):
         yaw[ii]=savgol_filter(np.unwrap(a[ii,3]),w,3)
     vx = a[:, 4]
     if getattr(args, "strict_no_imu", False):
-        # Kinematic no-IMU path: do not invoke the lateral KF even indirectly
+        # Kinematic no-slip no-IMU path: do not invoke the lateral KF even indirectly
         # while selecting windows.  vy is structurally zero and yaw rate comes
         # from the odometry/state column in the extracted bag dataset.
         vy = np.zeros(n, dtype=np.float64)

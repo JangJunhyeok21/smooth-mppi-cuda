@@ -35,8 +35,9 @@ enum DynamicsModel : int {
     KINEMATIC_RESIDUAL = 2,
     KINEMATIC_MLP_RESIDUAL = 3,
     KINEMATIC_MLP_NO_IMU_RESIDUAL = 4,
-    KINEMATIC_NO_IMU_DIRECT_SPEED = 5,
+    KINEMATIC_NOSLIP_NO_IMU_DIRECT_SPEED = 5,
     DYNAMIC_IMU_RECURSIVE = 6,
+    KINEMATIC_SLIP_NO_IMU_DIRECT_SPEED = 7,
 };
 
 struct alignas(16) ButterworthCoeffs {
@@ -139,7 +140,8 @@ public:
     void load_residual_weights(const std::string& path);
     void load_mlp_residual_weights(const std::string& path);
     void load_mlp_no_imu_residual_weights(const std::string& path);
-    void load_kinematic_noimu_direct_weights(const std::string& path);
+    void load_kinematic_noslip_noimu_direct_weights(const std::string& path);
+    void load_kinematic_slip_noimu_direct_weights(const std::string& path);
     void load_dynamic_imu_recursive_weights(const std::string& path);
     
     // 경로 및 바운더리 설정

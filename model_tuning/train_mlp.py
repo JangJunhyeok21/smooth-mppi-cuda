@@ -4,15 +4,13 @@
 Both models consume /drive speed as a speed setpoint.  No
 (speed_command - measured_vx) / dt action reconstruction is used.
 """
-import argparse, csv, json, time
+import argparse, csv, json, time, sys
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import numpy as np
 import torch
 from torch import nn
-try:
-    from model_tuning_utils.train_rollout import prepare
-except ModuleNotFoundError:
-    from train_rollout import prepare
+from model_tuning_utils.train_rollout import prepare
 
 
 DT = .02
@@ -44,7 +42,7 @@ def ema_by_segment(values, bag_id, alpha=.25):
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('dataset');p.add_argument('-o','--output',required=True)
-    p.add_argument('--model',choices=('dynamic_imu','kinematic_noslip_noimu'),required=True)
+    p.add_argument('--model',choices=('dynamic_imu','kinematic_noslip_noimu','kinematic_slip_noimu'),required=True)
     p.add_argument('--epochs',type=int,default=160);p.add_argument('--batch-size',type=int,default=512)
     p.add_argument('--lr',type=float,default=2e-3);p.add_argument('--patience',type=int,default=30)
     p.add_argument('--seed',type=int,default=71);p.add_argument('--device',default='cuda')
@@ -59,25 +57,27 @@ def main():
     p.add_argument('--imu-ax-sign',type=float,choices=(-1.,1.),default=1.)
     p.add_argument('--imu-ay-sign',type=float,choices=(-1.,1.),default=1.)
     a=p.parse_args();torch.manual_seed(a.seed);np.random.seed(a.seed)
+    is_noslip=a.model=='kinematic_noslip_noimu';is_slip=a.model=='kinematic_slip_noimu'
+    is_kinematic=is_noslip or is_slip
     device=torch.device(a.device if a.device!='cuda' or torch.cuda.is_available() else 'cpu')
     out=Path(a.output);out.mkdir(parents=True,exist_ok=True)
     cfg=argparse.Namespace(pose_window=21,horizon=1.,history=50,max_pose_step=.25,
         min_speed=.3,max_speed=10.,max_beta=.7,max_omega=8.,impact_decel=-10.,impact_margin=.5,
-        strict_no_imu=(a.model=='kinematic_noslip_noimu' and a.yaw_target=='odom'))
+        strict_no_imu=(is_noslip and a.yaw_target=='odom'))
     pose,polar,_,_,starts,dt,horizon=prepare(a.dataset,cfg)
     raw=np.load(a.dataset)['samples']; split=raw[:,10].astype(int);bag=raw[:,11].astype(int)
     body=np.c_[polar[:,0]*np.cos(polar[:,1]),polar[:,0]*np.sin(polar[:,1]),polar[:,2]].astype(np.float32)
     command=raw[:,[7,9]].astype(np.float32) # steer, /drive.speed setpoint
     if raw.shape[1]>=15:
         imu_raw=raw[:,12:15].astype(np.float32).copy()
-    elif a.model=='kinematic_noslip_noimu' and a.yaw_target=='odom':
+    elif is_noslip and a.yaw_target=='odom':
         imu_raw=np.zeros((len(raw),3),np.float32)
     else:
         raise SystemExit('selected model/target requires appended IMU columns')
     imu_raw*=np.array([a.imu_wz_sign,a.imu_ax_sign,a.imu_ay_sign],np.float32)
     imu=ema_by_segment(imu_raw,bag) # signed [wz, ax, ay]
     observed_body=body.copy();target_body=body.copy()
-    if a.model=='kinematic_noslip_noimu':
+    if is_noslip:
         # Deployment input has no IMU/KF: odom vx and odom yaw-rate only.
         observed_body=np.c_[raw[:,4],np.zeros(len(raw)),raw[:,6]].astype(np.float32)
         # IMU is supervision only, never an input.  This is not inference leakage.
@@ -119,10 +119,22 @@ def main():
     # history has the same normalization as the current command.
     train_rows=(np.arange(len(raw)) if split_policy.startswith('single-bag')
                 else np.flatnonzero(split==0))
-    if a.model=='kinematic_noslip_noimu':
+    if is_noslip:
         # Initial vy is unobserved and forced to zero, but use the train-only
         # physical vy spread for normalization because predicted vy is fed back.
+        # 16-D no-IMU feature base: [v, yaw_rate, steer_cmd, speed_cmd,
+        # classic_next_v, classic_next_yaw_rate]. Current/classic vy were
+        # constant zeros and are intentionally removed.
         base=np.c_[target_body[:,[0,2]],command,target_body[:,0],target_body[:,2]]
+    elif is_slip:
+        steer=np.clip(SA*command[:,0]+SB,-.55,.55)
+        measured_speed=np.hypot(target_body[:,0],target_body[:,1])
+        measured_beta=np.arctan2(target_body[:,1],target_body[:,0])
+        base_ax=np.clip(a.kp_speed*(command[:,1]-measured_speed),-8,8.5)
+        base_speed=np.clip(measured_speed+base_ax*dt,.0,10.)
+        base_vx=base_speed*np.cos(measured_beta);base_vy=base_speed*np.sin(measured_beta)
+        base_r=base_vx*np.tan(steer)/(LF+LR)
+        base=np.c_[target_body,command,base_vx,base_vy,base_r]
     else:
         # state vx,vy,r,ax,ay; command; base ax,ay,r
         base_ax=np.clip(a.kp_speed*(command[:,1]-body[:,0]),-8,8.5)
@@ -134,7 +146,7 @@ def main():
     if a.normalization=='none':
         mean=np.zeros_like(mean);std=np.ones_like(std)
         cmd_mean=np.zeros_like(cmd_mean);cmd_std=np.ones_like(cmd_std)
-    nbase=6 if a.model=='kinematic_noslip_noimu' else 10
+    nbase=6 if is_noslip else (8 if is_slip else 10)
     net=MLP(nbase+10).to(device);opt=torch.optim.AdamW(net.parameters(),lr=a.lr,weight_decay=1e-5)
     mean_t=torch.tensor(mean,device=device);std_t=torch.tensor(std,device=device)
     cm_t=torch.tensor(cmd_mean,device=device);cs_t=torch.tensor(cmd_std,device=device)
@@ -144,8 +156,7 @@ def main():
 
     def rollout(ids,training=False,collect=False):
         ids=np.asarray(ids);j0=ids+49;b=len(ids)
-        s=(observed_body_t[j0].clone() if a.model=='kinematic_noslip_noimu'
-           else body_t[j0].clone());q=pose_t[j0].clone()
+        s=(observed_body_t[j0].clone() if is_noslip else body_t[j0].clone());q=pose_t[j0].clone()
         # Dynamic IMU is an initial condition. Future ax/ay are predicted below.
         axay=imu_t[j0,1:3].clone()
         hist=torch.stack([cmd_t[j0-d] for d in range(5,0,-1)],1)
@@ -154,7 +165,7 @@ def main():
             ix=j0+k;u=cmd_t[ix];steer=torch.clamp(SA*u[:,0]+SB,-.55,.55)
             base_ax=torch.clamp(a.kp_speed*(u[:,1]-s[:,0]),-8.,8.5)
             base_r=s[:,0]*torch.tan(steer)/(LF+LR)
-            if a.model=='kinematic_noslip_noimu':
+            if is_noslip:
                 classic=torch.stack((s[:,0]+base_ax*dt,torch.zeros(b,device=device),base_r),1)
                 fbase=torch.stack((s[:,0],s[:,2],u[:,0],u[:,1],
                                    classic[:,0],classic[:,2]),1)
@@ -169,6 +180,20 @@ def main():
                                 classic[:,2]+pred[:,2]*dt),1)
                 next_axay=torch.stack(((ns[:,0]-s[:,0])/dt,
                     (ns[:,1]-s[:,1])/dt+ns[:,0]*ns[:,2]),1)
+            elif is_slip:
+                current_speed=torch.hypot(s[:,0],s[:,1])
+                beta=torch.atan2(s[:,1],s[:,0])
+                slip_ax=torch.clamp(a.kp_speed*(u[:,1]-current_speed),-8.,8.5)
+                base_speed=torch.clamp(current_speed+slip_ax*dt,0.,10.)
+                base_vx=base_speed*torch.cos(beta);base_vy=base_speed*torch.sin(beta)
+                base_r=base_vx*torch.tan(steer)/(LF+LR)
+                classic=torch.stack((base_vx,base_vy,base_r),1)
+                fbase=torch.cat((s,u,classic),1)
+                pred=torch.tanh(net(torch.cat(((fbase-mean_t)/std_t,
+                    ((hist-cm_t)/cs_t).reshape(b,-1)),1)))*scale
+                ns=classic+pred*dt
+                next_axay=torch.stack(((ns[:,0]-s[:,0])/dt-s[:,1]*s[:,2],
+                    (ns[:,1]-s[:,1])/dt+s[:,0]*s[:,2]),1)
             else:
                 base_ay=s[:,0]*base_r
                 fbase=torch.cat((s,axay,u,base_ax[:,None],base_ay[:,None],base_r[:,None]),1)
@@ -179,10 +204,11 @@ def main():
                 nvx=s[:,0]+(next_axay[:,0]+s[:,1]*s[:,2])*dt
                 nvy=s[:,1]+(next_axay[:,1]-s[:,0]*s[:,2])*dt
                 ns=torch.stack((nvx,nvy,nr),1)
-            nq=torch.stack((q[:,0]+(ns[:,0]*torch.cos(q[:,2])-ns[:,1]*torch.sin(q[:,2]))*dt,
-                            q[:,1]+(ns[:,0]*torch.sin(q[:,2])+ns[:,1]*torch.cos(q[:,2]))*dt,
+            next_speed=torch.hypot(ns[:,0],ns[:,1]);next_beta=torch.atan2(ns[:,1],ns[:,0])
+            nq=torch.stack((q[:,0]+next_speed*torch.cos(q[:,2]+next_beta)*dt,
+                            q[:,1]+next_speed*torch.sin(q[:,2]+next_beta)*dt,
                             q[:,2]+ns[:,2]*dt),1)
-            gt_s=body_t[ix+1];gt_q=pose_t[ix+1];gt_imu=imu_t[ix+1,1:3]
+            gt_s=body_t[ix+1];gt_q=pose_t[ix+1];gt_imu=imu_t[ix+1,1:3] # gt_s : vx,vy,r; gt_q : x,y,yaw; gt_imu : ax,ay
             state_loss=.8*torch.nn.functional.smooth_l1_loss(ns,gt_s,reduction='none').mean(1)
             yaw_loss=.4*torch.nn.functional.smooth_l1_loss(nq[:,2],gt_q[:,2],reduction='none')
             pos_loss=.15*torch.linalg.vector_norm(nq[:,:2]-gt_q[:,:2],dim=1)
@@ -225,9 +251,11 @@ def main():
     pe=np.linalg.norm(traj[:,:,:2]-gtpose[:,:,:2],axis=2);se=np.abs(traj[:,:,3]-gtstate[:,:,0]);we=np.abs(traj[:,:,5]-gtstate[:,:,2])
     metrics={'model':a.model,'action':'[steer_cmd, /drive.speed setpoint]','test_windows':len(test_starts),
       'split_policy':split_policy,'test_is_unseen_data':not split_policy.startswith('single-bag'),
-      'yaw_rate_target':(a.yaw_target if a.model=='kinematic_noslip_noimu' else 'recursive_imu'),
+      'yaw_rate_target':('kf_imu_observer' if is_slip else
+                         (a.yaw_target if is_noslip else 'recursive_imu')),
       'imu_axis_signs':{'wz':a.imu_wz_sign,'ax':a.imu_ax_sign,'ay':a.imu_ay_sign},
       'kinematic_noslip_input_vy_max_abs':(float(np.max(np.abs(observed_body[:,1]))) if a.model=='kinematic_noslip_noimu' else None),
+      'kinematic_slip_input_vy_max_abs':(float(np.max(np.abs(body[:,1]))) if is_slip else None),
       'input_normalization':a.normalization,
       'mlp_input_dim':nbase+10,
       'velocity_residual_enabled':not a.disable_velocity_residual,

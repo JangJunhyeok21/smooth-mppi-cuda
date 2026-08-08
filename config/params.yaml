@@ -14,8 +14,8 @@
     q_steer: 0.3
     q_collision: 300.0
     q_lat_g: 100.0
-    lat_g_threshold: 6.5        # 횡가속도 소프트 페널티 시작 임계값 [m/s^2]
-    lat_g_fault_threshold: 8.0  # 횡가속도 하드 페일 임계값 [m/s^2]
+    lat_g_threshold: 4.2        # 횡가속도 소프트 페널티 시작 임계값 [m/s^2]
+    lat_g_fault_threshold: 6.0  # 횡가속도 하드 페일 임계값 [m/s^2]
     collision_radius: 0.25
     boundary_margin: 0.05       # collision_radius에 더해지는 소프트 페널티 시작 여유거리 [m]
     boundary_soft_gain: 40.0    # 소프트 페널티 이차항 계수
@@ -54,15 +54,15 @@
     # pacejka_sysid 로 식별한 D 는 훨씬 작게 나오며, 그대로 넣으면 횡력이 3~4배 줄어
     # SMPPI 가 크게 보수적으로 변한다. 반드시 저속에서 단계적으로 적용할 것.
     # 절차: src/control/pacejka_sysid/README.md 의 "식별 결과를 SMPPI 에 반영하기" 참고.
-    B_f: 1.5
-    C_f: 1.5
-    D_f: 2.0843    # 38.0 N / F_zf(18.2315 N) 무손실 변환 (위 설명 참고)
-    E_f: 0.0
+    B_f: 6.7722
+    C_f: 1.4462
+    D_f: 0.445
+    E_f: 0.561
 
-    B_r: 1.5
-    C_r: 1.5
-    D_r: 1.9233    # 35.5 N / F_zr(18.4579 N) 무손실 변환 (위 설명 참고)
-    E_r: 0.0
+    B_r: 8.0358
+    C_r: 2.0762
+    D_r: 0.4161
+    E_r: 0.7044
 
     # --- Topics (공통 키) ---
     odom_topic: /odom0
@@ -79,10 +79,10 @@
     fsm_side_pred_time: 0.6   # 여유폭 계산 시 상대 횡위치 예측 시간 [s]
 
     # --- Overtake FSM: 상태 전이/속도 파라미터 ---
-    fsm_follow_dist: 5.0        # FOLLOW 진입 거리 [m]
-    fsm_prep_dist: 3.5          # OVERTAKE_PREP 진입 거리 [m]
-    fsm_clear_dist: 7.0         # SOLO 복귀 거리 [m]
-    fsm_merge_dist: 2.0         # 추월 완료 판정 거리 [m]
+    fsm_follow_dist: 0.8        # FOLLOW 진입 거리 [m]
+    fsm_prep_dist: 0.5          # OVERTAKE_PREP 진입 거리 [m]
+    fsm_clear_dist: 1.0         # SOLO 복귀 거리 [m]
+    fsm_merge_dist: 1.2         # 추월 완료 판정 거리 [m]
     fsm_prep_timeout_s: 2.5     # PREP 최대 체류 시간 [s]
     fsm_emergency_dist: 0.5     # EMERGENCY 트리거 거리 [m]
     fsm_clear_threshold: 0.8    # 추월 가능 판정 여유폭 [m]
@@ -94,4 +94,3 @@
     fsm_follow_speed: 4.5       # FOLLOW/PREP 목표 속도 [m/s]
     fsm_overtake_speed: 6.5     # OVERTAKE 목표 속도 [m/s]
     fsm_emergency_speed: 0.0    # EMERGENCY 목표 속도 [m/s]
-

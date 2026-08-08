@@ -44,7 +44,7 @@
     max_accel: 8.5           # m/s^2
     min_speed: 0.5           # m/s
     target_speed: 3.0        # m/s, Map1 안정 완주 우선 목표 속도
-    max_speed: 4.0           # m/s; simulator mppi_max_speed와 동일
+    max_speed: 3.0           # m/s; simulator mppi_max_speed와 동일
 
     # --- Costs (최적화 결과 반영) ---
     q_v: 2.0
@@ -109,8 +109,8 @@
 
     # --- Topics (공통 키) ---
     odom_topic: /ego_racecar/odom
-    pose_topic: /mcl_pose
+    pose_topic: /mocap_pose1
     velocity_topic: /odom
-    drive_topic: /sim_drive
+    drive_topic: /drive
     path_topic: /mppi_target_path
-    use_mcl_pose: false      # 시뮬레이터 구동 모드
+    use_mcl_pose: true       # 실차: map pose와 wheel odometry twist 분리

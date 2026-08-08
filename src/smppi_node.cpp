@@ -28,7 +28,7 @@ public:
             lateral_velocity_kf_.initialize(lateral_velocity_kf_params_);
         }
 
-        solver_ = std::make_unique<mppi::MPPISolver>(num_samples_, 50, mppi_params_);
+        solver_ = std::make_unique<mppi::MPPISolver>(num_samples_, 80, mppi_params_);
         if (mppi_params_.dynamics_model == mppi::KINEMATIC_RESIDUAL)
             solver_->load_residual_weights(residual_weights_path_);
         if (mppi_params_.dynamics_model == mppi::KINEMATIC_MLP_RESIDUAL)
@@ -59,11 +59,21 @@ public:
             "/mppi_right_boundary", qos,
             std::bind(&MPPINode::right_bnd_callback, this, std::placeholders::_1));
 
-        // ── EKF odom 단일 구독 ──────────────────────────────────────
-        // /ekf_odom 한 토픽에서 pose(x,y,yaw) + twist(vx,vy,omega) 모두 수신
-        odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
-            odom_topic_, 10,
-            std::bind(&MPPINode::odom_callback, this, std::placeholders::_1));
+        if (use_mcl_pose_) {
+            // Real car: localization pose is in map frame, while wheel odom
+            // supplies body-frame velocity only.
+            mcl_pose_sub_ = this->create_subscription<geometry_msgs::msg::PoseStamped>(
+                pose_topic_, 10,
+                std::bind(&MPPINode::mcl_pose_callback, this, std::placeholders::_1));
+            velocity_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
+                velocity_topic_, 10,
+                std::bind(&MPPINode::velocity_callback, this, std::placeholders::_1));
+        } else {
+            // Simulator: pose and twist already share one odometry frame.
+            odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
+                odom_topic_, 10,
+                std::bind(&MPPINode::odom_callback, this, std::placeholders::_1));
+        }
         // The no-IMU rollout neither subscribes to nor waits for IMU.  Keep the
         // subscription only for the legacy 21-feature MLP checkpoint.
         if (mppi_params_.dynamics_model == mppi::KINEMATIC_MLP_RESIDUAL ||
@@ -76,11 +86,62 @@ public:
         timer_ = this->create_wall_timer(
             control_period, std::bind(&MPPINode::timer_callback, this));
 
-        RCLCPP_INFO(this->get_logger(),
-            "MPPI Node Started — single EKF odom topic: %s", odom_topic_.c_str());
+        if (use_mcl_pose_) {
+            RCLCPP_INFO(this->get_logger(), "MPPI Node Started — pose: %s | velocity: %s",
+                        pose_topic_.c_str(), velocity_topic_.c_str());
+        } else {
+            RCLCPP_INFO(this->get_logger(), "MPPI Node Started — single odom topic: %s",
+                        odom_topic_.c_str());
+        }
     }
 
 private:
+    void mcl_pose_callback(const geometry_msgs::msg::PoseStamped::SharedPtr msg) {
+        const auto &ori = msg->pose.orientation;
+        const double yaw = std::atan2(
+            2.0 * (ori.w * ori.z + ori.x * ori.y),
+            1.0 - 2.0 * (ori.y * ori.y + ori.z * ori.z));
+        current_state_.x = static_cast<float>(msg->pose.position.x);
+        current_state_.y = static_cast<float>(msg->pose.position.y);
+        current_state_.yaw = static_cast<float>(yaw);
+        pose_received_ = true;
+    }
+
+    void velocity_callback(const nav_msgs::msg::Odometry::SharedPtr msg) {
+        rclcpp::Time stamp(msg->header.stamp);
+        if (stamp.nanoseconds() == 0) stamp = this->now();
+        align_imu_to_pose(stamp);
+
+        const double measured_vx = msg->twist.twist.linear.x;
+        const double measured_vy = msg->twist.twist.linear.y;
+        const double measured_omega = msg->twist.twist.angular.z;
+        if (has_prev_velocity_) {
+            const double dt = (stamp - last_velocity_stamp_).seconds();
+            if (dt > 1e-6 && std::isfinite(dt))
+                current_ax_ = static_cast<float>((measured_vx - last_body_vx_) / dt);
+        }
+
+        current_state_.v = static_cast<float>(measured_vx);
+        current_state_.vy = static_cast<float>(measured_vy);
+        current_state_.omega = static_cast<float>(measured_omega);
+        if (mppi_params_.dynamics_model == mppi::KINEMATIC_SLIP_NO_IMU_DIRECT_SPEED) {
+            const float steer = std::clamp(kf_steer_scale_ * last_steer_cmd_ + kf_steer_bias_,
+                                           -kf_max_steer_, kf_max_steer_);
+            const float wz = aligned_imu_valid_ ? aligned_imu_[0] : NAN;
+            const float ay = aligned_imu_valid_ ? aligned_imu_[2] : NAN;
+            current_state_.vy = lateral_velocity_kf_.update(current_state_.v, steer, wz, ay);
+            current_state_.omega = lateral_velocity_kf_.getYawRate();
+        }
+        current_state_.slip_angle =
+            std::atan2(current_state_.vy, std::fabs(current_state_.v) + 1e-5f);
+        current_state_.ay = current_state_.v * current_state_.omega;
+
+        last_body_vx_ = measured_vx;
+        last_velocity_stamp_ = stamp;
+        has_prev_velocity_ = true;
+        velocity_received_ = true;
+    }
+
     void imu_callback(const sensor_msgs::msg::Imu::SharedPtr msg) {
         rclcpp::Time stamp(msg->header.stamp);
         if (stamp.nanoseconds() == 0) stamp = this->now();
@@ -368,6 +429,12 @@ private:
         // simulator 기본 토픽
         this->declare_parameter("odom_topic",   "/ego_racecar/odom");
         odom_topic_  = this->get_parameter("odom_topic").as_string();
+        this->declare_parameter("use_mcl_pose", false);
+        use_mcl_pose_ = this->get_parameter("use_mcl_pose").as_bool();
+        this->declare_parameter("pose_topic", "/newmcl_pose");
+        pose_topic_ = this->get_parameter("pose_topic").as_string();
+        this->declare_parameter("velocity_topic", "/odom");
+        velocity_topic_ = this->get_parameter("velocity_topic").as_string();
         this->declare_parameter("drive_topic",  "/drive");
         drive_topic_ = this->get_parameter("drive_topic").as_string();
         this->declare_parameter("imu_topic","/imu/data");imu_topic_=this->get_parameter("imu_topic").as_string();
@@ -450,9 +517,16 @@ private:
     }
 
     void timer_callback() {
-        if (!odom_received_) {
+        if (use_mcl_pose_) {
+            if (!pose_received_ || !velocity_received_) {
+                RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                    "Waiting for pose/velocity (%s, %s)...",
+                    pose_topic_.c_str(), velocity_topic_.c_str());
+                return;
+            }
+        } else if (!odom_received_) {
             RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
-                "Waiting for EKF odom (%s)...", odom_topic_.c_str());
+                "Waiting for odom (%s)...", odom_topic_.c_str());
             return;
         }
         if (!path_received_ || !left_bnd_received_ || !right_bnd_received_) {
@@ -510,7 +584,10 @@ private:
         float published_accel;
         if(direct_speed) {
             next_v=std::min(mppi_params_.max_speed,std::max(mppi_params_.min_speed,u.accel));
-            published_accel=(next_v-current_state_.v)/mppi_params_.dt;
+            published_accel=std::clamp(
+                (next_v-current_state_.v)/mppi_params_.dt,
+                mppi_params_.min_accel,
+                mppi_params_.max_accel);
         } else {
             next_v=current_state_.v+u.accel*mppi_params_.dt;
             if(next_v<=mppi_params_.min_speed){u.accel=(mppi_params_.min_speed-current_state_.v)/mppi_params_.dt;next_v=mppi_params_.min_speed;}
@@ -618,6 +695,8 @@ private:
     rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr     left_bnd_sub_;
     rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr     right_bnd_sub_;
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;  // 단일 구독
+    rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr mcl_pose_sub_;
+    rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr velocity_sub_;
     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_sub_;
 
     rclcpp::Publisher<ackermann_msgs::msg::AckermannDriveStamped>::SharedPtr drive_pub_;
@@ -626,12 +705,15 @@ private:
 
     rclcpp::TimerBase::SharedPtr timer_;
 
-    std::string odom_topic_, drive_topic_, path_topic_, imu_topic_, dynamics_model_name_, residual_weights_path_,mlp_weights_path_;
+    std::string odom_topic_, pose_topic_, velocity_topic_, drive_topic_, path_topic_, imu_topic_, dynamics_model_name_, residual_weights_path_,mlp_weights_path_;
     std::string kinematic_noslip_noimu_weights_path_,kinematic_slip_noimu_weights_path_,dynamic_imu_weights_path_;
     mppi::LateralVelocityKF lateral_velocity_kf_;
     mppi::LateralVelocityKFParams lateral_velocity_kf_params_;
     float kf_steer_scale_{1.1058064699f},kf_steer_bias_{-0.0300696939f},kf_max_steer_{0.4788f};
     bool odom_received_ = false;
+    bool use_mcl_pose_{false}, pose_received_{false}, velocity_received_{false};
+    bool has_prev_velocity_{false};
+    rclcpp::Time last_velocity_stamp_{0, 0, RCL_ROS_TIME};
     bool has_prev_odom_{false};
     rclcpp::Time last_odom_stamp_{0, 0, RCL_ROS_TIME};
     double last_odom_x_{0.0};

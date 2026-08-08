@@ -5,33 +5,33 @@
     min_accel: -8.0          # m/s^2
     max_accel: 8.5           # m/s^2
     min_speed: 0.5           # m/s
-    max_speed: 4.0           # m/s
+    max_speed: 10.0           # m/s
 
     # --- Costs (최적화 결과 반영) ---
-    q_v: 1.0
+    q_v: 1.3
     q_dist: 0.0
     q_du: 0.2
-    q_steer: 0.5
+    q_steer: 0.3
     q_collision: 300.0
-    q_lat_g: 500.0
-    lat_g_threshold: 5.5        # 횡가속도 소프트 페널티 시작 임계값 [m/s^2]
-    lat_g_fault_threshold: 9.0  # 횡가속도 하드 페일 임계값 [m/s^2]
-    collision_radius: 0.3
-    boundary_margin: 0.35       # collision_radius에 더해지는 소프트 페널티 시작 여유거리 [m]
-    boundary_soft_gain: 70.0    # 소프트 페널티 이차항 계수
-    q_progress: 36.0  #36.0
-    q_escape_vel: 32.0  #32.0
+    q_lat_g: 100.0
+    lat_g_threshold: 6.5        # 횡가속도 소프트 페널티 시작 임계값 [m/s^2]
+    lat_g_fault_threshold: 8.0  # 횡가속도 하드 페일 임계값 [m/s^2]
+    collision_radius: 0.25
+    boundary_margin: 0.05       # collision_radius에 더해지는 소프트 페널티 시작 여유거리 [m]
+    boundary_soft_gain: 40.0    # 소프트 페널티 이차항 계수
+    q_progress: 16.0  #36.0
+    q_escape_vel: 12.0  #32.0
     
     # --- Obstacle Avoidance Params ---
-    car_radius: 0.25
-    q_obs: 150.0
+    car_radius: 0.2
+    q_obs: 50.0
     
     # --- Noise & Tuning ---
     noise_steer_std: 0.4     # rad/s
     noise_accel_std: 2.0     # m/s^3
     max_steer_rate: 3.5      # rad/s
     max_accel_rate: 100.0    # m/s^3
-    lambda: 15.0
+    lambda: 100.0
     visualize_candidates: true
     
     # --- Dynamic Model Params (Pacejka & Kinematics) ---
@@ -54,15 +54,15 @@
     # pacejka_sysid 로 식별한 D 는 훨씬 작게 나오며, 그대로 넣으면 횡력이 3~4배 줄어
     # SMPPI 가 크게 보수적으로 변한다. 반드시 저속에서 단계적으로 적용할 것.
     # 절차: src/control/pacejka_sysid/README.md 의 "식별 결과를 SMPPI 에 반영하기" 참고.
-    B_f: 6.0926
-    C_f: 1.2447
-    D_f: 0.7955
-    E_f: 0.7815
+    B_f: 1.5
+    C_f: 1.5
+    D_f: 2.0843    # 38.0 N / F_zf(18.2315 N) 무손실 변환 (위 설명 참고)
+    E_f: 0.0
 
-    B_r: 6.6457
-    C_r: 2.2129
-    D_r: 0.7317
-    E_r: 0.0597
+    B_r: 1.5
+    C_r: 1.5
+    D_r: 1.9233    # 35.5 N / F_zr(18.4579 N) 무손실 변환 (위 설명 참고)
+    E_r: 0.0
 
     # --- Topics (공통 키) ---
     odom_topic: /odom0

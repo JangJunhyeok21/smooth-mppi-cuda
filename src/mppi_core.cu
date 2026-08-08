@@ -197,7 +197,12 @@ namespace mppi
         }
 
         // 7. Obstacle Cost
+        //    boundary_cost와 동일한 소프트(제곱 증가) + 하드(포화 로지스틱) 패턴.
+        //    예전의 q_obs/(dist-car_radius+eps) 나눗셈 공식은 dist가 car_radius보다
+        //    작아지면(=장애물에 침투하면) 분모가 음수가 되어 비용이 거대한 음수(보상)로
+        //    뒤집혀 MPPI가 오히려 장애물을 관통하는 궤적을 선호하는 버그가 있었다.
         float obs_cost = 0.0f;
+        float obs_safe_dist = p.car_radius + p.collision_radius; // 자차 반경 + 장애물 반경(접촉 거리)
         for (int i = 0; i < p.num_obstacles; ++i)
         {
             float dx = s.x - p.obs_x[i];
@@ -205,7 +210,14 @@ namespace mppi
             float dist = sqrtf(dx * dx + dy * dy);
             if (dist < 1.5f)
             {
-                obs_cost += p.q_obs / (dist - p.car_radius + 1e-3f);
+                float penetration = 1.5f - dist;
+                obs_cost += p.q_obs * penetration * penetration;
+
+                if (dist < obs_safe_dist * 1.5f)
+                {
+                    float capped = fmaxf(dist - obs_safe_dist, 1.0e-5f);
+                    obs_cost += p.q_collision * logf(1.0f + __expf(-30.0f * capped));
+                }
             }
         }
 
@@ -384,6 +396,19 @@ namespace mppi
                 x, ref_xs, ref_ys, ref_yaws, left_bnd_xs, left_bnd_ys, right_bnd_xs, right_bnd_ys, path_len, local_path_idx, &local_path_idx);
 
             if (min_dist < p.collision_radius)
+            {
+                is_fault = true;
+            }
+
+            // 장애물도 벽과 동일하게 하드 충돌 판정을 받는다 (기존엔 소프트 obs_cost만 있었음).
+            float min_obs_gap = 1e9f;
+            for (int i = 0; i < p.num_obstacles; ++i)
+            {
+                float dx = x.x - p.obs_x[i];
+                float dy = x.y - p.obs_y[i];
+                min_obs_gap = fminf(min_obs_gap, sqrtf(dx * dx + dy * dy) - p.car_radius);
+            }
+            if (min_obs_gap < p.collision_radius)
             {
                 is_fault = true;
             }

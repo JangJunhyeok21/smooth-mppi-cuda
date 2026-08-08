@@ -1,0 +1,44 @@
+tau_steer: 0.5923239757022499
+tau_motor: 0.2743027625811055
+tau_steer_std: 0.476260324126454
+tau_motor_std: 0.2569880316217381
+n_steer_fits: 43
+n_motor_fits: 9
+source_bags:
+- /home/a/bags/0730/rosbag2_2026_07_30-22_25_24
+- /home/a/bags/0730/rosbag2_2026_07_30-22_28_57
+- /home/a/bags/0730/rosbag2_2026_07_30-22_32_09
+- /home/a/bags/0730/rosbag2_2026_07_30-22_35_37
+- /home/a/bags/0730/rosbag2_2026_07_30-22_41_13
+- /home/a/bags/0730/rosbag2_2026_07_30-22_48_25
+- /home/a/bags/0730/rosbag2_2026_07_30-22_52_38
+- /home/a/bags/0730/rosbag2_2026_07_30-22_55_09
+- /home/a/bags/0730/rosbag2_2026_07_30-23_03_19
+per_bag:
+- bag: rosbag2_2026_07_30-22_25_24
+  n_steer_fits: 12
+  n_motor_fits: 1
+- bag: rosbag2_2026_07_30-22_28_57
+  n_steer_fits: 6
+  n_motor_fits: 2
+- bag: rosbag2_2026_07_30-22_32_09
+  n_steer_fits: 3
+  n_motor_fits: 1
+- bag: rosbag2_2026_07_30-22_35_37
+  n_steer_fits: 7
+  n_motor_fits: 0
+- bag: rosbag2_2026_07_30-22_41_13
+  n_steer_fits: 6
+  n_motor_fits: 1
+- bag: rosbag2_2026_07_30-22_48_25
+  n_steer_fits: 4
+  n_motor_fits: 0
+- bag: rosbag2_2026_07_30-22_52_38
+  n_steer_fits: 2
+  n_motor_fits: 0
+- bag: rosbag2_2026_07_30-22_55_09
+  n_steer_fits: 2
+  n_motor_fits: 4
+- bag: rosbag2_2026_07_30-23_03_19
+  n_steer_fits: 1
+  n_motor_fits: 0

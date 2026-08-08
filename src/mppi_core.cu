@@ -771,13 +771,27 @@ namespace mppi
         }
 
         // 7. Obstacle Cost
+        //    boundary_cost와 동일한 소프트(제곱 증가) + 하드(포화 로지스틱) 패턴.
+        //    예전의 q_obs/(dist-car_radius+eps) 나눗셈 공식은 dist가 car_radius보다
+        //    작아지면(=장애물에 침투하면) 분모가 음수가 되어 비용이 거대한 음수(보상)로
+        //    뒤집혀 MPPI가 오히려 장애물을 관통하는 궤적을 선호하는 버그가 있었다.
         float obs_cost = 0.0f;
-        for (int i = 0; i < p.num_obstacles; ++i) {
+        float obs_safe_dist = p.car_radius + p.collision_radius; // 자차 반경 + 장애물 반경(접촉 거리)
+        for (int i = 0; i < p.num_obstacles; ++i)
+        {
             float dx = s.x - p.obs_x[i];
             float dy = s.y - p.obs_y[i];
             float dist = sqrtf(dx * dx + dy * dy);
-            if (dist < 1.5f) {
-                obs_cost += p.q_obs / (dist - p.car_radius + 1e-3f);
+            if (dist < 1.5f)
+            {
+                float penetration = 1.5f - dist;
+                obs_cost += p.q_obs * penetration * penetration;
+
+                if (dist < obs_safe_dist * 1.5f)
+                {
+                    float capped = fmaxf(dist - obs_safe_dist, 1.0e-5f);
+                    obs_cost += p.q_collision * logf(1.0f + __expf(-30.0f * capped));
+                }
             }
         }
 
@@ -1011,6 +1025,54 @@ namespace mppi
 
             float min_dist = compute_min_boundary_distance(
                 x, ref_xs, ref_ys, ref_yaws, left_bnd_xs, left_bnd_ys, right_bnd_xs, right_bnd_ys, path_len, local_path_idx, &local_path_idx);
+
+            if (min_dist < p.collision_radius)
+            {
+                is_fault = true;
+            }
+
+            // 장애물도 벽과 동일하게 하드 충돌 판정을 받는다 (기존엔 소프트 obs_cost만 있었음).
+            float min_obs_gap = 1e9f;
+            for (int i = 0; i < p.num_obstacles; ++i)
+            {
+                float dx = x.x - p.obs_x[i];
+                float dy = x.y - p.obs_y[i];
+                min_obs_gap = fminf(min_obs_gap, sqrtf(dx * dx + dy * dy) - p.car_radius);
+            }
+            if (min_obs_gap < p.collision_radius)
+            {
+                is_fault = true;
+            }
+
+            if (is_fault)
+            {
+                // 기본 패널티를 10000으로 낮추고, 오래 버틸수록 패널티를 50씩 대폭 깎아줍니다.
+                // 이로 인해 어차피 박을 상황이면 풀브레이킹+조향으로 1틱이라도 더 버티는 샘플의 가중치가 높아집니다.
+                total_cost += 10000.0f - (float)t * 50.0f;
+
+                // 충돌했더라도, 그때까지 더 멀리 전진했다면 보상을 줍니다.
+                if (path_len > 0)
+                {
+                    int progress = local_path_idx - initial_path_idx;
+                    if (progress < -path_len / 2)
+                        progress += path_len;
+                    int max_possible_progress = T + 10;
+                    progress = max(0, min(progress, max_possible_progress));
+                    total_cost -= p.q_v * (float)progress * 5.0f;
+                }
+
+                // 현재 틱(t)에서 사용한 제어 입력(u)의 조향각을 가져옵니다.
+                float survival_steer = controls[k * T + t].steer * 0.1;
+                // 속도는 0.0f (또는 마찰원 한계 내의 급제동 -1.0f)로 설정하고 조향은 살립니다.
+                Control safe_control = {survival_steer, -2.0f};
+
+                for (int fill_t = t + 1; fill_t < T; ++fill_t)
+                {
+                    states[k * T + fill_t] = x;
+                    controls[k * T + fill_t] = safe_control;
+                }
+                break;
+            }
 
             if (path_len > 0)
             {

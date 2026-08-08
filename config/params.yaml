@@ -80,8 +80,8 @@
     horizon_steps: 60       # model_dt=0.04 s 기준 2.4 s prediction horizon
     
     # --- Obstacle Avoidance Params ---
-    car_radius: 0.25
-    q_obs: 150.0
+    car_radius: 0.2
+    q_obs: 50.0
     
     # --- Noise & Tuning ---
     noise_steer_std: 0.4     # rad/s
@@ -140,15 +140,15 @@
     # pacejka_sysid 로 식별한 D 는 훨씬 작게 나오며, 그대로 넣으면 횡력이 3~4배 줄어
     # SMPPI 가 크게 보수적으로 변한다. 반드시 저속에서 단계적으로 적용할 것.
     # 절차: src/control/pacejka_sysid/README.md 의 "식별 결과를 SMPPI 에 반영하기" 참고.
-    B_f: 6.0926
-    C_f: 1.2447
-    D_f: 0.7955
-    E_f: 0.7815
+    B_f: 1.5
+    C_f: 1.5
+    D_f: 2.0843    # 38.0 N / F_zf(18.2315 N) 무손실 변환 (위 설명 참고)
+    E_f: 0.0
 
-    B_r: 6.6457
-    C_r: 2.2129
-    D_r: 0.7317
-    E_r: 0.0597
+    B_r: 1.5
+    C_r: 1.5
+    D_r: 1.9233    # 35.5 N / F_zr(18.4579 N) 무손실 변환 (위 설명 참고)
+    E_r: 0.0
 
     # 0807 dynamic regression; used only by dynamic_mlp_residual.
     dynamic_mlp_B_f: 3.879070152566808

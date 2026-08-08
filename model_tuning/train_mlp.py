@@ -271,7 +271,10 @@ def main():
         for begin in range(0,len(test_starts),a.batch_size):alltraj.append(rollout(test_starts[begin:begin+a.batch_size],collect=True)[1].cpu().numpy())
     traj=np.concatenate(alltraj);j0=test_starts+49
     gtpose=np.stack([pose[j0+k] for k in range(horizon+1)],1);gtstate=np.stack([target_body[j0+k] for k in range(horizon+1)],1)
-    pe=np.linalg.norm(traj[:,:,:2]-gtpose[:,:,:2],axis=2);se=np.abs(traj[:,:,3]-gtstate[:,:,0]);we=np.abs(traj[:,:,5]-gtstate[:,:,2])
+    pe=np.linalg.norm(traj[:,:,:2]-gtpose[:,:,:2],axis=2)
+    vxe=np.abs(traj[:,:,3]-gtstate[:,:,0])
+    se=np.abs(np.hypot(traj[:,:,3],traj[:,:,4])-np.hypot(gtstate[:,:,0],gtstate[:,:,1]))
+    we=np.abs(traj[:,:,5]-gtstate[:,:,2])
     metrics={'model':a.model,'action':'[steer_cmd, /drive.speed setpoint]','test_windows':len(test_starts),
       'split_policy':split_policy,'test_is_unseen_data':not split_policy.startswith('single-bag'),
       'yaw_rate_target':('kf_imu_observer' if is_slip else
@@ -282,8 +285,10 @@ def main():
       'input_normalization':a.normalization,
       'mlp_input_dim':nbase+10,
       'velocity_residual_enabled':not a.disable_velocity_residual,
-      'test_1s_mean_m':float(pe[:,-1].mean()),'test_1s_median_m':float(np.median(pe[:,-1])),'test_1s_p95_m':float(np.quantile(pe[:,-1],.95)),
-      'test_1s_worst_m':float(pe[:,-1].max()),'final_speed_mae_mps':float(se[:,-1].mean()),'final_yaw_rate_mae_radps':float(we[:,-1].mean()),
+      'final_trajectory_mean_m':float(pe[:,-1].mean()),'final_trajectory_median_m':float(np.median(pe[:,-1])),'final_trajectory_p95_m':float(np.quantile(pe[:,-1],.95)),
+      'final_trajectory_worst_m':float(pe[:,-1].max()),
+      'final_speed_mae_mps':float(se[:,-1].mean()),'final_vx_mae_mps':float(vxe[:,-1].mean()),
+      'final_yaw_rate_mae_radps':float(we[:,-1].mean()),
       'kp_speed':a.kp_speed,'dt':dt,'epochs':len(history),
       'rollout_horizon_s':a.rollout_horizon,
       'runtime_speed_limits_mps':[a.runtime_min_speed,a.runtime_max_speed],

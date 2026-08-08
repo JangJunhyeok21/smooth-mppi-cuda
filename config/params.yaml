@@ -10,7 +10,7 @@
     dynamics_model: kinematic_slip_noimu_direct_speed
     residual_weights_path: /home/a/smooth-mppi-cuda/config/kinematic_residual_gru.bin
     kinematic_noslip_noimu_weights_path: /home/a/smooth-mppi-cuda/config/ifac0807_strict_noslip_noimu_16d.bin
-    kinematic_slip_noimu_weights_path: /home/a/smooth-mppi-cuda/config/ifac0807_kinematic_slip_noimu_mppi.bin
+    kinematic_slip_noimu_weights_path: /home/a/smooth-mppi-cuda/config/ifac0807_kinematic_slip_noimu_runtime16_max4.bin
     dynamic_imu_weights_path: /home/a/smooth-mppi-cuda/config/ifac2026_dynamic_imu_recursive.bin
     # IMU is causally aligned to odometry and is also used by the 2-state vy KF.
     imu_topic: /imu/data

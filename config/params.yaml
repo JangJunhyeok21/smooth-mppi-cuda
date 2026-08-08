@@ -7,15 +7,19 @@
     # kinematic_residual은 아래 binary GRU checkpoint를 CUDA rollout 안에서 실행한다.
     # Keep the controller rollout identical to the simulator plant. The MLP
     # residual produced a persistent yaw-rate bias in closed-loop simulation.
-    dynamics_model: kinematic_noslip_noimu_direct_speed
+    dynamics_model: kinematic_slip_noimu_direct_speed
     residual_weights_path: /home/a/smooth-mppi-cuda/config/kinematic_residual_gru.bin
     kinematic_noslip_noimu_weights_path: /home/a/smooth-mppi-cuda/config/ifac0807_strict_noslip_noimu_16d.bin
-    kinematic_slip_noimu_weights_path: /home/a/smooth-mppi-cuda/config/kinematic_slip_noimu_direct_speed.bin
+    kinematic_slip_noimu_weights_path: /home/a/smooth-mppi-cuda/config/ifac0807_kinematic_slip_noimu_mppi.bin
     dynamic_imu_weights_path: /home/a/smooth-mppi-cuda/config/ifac2026_dynamic_imu_recursive.bin
     # IMU is causally aligned to odometry and is also used by the 2-state vy KF.
     imu_topic: /imu/data
     imu_sync_max_age_s: 0.05
     imu_ema_alpha: 0.25
+    # 0807 raw IMU is FRD; convert at the subscriber boundary to MPPI FLU.
+    imu_wz_sign: -1.0
+    imu_ax_sign: 1.0
+    imu_ay_sign: -1.0
     require_imu_for_mlp: true  # do not run an IMU-trained MLP with fallback placeholders
     lateral_velocity_kf_enabled: false  # dynamic_imu_recursive selects the KF automatically
     # Linear-tire cornering stiffness [N/rad]. These are NOT the Pacejka C shape factors.
@@ -44,7 +48,7 @@
     max_accel: 8.5           # m/s^2
     min_speed: 0.5           # m/s
     target_speed: 3.0        # m/s, Map1 안정 완주 우선 목표 속도
-    max_speed: 3.0           # m/s; simulator mppi_max_speed와 동일
+    max_speed: 4.0           # m/s; simulator mppi_max_speed와 동일
 
     # --- Costs (최적화 결과 반영) ---
     q_v: 2.0

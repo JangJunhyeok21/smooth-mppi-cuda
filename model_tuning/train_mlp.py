@@ -47,6 +47,13 @@ def main():
     p.add_argument('--lr',type=float,default=2e-3);p.add_argument('--patience',type=int,default=30)
     p.add_argument('--seed',type=int,default=71);p.add_argument('--device',default='cuda')
     p.add_argument('--kp-speed',type=float,default=8.0)
+    p.add_argument('--rollout-horizon',type=float,default=1.0,
+                   help='recursive training/evaluation horizon in seconds')
+    p.add_argument('--runtime-min-speed',type=float,default=.5)
+    p.add_argument('--runtime-max-speed',type=float,default=3.0)
+    p.add_argument('--state-loss-weight',type=float,default=.8)
+    p.add_argument('--position-loss-weight',type=float,default=.15)
+    p.add_argument('--yaw-loss-weight',type=float,default=.4)
     p.add_argument('--normalization',choices=('zscore','none'),default='zscore',
                    help='input feature transform; none feeds physical raw values directly')
     p.add_argument('--disable-velocity-residual',action='store_true',
@@ -61,13 +68,17 @@ def main():
     is_kinematic=is_noslip or is_slip
     device=torch.device(a.device if a.device!='cuda' or torch.cuda.is_available() else 'cpu')
     out=Path(a.output);out.mkdir(parents=True,exist_ok=True)
-    cfg=argparse.Namespace(pose_window=21,horizon=1.,history=50,max_pose_step=.25,
+    cfg=argparse.Namespace(pose_window=21,horizon=a.rollout_horizon,history=50,max_pose_step=.25,
         min_speed=.3,max_speed=10.,max_beta=.7,max_omega=8.,impact_decel=-10.,impact_margin=.5,
-        strict_no_imu=(is_noslip and a.yaw_target=='odom'))
+        strict_no_imu=(is_noslip and a.yaw_target=='odom'),
+        imu_wz_sign=a.imu_wz_sign,imu_ay_sign=a.imu_ay_sign)
     pose,polar,_,_,starts,dt,horizon=prepare(a.dataset,cfg)
     raw=np.load(a.dataset)['samples']; split=raw[:,10].astype(int);bag=raw[:,11].astype(int)
     body=np.c_[polar[:,0]*np.cos(polar[:,1]),polar[:,0]*np.sin(polar[:,1]),polar[:,2]].astype(np.float32)
     command=raw[:,[7,9]].astype(np.float32) # steer, /drive.speed setpoint
+    # Runtime MPPI clamps /drive.speed before feeding both the model and its
+    # command history; train with that exact representation.
+    command[:,1]=np.clip(command[:,1],a.runtime_min_speed,a.runtime_max_speed)
     if raw.shape[1]>=15:
         imu_raw=raw[:,12:15].astype(np.float32).copy()
     elif is_noslip and a.yaw_target=='odom':
@@ -131,7 +142,9 @@ def main():
         measured_speed=np.hypot(target_body[:,0],target_body[:,1])
         measured_beta=np.arctan2(target_body[:,1],target_body[:,0])
         base_ax=np.clip(a.kp_speed*(command[:,1]-measured_speed),-8,8.5)
-        base_speed=np.clip(measured_speed+base_ax*dt,.0,10.)
+        base_speed=np.clip(measured_speed+base_ax*dt,
+                           np.minimum(a.runtime_min_speed,measured_speed),
+                           np.maximum(a.runtime_max_speed,measured_speed))
         base_vx=base_speed*np.cos(measured_beta);base_vy=base_speed*np.sin(measured_beta)
         base_r=base_vx*np.tan(steer)/(LF+LR)
         base=np.c_[target_body,command,base_vx,base_vy,base_r]
@@ -166,7 +179,11 @@ def main():
             base_ax=torch.clamp(a.kp_speed*(u[:,1]-s[:,0]),-8.,8.5)
             base_r=s[:,0]*torch.tan(steer)/(LF+LR)
             if is_noslip:
-                classic=torch.stack((s[:,0]+base_ax*dt,torch.zeros(b,device=device),base_r),1)
+                unclamped=s[:,0]+base_ax*dt
+                base_v=torch.minimum(torch.maximum(unclamped,
+                    torch.minimum(torch.full_like(s[:,0],a.runtime_min_speed),s[:,0])),
+                    torch.maximum(torch.full_like(s[:,0],a.runtime_max_speed),s[:,0]))
+                classic=torch.stack((base_v,torch.zeros(b,device=device),base_r),1)
                 fbase=torch.stack((s[:,0],s[:,2],u[:,0],u[:,1],
                                    classic[:,0],classic[:,2]),1)
                 pred=torch.tanh(net(torch.cat(((fbase-mean_t)/std_t,
@@ -184,7 +201,10 @@ def main():
                 current_speed=torch.hypot(s[:,0],s[:,1])
                 beta=torch.atan2(s[:,1],s[:,0])
                 slip_ax=torch.clamp(a.kp_speed*(u[:,1]-current_speed),-8.,8.5)
-                base_speed=torch.clamp(current_speed+slip_ax*dt,0.,10.)
+                unclamped=current_speed+slip_ax*dt
+                base_speed=torch.minimum(torch.maximum(unclamped,
+                    torch.minimum(torch.full_like(current_speed,a.runtime_min_speed),current_speed)),
+                    torch.maximum(torch.full_like(current_speed,a.runtime_max_speed),current_speed))
                 base_vx=base_speed*torch.cos(beta);base_vy=base_speed*torch.sin(beta)
                 base_r=base_vx*torch.tan(steer)/(LF+LR)
                 classic=torch.stack((base_vx,base_vy,base_r),1)
@@ -212,9 +232,9 @@ def main():
                             q[:,1]+next_speed*torch.sin(q[:,2]+next_beta)*dt,
                             q[:,2]+ns[:,2]*dt),1)
             gt_s=body_t[ix+1];gt_q=pose_t[ix+1];gt_imu=imu_t[ix+1,1:3] # gt_s : vx,vy,r; gt_q : x,y,yaw; gt_imu : ax,ay
-            state_loss=.8*torch.nn.functional.smooth_l1_loss(ns,gt_s,reduction='none').mean(1)
-            yaw_loss=.4*torch.nn.functional.smooth_l1_loss(nq[:,2],gt_q[:,2],reduction='none')
-            pos_loss=.15*torch.linalg.vector_norm(nq[:,:2]-gt_q[:,:2],dim=1)
+            state_loss=a.state_loss_weight*torch.nn.functional.smooth_l1_loss(ns,gt_s,reduction='none').mean(1)
+            yaw_loss=a.yaw_loss_weight*torch.nn.functional.smooth_l1_loss(nq[:,2],gt_q[:,2],reduction='none')
+            pos_loss=a.position_loss_weight*torch.linalg.vector_norm(nq[:,:2]-gt_q[:,:2],dim=1)
             imu_loss=(.04*torch.nn.functional.smooth_l1_loss(next_axay,gt_imu,reduction='none').mean(1)
                       if a.model=='dynamic_imu' else 0.)
             losses.append(state_loss+yaw_loss+pos_loss+imu_loss)
@@ -265,6 +285,9 @@ def main():
       'test_1s_mean_m':float(pe[:,-1].mean()),'test_1s_median_m':float(np.median(pe[:,-1])),'test_1s_p95_m':float(np.quantile(pe[:,-1],.95)),
       'test_1s_worst_m':float(pe[:,-1].max()),'final_speed_mae_mps':float(se[:,-1].mean()),'final_yaw_rate_mae_radps':float(we[:,-1].mean()),
       'kp_speed':a.kp_speed,'dt':dt,'epochs':len(history),
+      'rollout_horizon_s':a.rollout_horizon,
+      'runtime_speed_limits_mps':[a.runtime_min_speed,a.runtime_max_speed],
+      'loss_weights':{'state':a.state_loss_weight,'position':a.position_loss_weight,'yaw':a.yaw_loss_weight},
       'best_validation_loss':(best if np.isfinite(best) else None),
       'dynamic_imu_policy':('measured EMA ax/ay only at horizon start; predicted ax/ay recursively thereafter' if a.model=='dynamic_imu' else None)}
     (out/'metrics.json').write_text(json.dumps(metrics,indent=2)+'\n');np.savez_compressed(out/'test_predictions.npz',starts=test_starts,prediction=traj,gt_pose=gtpose,gt_state=gtstate,position_error=pe,speed_error=se,yaw_rate_error=we)

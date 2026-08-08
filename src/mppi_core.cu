@@ -213,7 +213,11 @@ namespace mppi
         const float speed_cmd=fminf(p.max_speed,fmaxf(p.min_speed,u.accel));
         const float steer=fminf(.55f,fmaxf(-.55f,p.kinematic_steer_scale*u.steer+p.kinematic_steer_bias));
         const float base_ax=fminf(p.max_accel,fmaxf(p.min_accel,p.speed_servo_kp*(speed_cmd-s.v)));
-        const float base_v=fminf(p.max_speed,fmaxf(p.min_speed,s.v+base_ax*p.dt));
+        // min/max_speed are command limits, not instantaneous state limits.
+        // Preserve an already measured out-of-range state and let acceleration
+        // dynamics return it gradually instead of jumping in one time step.
+        const float state_lo=fminf(p.min_speed,s.v),state_hi=fmaxf(p.max_speed,s.v);
+        const float base_v=fminf(state_hi,fmaxf(state_lo,s.v+base_ax*p.dt));
         const float base_w=s.v*tanf(steer)/(p.l_f+p.l_r);
         float raw[16]={s.v,s.omega,u.steer,speed_cmd,base_v,base_w};
         for(int i=0;i<10;++i)raw[6+i]=history[i];
@@ -236,7 +240,8 @@ namespace mppi
         const float speed=hypotf(s.v,s.vy);
         const float beta=atan2f(s.vy,s.v);
         const float base_ax=fminf(p.max_accel,fmaxf(p.min_accel,p.speed_servo_kp*(speed_cmd-speed)));
-        const float base_speed=fminf(p.max_speed,fmaxf(p.min_speed,speed+base_ax*p.dt));
+        const float state_lo=fminf(p.min_speed,speed),state_hi=fmaxf(p.max_speed,speed);
+        const float base_speed=fminf(state_hi,fmaxf(state_lo,speed+base_ax*p.dt));
         const float base_vx=base_speed*cosf(beta),base_vy=base_speed*sinf(beta);
         const float base_w=base_vx*tanf(steer)/(p.l_f+p.l_r);
         float raw[18]={s.v,s.vy,s.omega,u.steer,speed_cmd,base_vx,base_vy,base_w};

@@ -145,9 +145,15 @@ private:
     void imu_callback(const sensor_msgs::msg::Imu::SharedPtr msg) {
         rclcpp::Time stamp(msg->header.stamp);
         if (stamp.nanoseconds() == 0) stamp = this->now();
-        imu_buffer_.push_back({stamp,static_cast<float>(msg->angular_velocity.z),
-                              static_cast<float>(msg->linear_acceleration.x),
-                              static_cast<float>(msg->linear_acceleration.y)});
+        // 0807 IMU is FRD (x-forward, y-right, z-down), while the MPPI state
+        // uses ROS FLU (x-forward, y-left, z-up). Convert once at the callback
+        // boundary so every downstream consumer (EMA, vy KF, residual model)
+        // sees the same body-frame convention as the training pipeline.
+        imu_buffer_.push_back({
+            stamp,
+            imu_wz_sign_*static_cast<float>(msg->angular_velocity.z),
+            imu_ax_sign_*static_cast<float>(msg->linear_acceleration.x),
+            imu_ay_sign_*static_cast<float>(msg->linear_acceleration.y)});
         while(imu_buffer_.size()>imu_buffer_capacity_) imu_buffer_.pop_front();
         imu_received_=true;
     }
@@ -443,6 +449,12 @@ private:
         this->declare_parameter("imu_ema_alpha",0.25);
         imu_ema_alpha_=static_cast<float>(std::clamp(
             this->get_parameter("imu_ema_alpha").as_double(),0.0,1.0));
+        this->declare_parameter("imu_wz_sign",-1.0);
+        imu_wz_sign_=static_cast<float>(this->get_parameter("imu_wz_sign").as_double());
+        this->declare_parameter("imu_ax_sign",1.0);
+        imu_ax_sign_=static_cast<float>(this->get_parameter("imu_ax_sign").as_double());
+        this->declare_parameter("imu_ay_sign",-1.0);
+        imu_ay_sign_=static_cast<float>(this->get_parameter("imu_ay_sign").as_double());
         this->declare_parameter("kf_cornering_stiffness_front",110.0);lateral_velocity_kf_params_.cornering_stiffness_front=this->get_parameter("kf_cornering_stiffness_front").as_double();
         this->declare_parameter("kf_cornering_stiffness_rear",199.0);lateral_velocity_kf_params_.cornering_stiffness_rear=this->get_parameter("kf_cornering_stiffness_rear").as_double();
         this->declare_parameter("kf_min_vx",0.5);lateral_velocity_kf_params_.min_longitudinal_speed=this->get_parameter("kf_min_vx").as_double();
@@ -730,6 +742,7 @@ private:
     std::array<float,3> aligned_imu_{0.f,0.f,0.f};
     double imu_sync_max_age_s_{0.05};
     float imu_ema_alpha_{0.25f};
+    float imu_wz_sign_{-1.f},imu_ax_sign_{1.f},imu_ay_sign_{-1.f};
     bool imu_received_{false},aligned_imu_valid_{false},imu_ema_initialized_{false};
 };
 

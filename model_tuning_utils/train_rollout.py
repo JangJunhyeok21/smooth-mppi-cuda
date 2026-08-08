@@ -38,7 +38,10 @@ def prepare(path, args):
     else:
         # Runtime-observable state: longitudinal odometry plus the same causal
         # 2-state KF used by SMPPI. No centered/future pose differentiation is used.
-        vy, omega = estimate_dataset(a, z["columns"], dt)
+        vy, omega = estimate_dataset(
+            a, z["columns"], dt,
+            imu_wz_sign=getattr(args,"imu_wz_sign",1.0),
+            imu_ay_sign=getattr(args,"imu_ay_sign",1.0))
     state = np.c_[np.hypot(vx, vy), np.arctan2(vy, np.maximum(vx, .1)), omega]
     # Keep speed setpoint: on this vehicle acceleration is frequently saturated and the
     # low-level longitudinal loop primarily follows AckermannDrive.speed.

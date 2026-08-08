@@ -123,7 +123,7 @@ class LateralVelocityKF:
 
 def estimate_dataset(samples, columns, dt, params=None, steer_scale=1.1058064699,
                      steer_bias=-0.0300696939, max_steer=0.4788,
-                     imu_ema_alpha=0.25):
+                     imu_ema_alpha=0.25, imu_wz_sign=1.0, imu_ay_sign=1.0):
     """Estimate causally and reset KF/IMU EMA at every data discontinuity."""
     names = {str(name): i for i, name in enumerate(columns)}
     required = ("t", "vx", "steer", "bag_id", "imu_wz", "imu_ay")
@@ -138,7 +138,8 @@ def estimate_dataset(samples, columns, dt, params=None, steer_scale=1.1058064699
     filtered_wz = filtered_ay = 0.0
     for i, row in enumerate(samples):
         bag, stamp = int(row[names["bag_id"]]), row[names["t"]]
-        wz, ay = row[names["imu_wz"]], row[names["imu_ay"]]
+        wz = imu_wz_sign * row[names["imu_wz"]]
+        ay = imu_ay_sign * row[names["imu_ay"]]
         reset = (previous_bag != bag or previous_t is None or
                  abs(stamp-previous_t-dt) > 0.5*dt)
         if reset:

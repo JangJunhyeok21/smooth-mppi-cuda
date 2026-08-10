@@ -782,9 +782,9 @@ namespace mppi
             float dx = s.x - p.obs_x[i];
             float dy = s.y - p.obs_y[i];
             float dist = sqrtf(dx * dx + dy * dy);
-            if (dist < 1.5f)
+            if (dist < 0.5f)
             {
-                float penetration = 1.5f - dist;
+                float penetration = 0.5f - dist;
                 obs_cost += p.q_obs * penetration * penetration;
 
                 if (dist < obs_safe_dist * 1.5f)

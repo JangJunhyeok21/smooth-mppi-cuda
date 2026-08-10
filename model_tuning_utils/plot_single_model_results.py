@@ -5,8 +5,18 @@ import numpy as np
 import matplotlib;matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
+# Direct-run settings. Edit these values and run
+# `python3 model_tuning/evaluate_model.py`; CLI arguments are optional.
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+RESULT_PATH = PROJECT_ROOT / 'model_tuning/results/ifac0807_0808_actuator_regressed_yaw_curriculum'
+OUTPUT_PATH = RESULT_PATH / 'visualization'
+COMPARE_RESULT_PATH = None
+COMPARE_LABELS = None
+DATASET_PATH = PROJECT_ROOT / 'model_tuning/data/ifac0807_0808_hardcase_train_test.npz'
+HISTORY_OFFSET = 5
+
 def main():
- p=argparse.ArgumentParser();p.add_argument('result');p.add_argument('-o','--output',required=True);p.add_argument('--compare',help='optional second result directory');p.add_argument('--labels',nargs=2,metavar=('RESULT','COMPARE'),help='labels for a two-result comparison');p.add_argument('--dataset',help='extracted NPZ used to overlay /drive.speed');p.add_argument('--history-offset',type=int,default=49);a=p.parse_args();src=Path(a.result);out=Path(a.output);out.mkdir(parents=True,exist_ok=True)
+ p=argparse.ArgumentParser();p.add_argument('result',nargs='?',default=str(RESULT_PATH));p.add_argument('-o','--output',default=str(OUTPUT_PATH));p.add_argument('--compare',default=None if COMPARE_RESULT_PATH is None else str(COMPARE_RESULT_PATH),help='optional second result directory');p.add_argument('--labels',nargs=2,default=COMPARE_LABELS,metavar=('RESULT','COMPARE'),help='labels for a two-result comparison');p.add_argument('--dataset',default=str(DATASET_PATH),help='extracted NPZ used to overlay /drive.speed');p.add_argument('--history-offset',type=int,default=HISTORY_OFFSET);a=p.parse_args();src=Path(a.result);out=Path(a.output);out.mkdir(parents=True,exist_ok=True)
  z=np.load(src/'test_predictions.npz');e=z['position_error'];pred=z['prediction'];gt=z['gt_pose'];state=z['gt_state'];f=e[:,-1];ids=[int(np.argmin(f)),int(np.argmin(abs(f-np.median(f)))),int(np.argmax(f))];raw=(np.load(a.dataset)['samples'] if a.dataset else None)
  fig,ax=plt.subplots(2,3,figsize=(14,8))
  for j,(name,i) in enumerate(zip(('best','median','worst'),ids)):

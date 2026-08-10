@@ -3,22 +3,28 @@
 import argparse, json, math
 from pathlib import Path
 import numpy as np
-import matplotlib
-matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 
-def main():
-    p=argparse.ArgumentParser(description=__doc__)
-    p.add_argument("dataset"); p.add_argument("-o","--output",required=True)
-    p.add_argument("--cleaning-report")
-    a=p.parse_args(); z=np.load(a.dataset); raw=z["samples"]; bag=raw[:,11].astype(int)
-    report=json.loads(Path(a.cleaning_report).read_text()) if a.cleaning_report else {"rejected_bags":{}}
+def generate_plots(dataset, output, cleaning_report=None, show_plots=False):
+    """Generate all plots without requiring command-line argument parsing."""
+    dataset=Path(dataset); output=Path(output)
+    z=np.load(dataset); raw=z["samples"]; bag=raw[:,11].astype(int)
+    report=json.loads(Path(cleaning_report).read_text()) if cleaning_report else {"rejected_bags":{}}
     rejected={int(k) for k in report.get("rejected_bags",{})}
-    out=Path(a.output); out.mkdir(parents=True,exist_ok=True)
-    manifest_path=Path(a.dataset).with_suffix(".manifest.json")
+    out=output; out.mkdir(parents=True,exist_ok=True)
+    manifest_path=dataset.with_suffix(".manifest.json")
     manifest=json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
     bag_meta={int(x["bag_id"]):x for x in manifest.get("bags",[])}
+
+    figures=[]
+    saved_files=[]
+
+    def save_figure(fig,filename,dpi):
+        path=out/filename
+        fig.savefig(path,dpi=dpi,bbox_inches="tight")
+        figures.append(fig)
+        saved_files.append(path.resolve())
 
     def grid(ids,filename,title,color):
         cols=4; rows=math.ceil(len(ids)/cols)
@@ -32,7 +38,8 @@ def main():
             ax.set_title(f"bag {bid} | {split} | n={len(ii)}\nmax step={maxstep:.3f} m",fontsize=9)
             ax.set_aspect("equal",adjustable="datalim"); ax.grid(alpha=.25); ax.set_xlabel("x [m]"); ax.set_ylabel("y [m]")
         for ax in axes.flat[len(ids):]: ax.axis("off")
-        fig.suptitle(title,fontsize=15,y=.999); fig.tight_layout(); fig.savefig(out/filename,dpi=170,bbox_inches="tight"); plt.close(fig)
+        fig.suptitle(title,fontsize=15,y=.999); fig.tight_layout()
+        save_figure(fig,filename,170)
 
     all_ids=sorted(map(int,np.unique(bag))); clean_ids=[x for x in all_ids if x not in rejected]
     bad_ids=[x for x in all_ids if x in rejected]
@@ -48,10 +55,26 @@ def main():
             ax.plot(raw[ii,1],raw[ii,2],lw=.9,alpha=.7); count+=1
         ax.set_title(f"{label} GT overlay — {count} clean bags"); ax.set_xlabel("x [m]"); ax.set_ylabel("y [m]")
         ax.set_aspect("equal",adjustable="datalim"); ax.grid(alpha=.25)
-    fig.tight_layout(); fig.savefig(out/"clean_train_test_gt_overlay.png",dpi=180); plt.close(fig)
-    summary={"dataset":a.dataset,"clean_bag_ids":clean_ids,"rejected_bag_ids":bad_ids,
+    fig.tight_layout(); save_figure(fig,"clean_train_test_gt_overlay.png",180)
+    summary={"dataset":str(dataset),"clean_bag_ids":clean_ids,"rejected_bag_ids":bad_ids,
              "clean_bags":len(clean_ids),"rejected_bags":len(bad_ids)}
+    summary["plot_files"]=[str(path) for path in saved_files]
     (out/"gt_trajectory_plot_summary.json").write_text(json.dumps(summary,indent=2)+"\n")
     print(json.dumps(summary,indent=2))
+    if show_plots:
+        print("Plot windows are open. Close them to finish the program.")
+        plt.show()
+    for figure in figures:
+        plt.close(figure)
+    return summary
+
+
+def main():
+    p=argparse.ArgumentParser(description=__doc__)
+    p.add_argument("dataset"); p.add_argument("-o","--output",required=True)
+    p.add_argument("--cleaning-report")
+    p.add_argument("--show",action="store_true")
+    a=p.parse_args()
+    generate_plots(a.dataset,a.output,a.cleaning_report,a.show)
 
 if __name__=="__main__": main()

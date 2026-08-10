@@ -12,10 +12,11 @@ from scipy.signal import savgol_filter
 
 try:
     from model_tuning_utils.train_hybrid import classic_derivative, NAMES
-    from model_tuning_utils.lateral_velocity_kf import estimate_dataset
+    from model_tuning_utils.lateral_velocity_kf import (
+        LateralVelocityKFParams, estimate_dataset)
 except ModuleNotFoundError:  # direct execution: python model_tuning/train_rollout.py
     from train_hybrid import classic_derivative, NAMES
-    from lateral_velocity_kf import estimate_dataset
+    from lateral_velocity_kf import LateralVelocityKFParams, estimate_dataset
 
 
 def prepare(path, args):
@@ -38,8 +39,14 @@ def prepare(path, args):
     else:
         # Runtime-observable state: longitudinal odometry plus the same causal
         # 2-state KF used by SMPPI. No centered/future pose differentiation is used.
+        kf_params = LateralVelocityKFParams(
+            dt=dt,
+            cornering_stiffness_front=getattr(
+                args,"kf_cornering_stiffness_front",110.0),
+            cornering_stiffness_rear=getattr(
+                args,"kf_cornering_stiffness_rear",199.0))
         vy, omega = estimate_dataset(
-            a, z["columns"], dt,
+            a, z["columns"], dt, params=kf_params,
             imu_wz_sign=getattr(args,"imu_wz_sign",1.0),
             imu_ay_sign=getattr(args,"imu_ay_sign",1.0))
     state = np.c_[np.hypot(vx, vy), np.arctan2(vy, np.maximum(vx, .1)), omega]
@@ -76,7 +83,8 @@ def prepare(path, args):
     good = np.convolve(valid.astype(np.int16), np.ones(total, dtype=np.int16), mode="valid") == total
     good &= bag_id[:len(good)] == bag_id[total-1:]
     starts = np.flatnonzero(good)
-    if len(starts) < 100:
+    min_windows = getattr(args, "min_windows", 100)
+    if len(starts) < min_windows:
         raise SystemExit(f"only {len(starts)} contiguous windows; relax physical limits after inspecting data")
     return pose, state, control, deriv, starts, dt, horizon
 

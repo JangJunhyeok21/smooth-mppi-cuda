@@ -24,7 +24,9 @@ public:
         load_parameters();
         validate_parameters();
 
-        if (mppi_params_.dynamics_model == mppi::KINEMATIC_SLIP_NO_IMU_DIRECT_SPEED) {
+        if (mppi_params_.dynamics_model == mppi::SLIP_KINEMATIC_WITH_IMU_DIRECT_SPEED ||
+            mppi_params_.dynamics_model == mppi::DYNAMIC_IMU_RECURSIVE ||
+            mppi_params_.dynamics_model == mppi::DYNAMIC_MLP_RESIDUAL) {
             lateral_velocity_kf_.initialize(lateral_velocity_kf_params_);
         }
 
@@ -37,10 +39,13 @@ public:
             solver_->load_mlp_no_imu_residual_weights(mlp_weights_path_);
         if (mppi_params_.dynamics_model == mppi::KINEMATIC_NOSLIP_NO_IMU_DIRECT_SPEED)
             solver_->load_kinematic_noslip_noimu_direct_weights(kinematic_noslip_noimu_weights_path_);
-        if (mppi_params_.dynamics_model == mppi::KINEMATIC_SLIP_NO_IMU_DIRECT_SPEED)
-            solver_->load_kinematic_slip_noimu_direct_weights(kinematic_slip_noimu_weights_path_);
+        if (mppi_params_.dynamics_model == mppi::SLIP_KINEMATIC_WITH_IMU_DIRECT_SPEED)
+            solver_->load_slip_kinematic_with_imu_direct_weights(slip_kinematic_with_imu_weights_path_);
         if (mppi_params_.dynamics_model == mppi::DYNAMIC_IMU_RECURSIVE)
-            solver_->load_dynamic_imu_recursive_weights(dynamic_imu_weights_path_);
+            solver_->load_dynamic_imu_recursive_weights(
+                dynamics_model_name_ == "e2e_mlp" ? e2e_weights_path_ : dynamic_imu_weights_path_);
+        if (mppi_params_.dynamics_model == mppi::DYNAMIC_MLP_RESIDUAL)
+            solver_->load_dynamic_mlp_residual_weights(dynamic_mlp_weights_path_);
 
         drive_pub_ = this->create_publisher<ackermann_msgs::msg::AckermannDriveStamped>(drive_topic_, 10);
         vis_pub_   = this->create_publisher<visualization_msgs::msg::MarkerArray>("/mppi_viz", 50);
@@ -77,7 +82,9 @@ public:
         // The no-IMU rollout neither subscribes to nor waits for IMU.  Keep the
         // subscription only for the legacy 21-feature MLP checkpoint.
         if (mppi_params_.dynamics_model == mppi::KINEMATIC_MLP_RESIDUAL ||
-            mppi_params_.dynamics_model == mppi::KINEMATIC_SLIP_NO_IMU_DIRECT_SPEED) {
+            mppi_params_.dynamics_model == mppi::SLIP_KINEMATIC_WITH_IMU_DIRECT_SPEED ||
+            mppi_params_.dynamics_model == mppi::DYNAMIC_IMU_RECURSIVE ||
+            mppi_params_.dynamics_model == mppi::DYNAMIC_MLP_RESIDUAL) {
             imu_sub_ = this->create_subscription<sensor_msgs::msg::Imu>(
                 imu_topic_, 20, std::bind(&MPPINode::imu_callback,this,std::placeholders::_1));
         }
@@ -124,13 +131,19 @@ private:
         current_state_.v = static_cast<float>(measured_vx);
         current_state_.vy = static_cast<float>(measured_vy);
         current_state_.omega = static_cast<float>(measured_omega);
-        if (mppi_params_.dynamics_model == mppi::KINEMATIC_SLIP_NO_IMU_DIRECT_SPEED) {
+        if (mppi_params_.dynamics_model == mppi::SLIP_KINEMATIC_WITH_IMU_DIRECT_SPEED ||
+            mppi_params_.dynamics_model == mppi::DYNAMIC_IMU_RECURSIVE ||
+            mppi_params_.dynamics_model == mppi::DYNAMIC_MLP_RESIDUAL) {
             const float steer = std::clamp(kf_steer_scale_ * last_steer_cmd_ + kf_steer_bias_,
                                            -kf_max_steer_, kf_max_steer_);
             const float wz = aligned_imu_valid_ ? aligned_imu_[0] : NAN;
             const float ay = aligned_imu_valid_ ? aligned_imu_[2] : NAN;
             current_state_.vy = lateral_velocity_kf_.update(current_state_.v, steer, wz, ay);
-            current_state_.omega = lateral_velocity_kf_.getYawRate();
+            // vy is unobservable and comes from the KF. Yaw-rate is directly
+            // observable: keep the signed/causally aligned IMU measurement.
+            // The coupled KF yaw state was ~2x too small in the 08-08 turns.
+            current_state_.omega = aligned_imu_valid_ ? aligned_imu_[0]
+                                                       : static_cast<float>(measured_omega);
         }
         current_state_.slip_angle =
             std::atan2(current_state_.vy, std::fabs(current_state_.v) + 1e-5f);
@@ -236,13 +249,16 @@ private:
         current_state_.v     = static_cast<float>(estimated_vx);
         current_state_.vy    = static_cast<float>(estimated_vy);
         current_state_.omega = static_cast<float>(estimated_omega);
-        if (mppi_params_.dynamics_model == mppi::KINEMATIC_SLIP_NO_IMU_DIRECT_SPEED) {
+        if (mppi_params_.dynamics_model == mppi::SLIP_KINEMATIC_WITH_IMU_DIRECT_SPEED ||
+            mppi_params_.dynamics_model == mppi::DYNAMIC_IMU_RECURSIVE ||
+            mppi_params_.dynamics_model == mppi::DYNAMIC_MLP_RESIDUAL) {
             const float steer = std::clamp(kf_steer_scale_*last_steer_cmd_+kf_steer_bias_,
                                            -kf_max_steer_,kf_max_steer_);
             const float wz = aligned_imu_valid_ ? aligned_imu_[0] : NAN;
             const float ay = aligned_imu_valid_ ? aligned_imu_[2] : NAN;
             current_state_.vy = lateral_velocity_kf_.update(current_state_.v,steer,wz,ay);
-            current_state_.omega = lateral_velocity_kf_.getYawRate();
+            current_state_.omega = aligned_imu_valid_ ? aligned_imu_[0]
+                                                       : static_cast<float>(measured_omega);
         }
         last_body_vx_ = estimated_vx;
 
@@ -342,10 +358,14 @@ private:
         mlp_weights_path_=this->get_parameter("mlp_weights_path").as_string();
         this->declare_parameter("kinematic_noslip_noimu_weights_path", "/home/a/smooth-mppi-cuda/config/kinematic_noslip_noimu_direct_speed.bin");
         kinematic_noslip_noimu_weights_path_=this->get_parameter("kinematic_noslip_noimu_weights_path").as_string();
-        this->declare_parameter("kinematic_slip_noimu_weights_path", "/home/a/smooth-mppi-cuda/config/kinematic_slip_noimu_direct_speed.bin");
-        kinematic_slip_noimu_weights_path_=this->get_parameter("kinematic_slip_noimu_weights_path").as_string();
+        this->declare_parameter("slip_kinematic_with_imu_weights_path", "/home/a/smooth-mppi-cuda/config/slip_kinematic_with_imu_direct_speed.bin");
+        slip_kinematic_with_imu_weights_path_=this->get_parameter("slip_kinematic_with_imu_weights_path").as_string();
         this->declare_parameter("dynamic_imu_weights_path", "/home/a/smooth-mppi-cuda/config/dynamic_imu_recursive.bin");
         dynamic_imu_weights_path_=this->get_parameter("dynamic_imu_weights_path").as_string();
+        this->declare_parameter("dynamic_mlp_weights_path", "/home/a/smooth-mppi-cuda/config/dynamic_MLP.bin");
+        dynamic_mlp_weights_path_=this->get_parameter("dynamic_mlp_weights_path").as_string();
+        this->declare_parameter("e2e_weights_path", "/home/a/smooth-mppi-cuda/config/E2E.bin");
+        e2e_weights_path_=this->get_parameter("e2e_weights_path").as_string();
         if (dynamics_model_name_ == "legacy_hybrid") {
             mppi_params_.dynamics_model = mppi::LEGACY_HYBRID;
         } else if (dynamics_model_name_ == "kinematic") {
@@ -358,10 +378,14 @@ private:
             mppi_params_.dynamics_model = mppi::KINEMATIC_MLP_NO_IMU_RESIDUAL;
         } else if (dynamics_model_name_ == "kinematic_noslip_noimu_direct_speed") {
             mppi_params_.dynamics_model = mppi::KINEMATIC_NOSLIP_NO_IMU_DIRECT_SPEED;
-        } else if (dynamics_model_name_ == "kinematic_slip_noimu_direct_speed") {
-            mppi_params_.dynamics_model = mppi::KINEMATIC_SLIP_NO_IMU_DIRECT_SPEED;
+        } else if (dynamics_model_name_ == "slip_kinematic_with_imu_direct_speed") {
+            mppi_params_.dynamics_model = mppi::SLIP_KINEMATIC_WITH_IMU_DIRECT_SPEED;
         } else if (dynamics_model_name_ == "dynamic_imu_recursive") {
             mppi_params_.dynamics_model = mppi::DYNAMIC_IMU_RECURSIVE;
+        } else if (dynamics_model_name_ == "e2e_mlp") {
+            mppi_params_.dynamics_model = mppi::DYNAMIC_IMU_RECURSIVE;
+        } else if (dynamics_model_name_ == "dynamic_mlp_residual") {
+            mppi_params_.dynamics_model = mppi::DYNAMIC_MLP_RESIDUAL;
         } else {
             throw std::invalid_argument("Unknown dynamics_model: " + dynamics_model_name_);
         }
@@ -400,10 +424,16 @@ private:
         mppi_params_.kinematic_steer_scale=this->get_parameter("kinematic_steer_scale").as_double();
         this->declare_parameter("kinematic_steer_bias",-0.0347926021);
         mppi_params_.kinematic_steer_bias=this->get_parameter("kinematic_steer_bias").as_double();
+        this->declare_parameter("kinematic_position_speed_scale",1.0);
+        mppi_params_.kinematic_position_speed_scale=
+            this->get_parameter("kinematic_position_speed_scale").as_double();
         this->declare_parameter("kinematic_no_slip",true);
         mppi_params_.kinematic_no_slip=this->get_parameter("kinematic_no_slip").as_bool();
         this->declare_parameter("Cm0",    0.04);   mppi_params_.Cm0  = this->get_parameter("Cm0").as_double();
         this->declare_parameter("speed_servo_kp",8.0);mppi_params_.speed_servo_kp=this->get_parameter("speed_servo_kp").as_double();
+        this->declare_parameter("steer_servo_time_constant",0.08);mppi_params_.steer_servo_time_constant=this->get_parameter("steer_servo_time_constant").as_double();
+        this->declare_parameter("actuator_max_steer_rate",6.0);mppi_params_.actuator_max_steer_rate=this->get_parameter("actuator_max_steer_rate").as_double();
+        mppi_params_.actuator_steer_state=0.0f;
         // Pacejka 4-파라미터 (ForzaETH On-Track-SysID 규약).
         // D 는 무차원 마찰계수이며 실제 힘은 아래에서 계산하는 정하중 F_z 가 만든다.
         // E=0 이면 예전 3-파라미터 수식과 완전히 동일하다 (mppi_core.cu 주석 참고).
@@ -415,6 +445,18 @@ private:
         this->declare_parameter("C_r",    1.5);    mppi_params_.C_r  = this->get_parameter("C_r").as_double();
         this->declare_parameter("D_r",    0.65);   mppi_params_.D_r  = this->get_parameter("D_r").as_double();
         this->declare_parameter("E_r",    0.0);    mppi_params_.E_r  = this->get_parameter("E_r").as_double();
+
+        // Dedicated parameters used only by dynamic_mlp_residual.  They must
+        // match tune_dynamic_model.py and must not overwrite the KF/legacy I_z.
+        this->declare_parameter("dynamic_mlp_B_f", 3.7417837566); mppi_params_.dynamic_mlp_B_f=this->get_parameter("dynamic_mlp_B_f").as_double();
+        this->declare_parameter("dynamic_mlp_C_f", 1.5797653815); mppi_params_.dynamic_mlp_C_f=this->get_parameter("dynamic_mlp_C_f").as_double();
+        this->declare_parameter("dynamic_mlp_D_f", 0.2488725065); mppi_params_.dynamic_mlp_D_f=this->get_parameter("dynamic_mlp_D_f").as_double();
+        this->declare_parameter("dynamic_mlp_E_f",-1.0);          mppi_params_.dynamic_mlp_E_f=this->get_parameter("dynamic_mlp_E_f").as_double();
+        this->declare_parameter("dynamic_mlp_B_r", 3.3027640068); mppi_params_.dynamic_mlp_B_r=this->get_parameter("dynamic_mlp_B_r").as_double();
+        this->declare_parameter("dynamic_mlp_C_r", 1.9942488896); mppi_params_.dynamic_mlp_C_r=this->get_parameter("dynamic_mlp_C_r").as_double();
+        this->declare_parameter("dynamic_mlp_D_r", 0.4480617878); mppi_params_.dynamic_mlp_D_r=this->get_parameter("dynamic_mlp_D_r").as_double();
+        this->declare_parameter("dynamic_mlp_E_r",-1.0);          mppi_params_.dynamic_mlp_E_r=this->get_parameter("dynamic_mlp_E_r").as_double();
+        this->declare_parameter("dynamic_mlp_I_z", 0.5);          mppi_params_.dynamic_mlp_I_z=this->get_parameter("dynamic_mlp_I_z").as_double();
 
         // 정하중 (pacejka_sysid/helpers/generate_predictions.py 와 동일한 규약)
         //   F_zf = m*g*l_r/l_wb,  F_zr = m*g*l_f/l_wb,  l_wb = l_f + l_r
@@ -557,11 +599,22 @@ private:
         }
         if(mppi_params_.dynamics_model==mppi::KINEMATIC_MLP_NO_IMU_RESIDUAL ||
            mppi_params_.dynamics_model==mppi::KINEMATIC_NOSLIP_NO_IMU_DIRECT_SPEED ||
-           mppi_params_.dynamics_model==mppi::KINEMATIC_SLIP_NO_IMU_DIRECT_SPEED ||
-           mppi_params_.dynamics_model==mppi::DYNAMIC_IMU_RECURSIVE) {
+	           mppi_params_.dynamics_model==mppi::SLIP_KINEMATIC_WITH_IMU_DIRECT_SPEED ||
+	           mppi_params_.dynamics_model==mppi::DYNAMIC_IMU_RECURSIVE ||
+	           mppi_params_.dynamics_model==mppi::DYNAMIC_MLP_RESIDUAL) {
             if(command_history_.empty()) command_history_.push_back({last_steer_cmd_,last_speed_cmd_});
             while(command_history_.size()<5) command_history_.push_front(command_history_.front());
             for(int i=0;i<5;++i){mppi_params_.residual_command_history[2*i]=command_history_[i][0];mppi_params_.residual_command_history[2*i+1]=command_history_[i][1];}
+        }
+        if(mppi_params_.dynamics_model==mppi::SLIP_KINEMATIC_WITH_IMU_DIRECT_SPEED ||
+           mppi_params_.dynamics_model==mppi::DYNAMIC_MLP_RESIDUAL) {
+            const float target=std::clamp(mppi_params_.kinematic_steer_scale*last_steer_cmd_+
+                mppi_params_.kinematic_steer_bias,-.55f,.55f);
+            const float rate=std::clamp((target-mppi_params_.actuator_steer_state)/
+                std::max(1e-3f,mppi_params_.steer_servo_time_constant),
+                -mppi_params_.actuator_max_steer_rate,mppi_params_.actuator_max_steer_rate);
+            mppi_params_.actuator_steer_state=std::clamp(
+                mppi_params_.actuator_steer_state+rate*mppi_params_.dt,-.55f,.55f);
         }
         if (mppi_params_.dynamics_model == mppi::KINEMATIC_RESIDUAL) {
             const float wb=mppi_params_.l_f+mppi_params_.l_r;
@@ -589,13 +642,16 @@ private:
         }
         solver_->update_params(mppi_params_);
         mppi::Control u = solver_->solve(current_state_);
-        const bool direct_speed=(mppi_params_.dynamics_model==mppi::KINEMATIC_NOSLIP_NO_IMU_DIRECT_SPEED ||
-                                 mppi_params_.dynamics_model==mppi::KINEMATIC_SLIP_NO_IMU_DIRECT_SPEED ||
-                                 mppi_params_.dynamics_model==mppi::DYNAMIC_IMU_RECURSIVE);
+	        const bool direct_speed=(mppi_params_.dynamics_model==mppi::KINEMATIC_NOSLIP_NO_IMU_DIRECT_SPEED ||
+	                                 mppi_params_.dynamics_model==mppi::SLIP_KINEMATIC_WITH_IMU_DIRECT_SPEED ||
+	                                 mppi_params_.dynamics_model==mppi::DYNAMIC_IMU_RECURSIVE ||
+	                                 mppi_params_.dynamics_model==mppi::DYNAMIC_MLP_RESIDUAL);
         float next_v;
         float published_accel;
         if(direct_speed) {
-            next_v=std::min(mppi_params_.max_speed,std::max(mppi_params_.min_speed,u.accel));
+            // u.accel==0 is the solver's explicit all-rollouts-fault stop.
+            next_v=(u.accel<=0.01f) ? 0.0f
+                                    : std::min(mppi_params_.max_speed,std::max(mppi_params_.min_speed,u.accel));
             published_accel=std::clamp(
                 (next_v-current_state_.v)/mppi_params_.dt,
                 mppi_params_.min_accel,
@@ -692,6 +748,24 @@ private:
             }
             markers.markers.push_back(bm);
         }
+
+        visualization_msgs::msg::Marker wm;
+        wm.header.frame_id = "map"; wm.header.stamp = this->now();
+        wm.ns = "weighted_control_trajectory"; wm.id = 2;
+        wm.type = visualization_msgs::msg::Marker::LINE_LIST;
+        wm.action = visualization_msgs::msg::Marker::ADD; wm.scale.x = 0.075;
+        const auto &wt = solver_->get_weighted_control_trajectory();
+        if (!wt.empty()) {
+            std_msgs::msg::ColorRGBA green;
+            green.r = 0.05f; green.g = 1.0f; green.b = 0.15f; green.a = 1.0f;
+            for (int t = 0; t < (int)wt.size()-1; ++t) {
+                geometry_msgs::msg::Point p1, p2;
+                p1.x=wt[t].x; p1.y=wt[t].y; p2.x=wt[t+1].x; p2.y=wt[t+1].y;
+                wm.points.push_back(p1); wm.colors.push_back(green);
+                wm.points.push_back(p2); wm.colors.push_back(green);
+            }
+            markers.markers.push_back(wm);
+        }
         vis_pub_->publish(markers);
     }
 
@@ -718,7 +792,7 @@ private:
     rclcpp::TimerBase::SharedPtr timer_;
 
     std::string odom_topic_, pose_topic_, velocity_topic_, drive_topic_, path_topic_, imu_topic_, dynamics_model_name_, residual_weights_path_,mlp_weights_path_;
-    std::string kinematic_noslip_noimu_weights_path_,kinematic_slip_noimu_weights_path_,dynamic_imu_weights_path_;
+    std::string kinematic_noslip_noimu_weights_path_,slip_kinematic_with_imu_weights_path_,dynamic_imu_weights_path_,dynamic_mlp_weights_path_,e2e_weights_path_;
     mppi::LateralVelocityKF lateral_velocity_kf_;
     mppi::LateralVelocityKFParams lateral_velocity_kf_params_;
     float kf_steer_scale_{1.1058064699f},kf_steer_bias_{-0.0300696939f},kf_max_steer_{0.4788f};

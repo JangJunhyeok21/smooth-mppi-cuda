@@ -13,6 +13,11 @@ from pathlib import Path
 import numpy as np
 import torch
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+RESULT_PATH = PROJECT_ROOT / "model_tuning/results/ifac0807_0808_kf_cf12p72_cr75p09_yaw_curriculum"
+OUTPUT_NAME = "slip_kinematic_MLP"
+ACTIVATE_MODEL = False
+
 
 MODEL_LAYOUT = {
     "kinematic_noslip_noimu": {
@@ -20,10 +25,20 @@ MODEL_LAYOUT = {
         "weight_key": "kinematic_noslip_noimu_weights_path",
         "binary": "kinematic_noslip_noimu_direct_speed.bin",
     },
-    "kinematic_slip_noimu": {
-        "dynamics_model": "kinematic_slip_noimu_direct_speed",
-        "weight_key": "kinematic_slip_noimu_weights_path",
-        "binary": "kinematic_slip_noimu_direct_speed.bin",
+    "slip_kinematic_with_imu": {
+        "dynamics_model": "slip_kinematic_with_imu_direct_speed",
+        "weight_key": "slip_kinematic_with_imu_weights_path",
+        "binary": "slip_kinematic_with_imu_direct_speed.bin",
+    },
+    "dynamic_residual": {
+        "dynamics_model": "dynamic_mlp_residual",
+        "weight_key": "dynamic_mlp_weights_path",
+        "binary": "dynamic_MLP.bin",
+    },
+    "e2e_mlp": {
+        "dynamics_model": "e2e_mlp",
+        "weight_key": "e2e_weights_path",
+        "binary": "E2E.bin",
     },
     "dynamic_imu": {
         "dynamics_model": "dynamic_imu_recursive",
@@ -33,12 +48,22 @@ MODEL_LAYOUT = {
 }
 
 
-def activate_yaml(path, dynamics_model, weight_key, binary):
+def activate_yaml(path, dynamics_model, weight_key, binary, metrics):
     text = path.read_text()
     replacements = {
         "dynamics_model": dynamics_model,
         weight_key: str(binary.resolve()),
     }
+    actuator=metrics.get("actuator_model") or {}
+    steering=metrics.get("steering_command_mapping") or {}
+    if actuator:
+        replacements["steer_servo_time_constant"]=actuator["servo_time_constant_s"]
+        replacements["actuator_max_steer_rate"]=actuator["max_steering_rate_rad_s"]
+    if steering:
+        replacements["kinematic_steer_scale"]=steering["scale"]
+        replacements["kinematic_steer_bias"]=steering["bias_rad"]
+    if metrics.get("position_speed_scale") is not None:
+        replacements["kinematic_position_speed_scale"]=metrics["position_speed_scale"]
     for key, value in replacements.items():
         pattern = rf"(?m)^(\s*{re.escape(key)}\s*:\s*).*$"
         text, count = re.subn(pattern, rf"\g<1>{value}", text, count=1)
@@ -49,10 +74,10 @@ def activate_yaml(path, dynamics_model, weight_key, binary):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("result", help="training result directory")
-    parser.add_argument("--project-root", default=str(Path(__file__).resolve().parents[1]))
-    parser.add_argument("--name", help="output basename; defaults to the result directory name")
-    parser.add_argument("--activate", action="store_true",
+    parser.add_argument("result", nargs="?", default=str(RESULT_PATH), help="training result directory")
+    parser.add_argument("--project-root", default=str(PROJECT_ROOT))
+    parser.add_argument("--name", default=OUTPUT_NAME, help="output basename; defaults to the result directory name")
+    parser.add_argument("--activate", action="store_true", default=ACTIVATE_MODEL,
                         help="also select the exported model in config/params.yaml")
     args = parser.parse_args()
 
@@ -83,7 +108,7 @@ def main():
 
     if args.activate:
         activate_yaml(root / "config" / "params.yaml", layout["dynamics_model"],
-                      layout["weight_key"], binary)
+                      layout["weight_key"], binary, metrics)
 
     summary = {
         "model": model,

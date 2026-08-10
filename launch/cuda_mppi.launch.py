@@ -37,8 +37,8 @@ def generate_launch_description():
             config_dir, "kinematic_mlp_residual.bin"),
         "kinematic_noslip_noimu_weights_path": os.path.join(
             config_dir, "ifac0807_strict_noslip_noimu_16d.bin"),
-        "kinematic_slip_noimu_weights_path": os.path.join(
-            config_dir, "kinematic_slip_noimu_direct_speed.bin"),
+        "slip_kinematic_with_imu_weights_path": os.path.join(
+            config_dir, "slip_kinematic_with_imu_direct_speed.bin"),
     }
     if is_simulation:
         controller_overrides = {

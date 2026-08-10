@@ -2,16 +2,18 @@
   ros__parameters:
     # Recommended split models:
     #   kinematic_noslip_noimu_direct_speed : no IMU/KF, /drive.speed setpoint
-    #   kinematic_slip_noimu_direct_speed   : 2-state IMU KF supplies initial vy; MLP has no direct IMU feature
+    #   slip_kinematic_with_imu_direct_speed: IMU/KF supplies vy; signed IMU supplies yaw-rate
     #   dynamic_imu_recursive        : IMU initializes ax/ay; future ax/ay are recursively predicted
     # kinematic_residual은 아래 binary GRU checkpoint를 CUDA rollout 안에서 실행한다.
     # Keep the controller rollout identical to the simulator plant. The MLP
     # residual produced a persistent yaw-rate bias in closed-loop simulation.
-    dynamics_model: kinematic_slip_noimu_direct_speed
+    dynamics_model: dynamic_mlp_residual
     residual_weights_path: /home/a/smooth-mppi-cuda/config/kinematic_residual_gru.bin
     kinematic_noslip_noimu_weights_path: /home/a/smooth-mppi-cuda/config/ifac0807_strict_noslip_noimu_16d.bin
-    kinematic_slip_noimu_weights_path: /home/a/smooth-mppi-cuda/config/ifac0807_kinematic_slip_noimu_runtime16_max4.bin
+    slip_kinematic_with_imu_weights_path: /home/a/smooth-mppi-cuda/config/slip_kinmatic_MLP.bin
     dynamic_imu_weights_path: /home/a/smooth-mppi-cuda/config/ifac2026_dynamic_imu_recursive.bin
+    dynamic_mlp_weights_path: /home/a/smooth-mppi-cuda/config/dynamic_MLP.bin
+    e2e_weights_path: /home/a/smooth-mppi-cuda/config/E2E.bin
     # IMU is causally aligned to odometry and is also used by the 2-state vy KF.
     imu_topic: /imu/data
     imu_sync_max_age_s: 0.05
@@ -23,8 +25,9 @@
     require_imu_for_mlp: true  # do not run an IMU-trained MLP with fallback placeholders
     lateral_velocity_kf_enabled: false  # dynamic_imu_recursive selects the KF automatically
     # Linear-tire cornering stiffness [N/rad]. These are NOT the Pacejka C shape factors.
-    kf_cornering_stiffness_front: 110.0
-    kf_cornering_stiffness_rear: 199.0
+    # 0807 collision-cleaned bag, recursive-KF rollout regression result.
+    kf_cornering_stiffness_front: 12.7222491
+    kf_cornering_stiffness_rear: 75.0944752
     kf_min_vx: 0.5
     kf_low_speed_threshold: 1.5  # below this, use the no-slip prior vy=0
     kf_max_abs_vy: 2.0
@@ -81,10 +84,14 @@
     l_f: 0.163
     l_r: 0.161
     # tiv_imu_bagdisjoint_kinematic_classic 식별 결과. l_f/l_r/mass는 학습 시 고정값.
-    kinematic_steer_scale: 0.8954927921   # Sa, IFAC KF-vy MPPI-exact 식별
-    kinematic_steer_bias: -0.0036726743   # Sb [rad]
+    kinematic_steer_scale: 0.4910603091
+    kinematic_steer_bias: 0.0092647296
+    # Robust 1.6 s fit: /odom speed units -> /newmcl_pose map displacement.
+    kinematic_position_speed_scale: 0.8601818646
     kinematic_no_slip: true               # residual checkpoint 학습 조건(beta=0)
-    speed_servo_kp: 8.0                   # [1/s], direct /drive.speed response
+    speed_servo_kp: 5.9378756714          # [1/s], direct /drive.speed response
+    steer_servo_time_constant: 0.1539426739
+    actuator_max_steer_rate: 0.9557462187
     I_z: 0.04712
     Cm0: 0.04                # 고속 감쇠용 모터 역기전력 계수
     
@@ -111,9 +118,20 @@
     D_r: 0.7317
     E_r: 0.0597
 
+    # 0807 dynamic regression; used only by dynamic_mlp_residual.
+    dynamic_mlp_B_f: 3.7417837566
+    dynamic_mlp_C_f: 1.5797653815
+    dynamic_mlp_D_f: 0.2488725065
+    dynamic_mlp_E_f: -1.0
+    dynamic_mlp_B_r: 3.3027640068
+    dynamic_mlp_C_r: 1.9942488896
+    dynamic_mlp_D_r: 0.4480617878
+    dynamic_mlp_E_r: -1.0
+    dynamic_mlp_I_z: 0.5
+
     # --- Topics (공통 키) ---
     odom_topic: /ego_racecar/odom
-    pose_topic: /mocap_pose1
+    pose_topic: /newmcl_pose
     velocity_topic: /odom
     drive_topic: /drive
     path_topic: /mppi_target_path

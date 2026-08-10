@@ -18,6 +18,12 @@ from scipy.signal import savgol_filter
 from model_tuning_utils.lateral_velocity_kf import estimate_dataset
 
 VISUALIZE_PREPROCESS_DATA = True  # set True to plot the regression data and fitted derivatives, False to skip plotting
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+DATASET_PATH = PROJECT_ROOT / "model_tuning/data/ifac0807_mppi_observation.npz"
+OUTPUT_PATH = PROJECT_ROOT / "model_tuning/results/suite_dynamic_regression_0807"
+MASS=3.74; LF=.163; LR=.161; STEER_SCALE=.50927964; STEER_BIAS=.01015773
+MIN_ACCEL=-8.; MAX_ACCEL=8.5; SMOOTH_WINDOW=21; MIN_SPEED=.7; MAX_SPEED=10.
+MAX_YAW_RATE=8.; MAX_FIT_SAMPLES=30000; MAX_NFEV=500; RANDOM_SEED=7
 PARAMETER_NAMES = (
     "speed_kp", "B_f", "C_f", "D_f", "E_f",
     "B_r", "C_r", "D_r", "E_r", "I_z",
@@ -64,22 +70,22 @@ def dynamic_derivative(state, command, parameters, fixed):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("dataset")
-    parser.add_argument("-o", "--output", required=True)
-    parser.add_argument("--mass", type=float, default=3.74)
-    parser.add_argument("--lf", type=float, default=.163)
-    parser.add_argument("--lr", type=float, default=.161)
-    parser.add_argument("--steer-scale", type=float, default=.8954927921)
-    parser.add_argument("--steer-bias", type=float, default=-.0036726743)
-    parser.add_argument("--min-accel", type=float, default=-8.)
-    parser.add_argument("--max-accel", type=float, default=8.5)
-    parser.add_argument("--smooth-window", type=int, default=21)
-    parser.add_argument("--min-speed", type=float, default=.7)
-    parser.add_argument("--max-speed", type=float, default=10.)
-    parser.add_argument("--max-yaw-rate", type=float, default=8.)
-    parser.add_argument("--max-fit-samples", type=int, default=30000)
-    parser.add_argument("--max-nfev", type=int, default=500)
-    parser.add_argument("--seed", type=int, default=7)
+    parser.add_argument("dataset",nargs="?",default=str(DATASET_PATH))
+    parser.add_argument("-o", "--output", default=str(OUTPUT_PATH))
+    parser.add_argument("--mass", type=float, default=MASS)
+    parser.add_argument("--lf", type=float, default=LF)
+    parser.add_argument("--lr", type=float, default=LR)
+    parser.add_argument("--steer-scale", type=float, default=STEER_SCALE)
+    parser.add_argument("--steer-bias", type=float, default=STEER_BIAS)
+    parser.add_argument("--min-accel", type=float, default=MIN_ACCEL)
+    parser.add_argument("--max-accel", type=float, default=MAX_ACCEL)
+    parser.add_argument("--smooth-window", type=int, default=SMOOTH_WINDOW)
+    parser.add_argument("--min-speed", type=float, default=MIN_SPEED)
+    parser.add_argument("--max-speed", type=float, default=MAX_SPEED)
+    parser.add_argument("--max-yaw-rate", type=float, default=MAX_YAW_RATE)
+    parser.add_argument("--max-fit-samples", type=int, default=MAX_FIT_SAMPLES)
+    parser.add_argument("--max-nfev", type=int, default=MAX_NFEV)
+    parser.add_argument("--seed", type=int, default=RANDOM_SEED)
     args = parser.parse_args()
 
     archive = np.load(args.dataset)
@@ -87,19 +93,21 @@ def main():
     dt = float(archive["dt"])
     output = Path(args.output); output.mkdir(parents=True, exist_ok=True)
     bag_ids = raw[:, 11].astype(int) if raw.shape[1] > 11 else np.zeros(len(raw), int)
-    speed = np.hypot(raw[:, 4], raw[:, 5])
-    beta = np.arctan2(raw[:, 5], np.maximum(raw[:, 4], 1e-3))
+    # Offline identification target comes from /newmcl_pose derivatives.  The
+    # stored odom vy is zero on this vehicle and must not be treated as GT.
+    pose_values=np.c_[raw[:,1],raw[:,2],raw[:,3]].copy()
+    for bag_id in np.unique(bag_ids):
+        ii=np.flatnonzero(bag_ids==bag_id);pose_values[ii,2]=np.unwrap(pose_values[ii,2])
+    pose_filtered,pose_derivative=smooth_by_segment(pose_values,bag_ids,args.smooth_window,dt)
+    yaw_pose=pose_filtered[:,2];world_vx=pose_derivative[:,0];world_vy=pose_derivative[:,1]
+    vx_pose=world_vx*np.cos(yaw_pose)+world_vy*np.sin(yaw_pose)
+    vy_pose=-world_vx*np.sin(yaw_pose)+world_vy*np.cos(yaw_pose)
+    speed = np.hypot(vx_pose, vy_pose)
+    beta = np.arctan2(vy_pose, np.maximum(vx_pose, 1e-3))
     state, observed = smooth_by_segment(
-        np.column_stack((speed, beta, raw[:, 6])), bag_ids, args.smooth_window, dt
+        np.column_stack((speed, beta, pose_derivative[:,2])), bag_ids, args.smooth_window, dt
     )
     if VISUALIZE_PREPROCESS_DATA:
-        pose_values=np.c_[raw[:,1],raw[:,2],raw[:,3]].copy()
-        for bag_id in np.unique(bag_ids):
-            ii=np.flatnonzero(bag_ids==bag_id);pose_values[ii,2]=np.unwrap(pose_values[ii,2])
-        pose_filtered,pose_derivative=smooth_by_segment(pose_values,bag_ids,args.smooth_window,dt)
-        yaw_pose=pose_filtered[:,2];world_vx=pose_derivative[:,0];world_vy=pose_derivative[:,1]
-        vx_pose=world_vx*np.cos(yaw_pose)+world_vy*np.sin(yaw_pose)
-        vy_pose=-world_vx*np.sin(yaw_pose)+world_vy*np.cos(yaw_pose)
         try:
             vy_estimated,yaw_rate_estimated=estimate_dataset(raw,archive["columns"],dt)
             estimator_label="2-state KF vy"

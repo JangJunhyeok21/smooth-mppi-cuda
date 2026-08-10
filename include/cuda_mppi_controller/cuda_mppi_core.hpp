@@ -37,7 +37,8 @@ enum DynamicsModel : int {
     KINEMATIC_MLP_NO_IMU_RESIDUAL = 4,
     KINEMATIC_NOSLIP_NO_IMU_DIRECT_SPEED = 5,
     DYNAMIC_IMU_RECURSIVE = 6,
-    KINEMATIC_SLIP_NO_IMU_DIRECT_SPEED = 7,
+    SLIP_KINEMATIC_WITH_IMU_DIRECT_SPEED = 7,
+    DYNAMIC_MLP_RESIDUAL = 8,
 };
 
 struct alignas(16) ButterworthCoeffs {
@@ -68,6 +69,9 @@ struct Params {
     int dynamics_model;
     float residual_imu[3];
     float residual_command_history[10];
+    float actuator_steer_state;
+    float steer_servo_time_constant;
+    float actuator_max_steer_rate;
     
     // Limits
     float max_steer;
@@ -110,6 +114,8 @@ struct Params {
     float I_z;
     float kinematic_steer_scale;
     float kinematic_steer_bias;
+    // Converts VESC/odom longitudinal speed units to physical map displacement.
+    float kinematic_position_speed_scale;
     bool kinematic_no_slip;
     float l_f;
     float l_r;
@@ -127,6 +133,13 @@ struct Params {
     float B_r, C_r, D_r, E_r;
     float F_zf, F_zr;
 
+    // Parameters identified specifically for DYNAMIC_MLP_RESIDUAL.  Keep
+    // these separate from the legacy Pacejka model and the lateral KF: the
+    // latter legitimately uses the physical I_z above.
+    float dynamic_mlp_B_f, dynamic_mlp_C_f, dynamic_mlp_D_f, dynamic_mlp_E_f;
+    float dynamic_mlp_B_r, dynamic_mlp_C_r, dynamic_mlp_D_r, dynamic_mlp_E_r;
+    float dynamic_mlp_I_z;
+
     ButterworthCoeffs filter_coeffs;
 };
 
@@ -141,8 +154,9 @@ public:
     void load_mlp_residual_weights(const std::string& path);
     void load_mlp_no_imu_residual_weights(const std::string& path);
     void load_kinematic_noslip_noimu_direct_weights(const std::string& path);
-    void load_kinematic_slip_noimu_direct_weights(const std::string& path);
+    void load_slip_kinematic_with_imu_direct_weights(const std::string& path);
     void load_dynamic_imu_recursive_weights(const std::string& path);
+    void load_dynamic_mlp_residual_weights(const std::string& path);
     
     // 경로 및 바운더리 설정
     void set_reference_path(const std::vector<float>& xs, const std::vector<float>& ys,
@@ -154,6 +168,9 @@ public:
     
     const std::vector<State>& get_generated_trajectories() const;
     const std::vector<State>& get_best_trajectory() const;
+    // Rollout produced by feeding the actually published MPPI weighted controls
+    // through the same CUDA dynamics model used by the candidates.
+    const std::vector<State>& get_weighted_control_trajectory() const;
     const std::vector<Control>& get_optimal_controls() const;
     const std::vector<float>& get_costs() const;
     
@@ -177,6 +194,7 @@ private:
     std::vector<float> h_weights_;      
     int best_k_ = 0;
     std::vector<State> best_trajectory_;
+    std::vector<State> weighted_control_trajectory_;
     std::vector<Control> optimal_controls_;
 
     // Host Reference Path
@@ -188,6 +206,8 @@ private:
     State* d_states_;        
     Control* d_controls_;    
     Control* d_prev_controls_; 
+    State* d_weighted_states_;
+    Control* d_weighted_controls_;
     float* d_costs_;         
     float* d_residual_history_;
     float* d_residual_hidden_;

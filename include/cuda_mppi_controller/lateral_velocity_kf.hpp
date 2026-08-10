@@ -30,6 +30,7 @@ struct LateralVelocityKFParams {
 // Allocation-free 2-state KF: state = [body lateral velocity, yaw rate].
 // The prediction model is linear bicycle dynamics; the nonlinear Pacejka
 // rollout remains completely separate in mppi_core.cu.
+// lateral vy 부호 : 왼쪽 +Y, 오른쪽 -Y. IMU는 FRD(x-forward, y-right, z-down) 좌표계이므로
 class LateralVelocityKF {
 public:
     void initialize(const LateralVelocityKFParams &params) {

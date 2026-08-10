@@ -406,7 +406,7 @@ bag 탐색, /drive 및 odom 정렬, 충돌 구간 제거, train/test 데이터 �
 추출된 모든 bag/segment의 GT trajectory 시각화
 
 [train_model.py](/home/a/smooth-mppi-cuda/model_tuning/train_model.py)
-kinematic_noslip_noimu, kinematic_slip_noimu 또는 dynamic_imu residual MLP 학습
+kinematic_noslip_noimu, slip_kinematic_with_imu 또는 dynamic_imu residual MLP 학습
 
 [evaluate_model.py](/home/a/smooth-mppi-cuda/model_tuning/evaluate_model.py)
 trajectory, velocity, yaw-rate 오차와 best/median/worst 시각화
@@ -431,8 +431,8 @@ python model_tuning/train_model.py \
 # 전처리와 MPPI 제어주기의 초기 vy는 동일한 2-state IMU KF가 제공한다.
 python model_tuning/train_model.py \
   model_tuning/data/training_data.npz \
-  -o model_tuning/results/kinematic_slip_noimu \
-  --model kinematic_slip_noimu
+  -o model_tuning/results/slip_kinematic_with_imu \
+  --model slip_kinematic_with_imu
 
 python model_tuning/evaluate_model.py \
   model_tuning/results/kinematic_noslip_noimu \
@@ -455,10 +455,10 @@ MPPI 노드가 시작될 때 weight와 정규화 변수를 함께 GPU 메모리�
 `params.yaml`의 경로를 변경한 다음 노드만 재시작하면 된다. 이 runtime loader를
 처음 도입하거나 C++/CUDA 소스를 변경한 경우에만 한 번 빌드한다.
 
-`kinematic_slip_noimu`의 body slip은 `beta = atan2(vy, vx)`이다. 상태 MLP
+`slip_kinematic_with_imu`의 body slip은 `beta = atan2(vy, vx)`이다. 상태 MLP
 입력은 `[vx, vy_KF, yaw_rate_KF, steer_cmd, speed_cmd, base_vx, base_vy,
 base_yaw_rate, command_history(10)]`의 18차원이고 출력은
 `[delta_vx/dt, delta_vy/dt, delta_yaw_rate/dt]`이다. 위치 전이는
 `v=sqrt(vx^2+vy^2)`에 대해 `x_next=x+v*cos(yaw+beta)*dt`,
 `y_next=y+v*sin(yaw+beta)*dt`를 사용한다. 활성화 시 `dynamics_model`을
-`kinematic_slip_noimu_direct_speed`로 지정한다.
+`slip_kinematic_with_imu_direct_speed`로 지정한다.

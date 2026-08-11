@@ -651,7 +651,6 @@ namespace mppi
         Control last_u = current_action;
         int local_path_idx = start_path_idx;
         int initial_path_idx = start_path_idx; 
-        bool is_fault = false;
         float gru_hidden[RESIDUAL_HIDDEN];
         float mlp_command_history[11];
         if(p.dynamics_model==KINEMATIC_RESIDUAL)
@@ -739,37 +738,8 @@ namespace mppi
             states[idx] = x;
             controls[idx] = u_clamped; 
 
-            if(fabsf(x.ay) > 12.74f){   //1.3g
-                is_fault = true;
-            }
-
             float min_dist = compute_min_boundary_distance(
                 x, ref_xs, ref_ys, ref_yaws, left_bnd_xs, left_bnd_ys, right_bnd_xs, right_bnd_ys, path_len, local_path_idx, &local_path_idx);
-            
-            if (min_dist < p.collision_radius) {
-                is_fault = true;
-            }
-
-            if (is_fault) {
-                // 기본 패널티를 10000으로 낮추고, 오래 버틸수록 패널티를 50씩 대폭 깎아줍니다.
-                // 이로 인해 어차피 박을 상황이면 풀브레이킹+조향으로 1틱이라도 더 버티는 샘플의 가중치가 높아집니다.
-                total_cost += 10000.0f - (float)t * 50.0f; 
-                
-                // 현재 틱(t)에서 사용한 제어 입력(u)의 조향각을 가져옵니다.
-                float survival_steer = controls[k * T + t].steer * 0.1; 
-                // 속도는 0.0f (또는 마찰원 한계 내의 급제동 -1.0f)로 설정하고 조향은 살립니다.
-                const bool fault_direct_speed=(p.dynamics_model==KINEMATIC_NOSLIP_NO_IMU_DIRECT_SPEED ||
-                                               p.dynamics_model==SLIP_KINEMATIC_WITH_IMU_DIRECT_SPEED ||
-                                               p.dynamics_model==DYNAMIC_IMU_RECURSIVE ||
-                                               p.dynamics_model==DYNAMIC_MLP_RESIDUAL);
-                Control safe_control = {survival_steer, fault_direct_speed ? 0.0f : -2.0f};
-
-                for (int fill_t = t + 1; fill_t < T; ++fill_t) {
-                    states[k * T + fill_t] = x;
-                    controls[k * T + fill_t] = safe_control;
-                }
-                break;
-            }
 
             if (path_len > 0)
             {
@@ -1106,19 +1076,16 @@ namespace mppi
         float min_cost = *min_it;
         best_k_ = static_cast<int>(std::distance(h_costs_.begin(), min_it));
 
-        // A faulted rollout adds at least ~6k. If every candidate faults,
-        // return an explicit stop instead of averaging colliding controls.
+        // If this optimization result is unusably expensive, keep executing
+        // the remaining sequence from the previously solved MPPI horizon.
+        // h_prev_controls_ is already the previous solution shifted by one
+        // step after every successful solve.
         if (std::isinf(min_cost) ||
             min_cost >= params_.all_rollouts_fault_cost_threshold) {
-            const bool direct_speed=(params_.dynamics_model==KINEMATIC_NOSLIP_NO_IMU_DIRECT_SPEED ||
-                                     params_.dynamics_model==SLIP_KINEMATIC_WITH_IMU_DIRECT_SPEED ||
-                                     params_.dynamics_model==DYNAMIC_IMU_RECURSIVE ||
-                                     params_.dynamics_model==DYNAMIC_MLP_RESIDUAL);
-            Control stop_control = {0.0f, direct_speed ? 0.0f : -5.0f};
-            std::fill(h_prev_controls_.begin(), h_prev_controls_.end(), stop_control);
-            optimal_controls_=h_prev_controls_;
+            const std::vector<Control> fallback_controls = h_prev_controls_;
+            optimal_controls_ = fallback_controls;
             weighted_control_trajectory_.resize(T_);
-            CUDA_CHECK(cudaMemcpy(d_weighted_controls_, h_prev_controls_.data(),
+            CUDA_CHECK(cudaMemcpy(d_weighted_controls_, fallback_controls.data(),
                                   T_*sizeof(Control), cudaMemcpyHostToDevice));
             weighted_control_rollout_kernel<<<1,1>>>(
                 d_weighted_states_,d_weighted_controls_,current_state,params_,
@@ -1126,7 +1093,12 @@ namespace mppi
             CUDA_CHECK(cudaGetLastError());
             CUDA_CHECK(cudaMemcpy(weighted_control_trajectory_.data(),d_weighted_states_,
                                   T_*sizeof(State),cudaMemcpyDeviceToHost));
-            return stop_control;
+            best_trajectory_ = weighted_control_trajectory_;
+
+            for (int t = 0; t < T_ - 1; ++t)
+                h_prev_controls_[t] = fallback_controls[t + 1];
+            h_prev_controls_[T_ - 1] = fallback_controls[T_ - 1];
+            return fallback_controls[0];
         }
         for (int k = 0; k < K_; ++k) {
             if (std::isnan(h_costs_[k])) {

@@ -36,10 +36,12 @@ DEFAULTS = dict(
     state_yaw_rate_loss_weight=8.0, position_loss_weight=1.0,
     yaw_loss_weight=8.0, yaw_rate_loss_weight=8.0,
     checkpoint_objective="position", resume=None, normalization="zscore",
+    dynamic_params_json=None,
     disable_velocity_residual=False, yaw_target="imu", slip_yaw_source="imu",
     imu_wz_sign=-1.0, imu_ax_sign=1.0, imu_ay_sign=-1.0,
     kf_cf=12.7222491, kf_cr=75.0944752, history=6,
     steer_time_constant=.18397091, max_steer_rate=.8791163,
+    yaw_rate_time_constant=.10, max_yaw_accel=15.0,
     steer_scale=.50927964, steer_bias=.01015773,
     balanced_sampling=True, curriculum=True,
 )
@@ -94,6 +96,8 @@ def main():
                    help='extra direct supervision for recursive yaw-rate state')
     p.add_argument('--checkpoint-objective',choices=('position','position_p95','loss'),default='position')
     p.add_argument('--resume',help='optional model.pt used to continue training')
+    p.add_argument('--dynamic-params-json',default=None,
+                   help='dynamic_params.json produced by tune_dynamic_model.py')
     p.add_argument('--normalization',choices=('zscore','none'),default='zscore',
                    help='input feature transform; none feeds physical raw values directly')
     p.add_argument('--disable-velocity-residual',action='store_true',
@@ -112,12 +116,22 @@ def main():
     p.add_argument('--history',type=int,default=6,help='contiguous samples required before rollout')
     p.add_argument('--steer-time-constant',type=float,default=.08)
     p.add_argument('--max-steer-rate',type=float,default=6.0)
+    p.add_argument('--yaw-rate-time-constant',type=float,default=.10,
+                   help='first-order response time [s] toward the kinematic yaw-rate target')
+    p.add_argument('--max-yaw-accel',type=float,default=15.0,
+                   help='maximum classic yaw acceleration [rad/s^2]')
     p.add_argument('--steer-scale',type=float,default=SA)
     p.add_argument('--steer-bias',type=float,default=SB)
     p.add_argument('--balanced-sampling',action=argparse.BooleanOptionalAction,default=True)
     p.add_argument('--curriculum',action=argparse.BooleanOptionalAction,default=True)
     p.set_defaults(**DEFAULTS)
     a=p.parse_args()
+    dynamic_params=dict(DYNAMIC_PARAMS)
+    if a.dynamic_params_json:
+        fitted=json.loads(Path(a.dynamic_params_json).read_text())['parameters']
+        dynamic_params.update(Bf=fitted['B_f'],Cf=fitted['C_f'],Df=fitted['D_f'],Ef=fitted['E_f'],
+                              Br=fitted['B_r'],Cr=fitted['C_r'],Dr=fitted['D_r'],Er=fitted['E_r'],
+                              Iz=fitted['I_z'],mass=3.74)
     if a.position_speed_scale_json:
         scale_result=json.loads(Path(a.position_speed_scale_json).read_text())
         a.position_speed_scale=float(scale_result['position_speed_scale'])
@@ -227,13 +241,17 @@ def main():
         if is_dynamic_residual:
             vx_safe=np.maximum(np.abs(target_body[:,0]),.5);vy0=target_body[:,1];w0=target_body[:,2]
             af=steer-np.arctan2(vy0+LF*w0,vx_safe);ar=-np.arctan2(vy0-LR*w0,vx_safe)
-            dp=DYNAMIC_PARAMS;fzf=dp['mass']*9.81*LR/(LF+LR);fzr=dp['mass']*9.81*LF/(LF+LR)
+            dp=dynamic_params;fzf=dp['mass']*9.81*LR/(LF+LR);fzr=dp['mass']*9.81*LF/(LF+LR)
             fyf=fzf*dp['Df']*np.sin(dp['Cf']*np.arctan(dp['Bf']*af-dp['Ef']*(dp['Bf']*af-np.arctan(dp['Bf']*af))))
             fyr=fzr*dp['Dr']*np.sin(dp['Cr']*np.arctan(dp['Br']*ar-dp['Er']*(dp['Br']*ar-np.arctan(dp['Br']*ar))))
             beta_dot=(fyf*np.cos(steer)+fyr)/(dp['mass']*np.maximum(measured_speed,.5))-w0
             next_beta=measured_beta+beta_dot*dt;base_vx=base_speed*np.cos(next_beta);base_vy=base_speed*np.sin(next_beta)
             base_r=w0+(LF*fyf*np.cos(steer)-LR*fyr)/dp['Iz']*dt
-        else: base_r=base_vx*np.tan(steer)/(LF+LR)
+        else:
+            target_r=base_vx*np.tan(steer)/(LF+LR)
+            base_r=target_body[:,2]+np.clip(
+                (target_r-target_body[:,2])/a.yaw_rate_time_constant,
+                -a.max_yaw_accel,a.max_yaw_accel)*dt
         base=np.c_[target_body,command,effective_steer,command_delta,base_vx,base_vy,base_r]
     else:
         # state vx,vy,r,ax,ay; command; base ax,ay,r
@@ -309,7 +327,7 @@ def main():
                     torch.maximum(torch.full_like(current_speed,a.runtime_max_speed),current_speed))
                 base_vx=base_speed*torch.cos(beta);base_vy=base_speed*torch.sin(beta)
                 if is_dynamic_residual:
-                    dp=DYNAMIC_PARAMS;vx_safe=torch.clamp(torch.abs(s[:,0]),min=.5)
+                    dp=dynamic_params;vx_safe=torch.clamp(torch.abs(s[:,0]),min=.5)
                     af=steer-torch.atan2(s[:,1]+LF*s[:,2],vx_safe);ar=-torch.atan2(s[:,1]-LR*s[:,2],vx_safe)
                     fzf=dp['mass']*9.81*LR/(LF+LR);fzr=dp['mass']*9.81*LF/(LF+LR)
                     fyf=fzf*dp['Df']*torch.sin(dp['Cf']*torch.atan(dp['Bf']*af-dp['Ef']*(dp['Bf']*af-torch.atan(dp['Bf']*af))))
@@ -317,7 +335,11 @@ def main():
                     beta_dot=(fyf*torch.cos(steer)+fyr)/(dp['mass']*torch.clamp(current_speed,min=.5))-s[:,2]
                     nbeta=beta+beta_dot*dt;base_vx=base_speed*torch.cos(nbeta);base_vy=base_speed*torch.sin(nbeta)
                     base_r=s[:,2]+(LF*fyf*torch.cos(steer)-LR*fyr)/dp['Iz']*dt
-                else: base_r=base_vx*torch.tan(steer)/(LF+LR)
+                else:
+                    target_r=base_vx*torch.tan(steer)/(LF+LR)
+                    base_r=s[:,2]+torch.clamp(
+                        (target_r-s[:,2])/a.yaw_rate_time_constant,
+                        -a.max_yaw_accel,a.max_yaw_accel)*dt
                 classic=torch.stack((base_vx,base_vy,base_r),1)
                 du=u[:,0]-hist[:,-1,0]
                 fbase=torch.cat((s,u,delta[:,None],du[:,None],classic),1)
@@ -424,6 +446,8 @@ def main():
       'input_normalization':a.normalization,
       'mlp_input_dim':nbase+10,
       'actuator_model':{'servo_time_constant_s':a.steer_time_constant,'max_steering_rate_rad_s':a.max_steer_rate},
+      'yaw_rate_actuator_model':{'time_constant_s':a.yaw_rate_time_constant,
+                                 'max_yaw_accel_radps2':a.max_yaw_accel},
       'steering_command_mapping':{'scale':a.steer_scale,'bias_rad':a.steer_bias},
       'training_sampling':('balanced speed/steer/yaw-rate bins' if a.balanced_sampling else 'uniform'),
       'training_curriculum_s':([.1,.3,.6,1.0,a.rollout_horizon] if a.curriculum else None),
@@ -443,7 +467,7 @@ def main():
                                           'yaw_rate':a.state_yaw_rate_loss_weight}},
       'best_validation_loss':(best if np.isfinite(best) else None),
       'dynamic_imu_policy':('measured EMA ax/ay only at horizon start; predicted ax/ay recursively thereafter' if is_e2e else None),
-      'dynamic_classic_params':(DYNAMIC_PARAMS if is_dynamic_residual else None)}
+      'dynamic_classic_params':(dynamic_params if is_dynamic_residual else None)}
     (out/'metrics.json').write_text(json.dumps(metrics,indent=2)+'\n');np.savez_compressed(out/'test_predictions.npz',starts=test_starts,prediction=traj,gt_pose=gtpose,gt_state=gtstate,position_error=pe,speed_error=se,yaw_rate_error=we)
     np.savez(out/'normalization.npz',base_mean=mean,base_std=std,command_mean=cmd_mean,command_std=cmd_std)
     with (out/'history.csv').open('w',newline='') as f: w=csv.writer(f);w.writerow(('epoch','train','validation','validation_final_position_m','seconds'));w.writerows(history)

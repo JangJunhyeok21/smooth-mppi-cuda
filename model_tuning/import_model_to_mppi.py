@@ -59,11 +59,34 @@ def activate_yaml(path, dynamics_model, weight_key, binary, metrics):
     if actuator:
         replacements["steer_servo_time_constant"]=actuator["servo_time_constant_s"]
         replacements["actuator_max_steer_rate"]=actuator["max_steering_rate_rad_s"]
+    yaw_actuator=metrics.get("yaw_rate_actuator_model") or {}
+    if yaw_actuator:
+        replacements["kinematic_yaw_rate_time_constant"]=yaw_actuator["time_constant_s"]
+        replacements["kinematic_max_yaw_accel"]=yaw_actuator["max_yaw_accel_radps2"]
     if steering:
         replacements["kinematic_steer_scale"]=steering["scale"]
         replacements["kinematic_steer_bias"]=steering["bias_rad"]
     if metrics.get("position_speed_scale") is not None:
         replacements["kinematic_position_speed_scale"]=metrics["position_speed_scale"]
+    if metrics.get("kp_speed") is not None:
+        replacements["speed_servo_kp"]=metrics["kp_speed"]
+    stiffness=metrics.get("kf_cornering_stiffness_N_per_rad") or {}
+    if stiffness:
+        replacements["kf_cornering_stiffness_front"]=stiffness["front"]
+        replacements["kf_cornering_stiffness_rear"]=stiffness["rear"]
+    signs=metrics.get("imu_axis_signs") or {}
+    for short,key in (("wz","imu_wz_sign"),("ax","imu_ax_sign"),("ay","imu_ay_sign")):
+        if short in signs:replacements[key]=signs[short]
+    speed_limits=metrics.get("runtime_speed_limits_mps")
+    if speed_limits:
+        replacements["min_speed"],replacements["max_speed"]=speed_limits
+    dynamic=metrics.get("dynamic_classic_params") or {}
+    for short,key in (("Bf","dynamic_mlp_B_f"),("Cf","dynamic_mlp_C_f"),
+                      ("Df","dynamic_mlp_D_f"),("Ef","dynamic_mlp_E_f"),
+                      ("Br","dynamic_mlp_B_r"),("Cr","dynamic_mlp_C_r"),
+                      ("Dr","dynamic_mlp_D_r"),("Er","dynamic_mlp_E_r"),
+                      ("Iz","dynamic_mlp_I_z")):
+        if short in dynamic:replacements[key]=dynamic[short]
     for key, value in replacements.items():
         pattern = rf"(?m)^(\s*{re.escape(key)}\s*:\s*).*$"
         text, count = re.subn(pattern, rf"\g<1>{value}", text, count=1)

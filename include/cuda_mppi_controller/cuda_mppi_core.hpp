@@ -121,6 +121,9 @@ struct Params {
     float l_r;
     float Cm0;
     float speed_servo_kp;
+    // First-order yaw-rate response toward the algebraic kinematic target.
+    float kinematic_yaw_rate_time_constant;
+    float kinematic_max_yaw_accel;
     
     // Pacejka (ForzaETH On-Track-SysID 와 동일한 4-파라미터 매직 포뮬러)
     //   F_y = F_z * D * sin( C * atan( B*a - E*(B*a - atan(B*a)) ) )

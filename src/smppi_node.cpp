@@ -431,6 +431,8 @@ private:
         mppi_params_.kinematic_no_slip=this->get_parameter("kinematic_no_slip").as_bool();
         this->declare_parameter("Cm0",    0.04);   mppi_params_.Cm0  = this->get_parameter("Cm0").as_double();
         this->declare_parameter("speed_servo_kp",8.0);mppi_params_.speed_servo_kp=this->get_parameter("speed_servo_kp").as_double();
+        this->declare_parameter("kinematic_yaw_rate_time_constant",0.10);mppi_params_.kinematic_yaw_rate_time_constant=this->get_parameter("kinematic_yaw_rate_time_constant").as_double();
+        this->declare_parameter("kinematic_max_yaw_accel",15.0);mppi_params_.kinematic_max_yaw_accel=this->get_parameter("kinematic_max_yaw_accel").as_double();
         this->declare_parameter("steer_servo_time_constant",0.08);mppi_params_.steer_servo_time_constant=this->get_parameter("steer_servo_time_constant").as_double();
         this->declare_parameter("actuator_max_steer_rate",6.0);mppi_params_.actuator_max_steer_rate=this->get_parameter("actuator_max_steer_rate").as_double();
         mppi_params_.actuator_steer_state=0.0f;

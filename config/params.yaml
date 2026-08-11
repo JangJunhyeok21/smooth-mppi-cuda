@@ -12,7 +12,7 @@
     kinematic_noslip_noimu_weights_path: /home/a/smooth-mppi-cuda/config/ifac0807_strict_noslip_noimu_16d.bin
     slip_kinematic_with_imu_weights_path: /home/a/smooth-mppi-cuda/config/slip_kinmatic_MLP.bin
     dynamic_imu_weights_path: /home/a/smooth-mppi-cuda/config/ifac2026_dynamic_imu_recursive.bin
-    dynamic_mlp_weights_path: config/dynamic_MLP.bin
+    dynamic_mlp_weights_path: /home/a/smooth-mppi-cuda/config/dynamic_MLP.bin
     e2e_weights_path: config/E2E.bin
     # IMU is causally aligned to odometry and is also used by the 2-state vy KF.
     imu_topic: /imu/data
@@ -49,9 +49,9 @@
     max_steer: 0.4788        # rad
     min_accel: -8.0          # m/s^2
     max_accel: 8.5           # m/s^2
-    min_speed: 0.5           # m/s
+    min_speed: 0.5
     target_speed: 3.0        # m/s, Map1 안정 완주 우선 목표 속도
-    max_speed: 4.0           # m/s; simulator mppi_max_speed와 동일
+    max_speed: 4.0
 
     # --- Costs (최적화 결과 반영) ---
     q_v: 2.0
@@ -84,14 +84,17 @@
     l_f: 0.163
     l_r: 0.161
     # tiv_imu_bagdisjoint_kinematic_classic 식별 결과. l_f/l_r/mass는 학습 시 고정값.
-    kinematic_steer_scale: 0.4910603091
-    kinematic_steer_bias: 0.0092647296
+    kinematic_steer_scale: 1.1330467889433047
+    kinematic_steer_bias: 0.009501962085415086
     # Robust 1.6 s fit: /odom speed units -> /newmcl_pose map displacement.
-    kinematic_position_speed_scale: 0.8601818646
+    kinematic_position_speed_scale: 0.8633491306389823
     kinematic_no_slip: true               # residual checkpoint 학습 조건(beta=0)
-    speed_servo_kp: 5.9378756714          # [1/s], direct /drive.speed response
-    steer_servo_time_constant: 0.1539426739
-    actuator_max_steer_rate: 0.9557462187
+    speed_servo_kp: 7.360818522274486
+    # r_kin=vx*tan(delta)/L is a target, not an instantaneous yaw-rate assignment.
+    kinematic_yaw_rate_time_constant: 0.1
+    kinematic_max_yaw_accel: 15.0
+    steer_servo_time_constant: 0.15514851356820727
+    actuator_max_steer_rate: 0.8344090950084138
     I_z: 0.04712
     Cm0: 0.04                # 고속 감쇠용 모터 역기전력 계수
     
@@ -119,15 +122,15 @@
     E_r: 0.0597
 
     # 0807 dynamic regression; used only by dynamic_mlp_residual.
-    dynamic_mlp_B_f: 3.7417837566
-    dynamic_mlp_C_f: 1.5797653815
-    dynamic_mlp_D_f: 0.2488725065
-    dynamic_mlp_E_f: -1.0
-    dynamic_mlp_B_r: 3.3027640068
-    dynamic_mlp_C_r: 1.9942488896
-    dynamic_mlp_D_r: 0.4480617878
-    dynamic_mlp_E_r: -1.0
-    dynamic_mlp_I_z: 0.5
+    dynamic_mlp_B_f: 1.6301889366817486
+    dynamic_mlp_C_f: 2.2731235307247935
+    dynamic_mlp_D_f: 0.19224981460207108
+    dynamic_mlp_E_f: 0.4165085568983616
+    dynamic_mlp_B_r: 1.520506660180012
+    dynamic_mlp_C_r: 2.8212293380683895
+    dynamic_mlp_D_r: 0.14497897699763923
+    dynamic_mlp_E_r: 0.38422342020039224
+    dynamic_mlp_I_z: 0.1167385428280382
 
     # --- Topics (공통 키) ---
     odom_topic: /ego_racecar/odom

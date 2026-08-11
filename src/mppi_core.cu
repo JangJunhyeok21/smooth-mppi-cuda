@@ -220,7 +220,9 @@ namespace mppi
         // dynamics return it gradually instead of jumping in one time step.
         const float state_lo=fminf(p.min_speed,s.v),state_hi=fmaxf(p.max_speed,s.v);
         const float base_v=fminf(state_hi,fmaxf(state_lo,s.v+base_ax*p.dt));
-        const float base_w=s.v*tanf(steer)/(p.l_f+p.l_r);
+        const float target_w=s.v*tanf(steer)/(p.l_f+p.l_r);
+        const float base_w=s.omega+fminf(p.kinematic_max_yaw_accel,fmaxf(-p.kinematic_max_yaw_accel,
+            (target_w-s.omega)/fmaxf(p.kinematic_yaw_rate_time_constant,1e-3f)))*p.dt;
         float raw[16]={s.v,s.omega,u.steer,speed_cmd,base_v,base_w};
         for(int i=0;i<10;++i)raw[6+i]=history[i];
         float corr[3];split_mlp<16>(raw,knd_mean,knd_std,knd_w1,knd_b1,knd_w2,knd_b2,knd_w3,knd_b3,corr);
@@ -250,7 +252,9 @@ namespace mppi
         const float state_lo=fminf(p.min_speed,speed),state_hi=fmaxf(p.max_speed,speed);
         const float base_speed=fminf(state_hi,fmaxf(state_lo,speed+base_ax*p.dt));
         const float base_vx=base_speed*cosf(beta),base_vy=base_speed*sinf(beta);
-        const float base_w=base_vx*tanf(steer)/(p.l_f+p.l_r);
+        const float target_w=base_vx*tanf(steer)/(p.l_f+p.l_r);
+        const float base_w=s.omega+fminf(p.kinematic_max_yaw_accel,fmaxf(-p.kinematic_max_yaw_accel,
+            (target_w-s.omega)/fmaxf(p.kinematic_yaw_rate_time_constant,1e-3f)))*p.dt;
         float raw[20]={s.v,s.vy,s.omega,u.steer,speed_cmd,steer,u.steer-previous_command,
                        base_vx,base_vy,base_w};
         for(int i=0;i<10;++i)raw[10+i]=history[i];

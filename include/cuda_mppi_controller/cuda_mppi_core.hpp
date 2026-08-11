@@ -93,6 +93,7 @@ struct Params {
     float q_progress;
     float q_escape_vel;
     float collision_radius;
+    float all_rollouts_fault_cost_threshold;
     
     // Obstacle Avoidance Params
     int num_obstacles;

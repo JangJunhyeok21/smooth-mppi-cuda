@@ -1108,7 +1108,8 @@ namespace mppi
 
         // A faulted rollout adds at least ~6k. If every candidate faults,
         // return an explicit stop instead of averaging colliding controls.
-        if (std::isinf(min_cost) || min_cost >= 5000.0f) {
+        if (std::isinf(min_cost) ||
+            min_cost >= params_.all_rollouts_fault_cost_threshold) {
             const bool direct_speed=(params_.dynamics_model==KINEMATIC_NOSLIP_NO_IMU_DIRECT_SPEED ||
                                      params_.dynamics_model==SLIP_KINEMATIC_WITH_IMU_DIRECT_SPEED ||
                                      params_.dynamics_model==DYNAMIC_IMU_RECURSIVE ||

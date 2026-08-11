@@ -8,11 +8,11 @@
     # Keep the controller rollout identical to the simulator plant. The MLP
     # residual produced a persistent yaw-rate bias in closed-loop simulation.
     dynamics_model: dynamic_mlp_residual
-    residual_weights_path: /home/a/smooth-mppi-cuda/config/kinematic_residual_gru.bin
-    kinematic_noslip_noimu_weights_path: /home/a/smooth-mppi-cuda/config/ifac0807_strict_noslip_noimu_16d.bin
-    slip_kinematic_with_imu_weights_path: /home/a/smooth-mppi-cuda/config/slip_kinmatic_MLP.bin
-    dynamic_imu_weights_path: /home/a/smooth-mppi-cuda/config/ifac2026_dynamic_imu_recursive.bin
-    dynamic_mlp_weights_path: /home/a/smooth-mppi-cuda/config/dynamic_MLP.bin
+    residual_weights_path: config/kinematic_residual_gru.bin
+    kinematic_noslip_noimu_weights_path: config/ifac0807_strict_noslip_noimu_16d.bin
+    slip_kinematic_with_imu_weights_path: config/slip_kinmatic_MLP.bin
+    dynamic_imu_weights_path: config/ifac2026_dynamic_imu_recursive.bin
+    dynamic_mlp_weights_path: config/dynamic_MLP.bin
     e2e_weights_path: config/E2E.bin
     # IMU is causally aligned to odometry and is also used by the 2-state vy KF.
     imu_topic: /imu/data
@@ -47,11 +47,11 @@
     kf_max_steer: 0.4788
     # --- Limits ---
     max_steer: 0.4788        # rad
-    min_accel: -8.0          # m/s^2
-    max_accel: 8.5           # m/s^2
+    min_accel: -4.0          # m/s^2
+    max_accel: 4.5           # m/s^2
     min_speed: 0.5
     target_speed: 3.0        # m/s, Map1 안정 완주 우선 목표 속도
-    max_speed: 4.0
+    max_speed: 3.0
 
     # --- Costs (최적화 결과 반영) ---
     q_v: 2.0
@@ -63,6 +63,8 @@
     q_collision: 300.0
     q_lat_g: 200.0
     collision_radius: 0.3
+    # Minimum rollout cost interpreted as "all candidates faulted".
+    all_rollouts_fault_cost_threshold: 5000.0
     q_progress: 220.0        # 실제 진행 거리[m] 보상
     q_escape_vel: 18.0       # 종단 경로방향 속도[m/s] 보상(선형)
     
@@ -73,9 +75,10 @@
     # --- Noise & Tuning ---
     noise_steer_std: 0.4     # rad/s
     noise_accel_std: 2.0     # m/s^3
-    max_steer_rate: 8.0      # rad/s
+    max_steer_rate: 4.0      # rad/s
     max_accel_rate: 100.0    # m/s^3
     lambda: 15.0
+    num_samples: 4000        # MPPI rollout 후보 개수 K
     visualize_candidates: true
     control_rate_hz: 50.0
     

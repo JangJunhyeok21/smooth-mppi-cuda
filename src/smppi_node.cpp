@@ -408,6 +408,9 @@ private:
         this->declare_parameter("q_progress",           13.0);   mppi_params_.q_progress    = this->get_parameter("q_progress").as_double();
         this->declare_parameter("q_escape_vel",         6.5);    mppi_params_.q_escape_vel  = this->get_parameter("q_escape_vel").as_double();
         this->declare_parameter("collision_radius",     0.19);   mppi_params_.collision_radius = this->get_parameter("collision_radius").as_double();
+        this->declare_parameter("all_rollouts_fault_cost_threshold", 5000.0);
+        mppi_params_.all_rollouts_fault_cost_threshold =
+            this->get_parameter("all_rollouts_fault_cost_threshold").as_double();
         this->declare_parameter("car_radius",           0.15);   mppi_params_.car_radius    = this->get_parameter("car_radius").as_double();
         this->declare_parameter("q_obs",                50.0);   mppi_params_.q_obs         = this->get_parameter("q_obs").as_double();
         this->declare_parameter("noise_steer_std",      0.4);    mppi_params_.noise_steer_std  = this->get_parameter("noise_steer_std").as_double();
@@ -530,6 +533,8 @@ private:
         if (mppi_params_.lambda <= 0.0f) mppi_params_.lambda = 1.0f;
         if (mppi_params_.collision_radius < 0.0f)
             mppi_params_.collision_radius = std::abs(mppi_params_.collision_radius);
+        if (mppi_params_.all_rollouts_fault_cost_threshold <= 0.0f)
+            mppi_params_.all_rollouts_fault_cost_threshold = 5000.0f;
     }
 
     bool path_received_{false}, left_bnd_received_{false}, right_bnd_received_{false};

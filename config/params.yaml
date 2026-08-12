@@ -12,7 +12,7 @@
     kinematic_noslip_noimu_weights_path: config/ifac0807_strict_noslip_noimu_16d.bin
     slip_kinematic_with_imu_weights_path: config/slip_kinmatic_MLP.bin
     dynamic_imu_weights_path: config/ifac2026_dynamic_imu_recursive.bin
-    dynamic_mlp_weights_path: config/dynamic_MLP.bin
+    dynamic_mlp_weights_path: /home/a/smooth-mppi-cuda/config/dynamic_MLP_all_drive_fixed_iz.bin
     e2e_weights_path: config/E2E.bin
     # IMU is causally aligned to odometry and is also used by the 2-state vy KF.
     imu_topic: /imu/data
@@ -51,7 +51,7 @@
     max_accel: 4.5           # m/s^2
     min_speed: 0.5
     target_speed: 3.0        # m/s, Map1 안정 완주 우선 목표 속도
-    max_speed: 3.0
+    max_speed: 4.0
 
     # --- Costs (최적화 결과 반영) ---
     q_v: 2.0
@@ -125,15 +125,15 @@
     E_r: 0.0597
 
     # 0807 dynamic regression; used only by dynamic_mlp_residual.
-    dynamic_mlp_B_f: 1.6301889366817486
-    dynamic_mlp_C_f: 2.2731235307247935
-    dynamic_mlp_D_f: 0.19224981460207108
-    dynamic_mlp_E_f: 0.4165085568983616
-    dynamic_mlp_B_r: 1.520506660180012
-    dynamic_mlp_C_r: 2.8212293380683895
-    dynamic_mlp_D_r: 0.14497897699763923
-    dynamic_mlp_E_r: 0.38422342020039224
-    dynamic_mlp_I_z: 0.1167385428280382
+    dynamic_mlp_B_f: 2.046134538755946
+    dynamic_mlp_C_f: 2.3269535456162314
+    dynamic_mlp_D_f: 0.07780187058396759
+    dynamic_mlp_E_f: 0.9999999841747856
+    dynamic_mlp_B_r: 1.921957391698233
+    dynamic_mlp_C_r: 1.730957097201443
+    dynamic_mlp_D_r: 0.06617241635354548
+    dynamic_mlp_E_r: -0.999999818200288
+    dynamic_mlp_I_z: 0.04712
 
     # --- Topics (공통 키) ---
     odom_topic: /ego_racecar/odom

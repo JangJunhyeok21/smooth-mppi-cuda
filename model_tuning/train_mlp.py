@@ -237,9 +237,8 @@ def main():
         measured_speed=np.hypot(target_body[:,0],target_body[:,1])
         measured_beta=np.arctan2(target_body[:,1],target_body[:,0])
         base_ax=np.clip(a.kp_speed*(command[:,1]-measured_speed),-8,8.5)
-        base_speed=np.clip(measured_speed+base_ax*dt,
-                           np.minimum(a.runtime_min_speed,measured_speed),
-                           np.maximum(a.runtime_max_speed,measured_speed))
+        # min/max speed constrain speed_cmd, not the predicted vehicle state.
+        base_speed=measured_speed+base_ax*dt
         base_vx=base_speed*np.cos(measured_beta);base_vy=base_speed*np.sin(measured_beta)
         if is_dynamic_residual:
             vx_safe=np.maximum(np.abs(target_body[:,0]),.5);vy0=target_body[:,1];w0=target_body[:,2]
@@ -325,10 +324,7 @@ def main():
                 current_speed=torch.hypot(s[:,0],s[:,1])
                 beta=torch.atan2(s[:,1],s[:,0])
                 slip_ax=torch.clamp(a.kp_speed*(u[:,1]-current_speed),-8.,8.5)
-                unclamped=current_speed+slip_ax*dt
-                base_speed=torch.minimum(torch.maximum(unclamped,
-                    torch.minimum(torch.full_like(current_speed,a.runtime_min_speed),current_speed)),
-                    torch.maximum(torch.full_like(current_speed,a.runtime_max_speed),current_speed))
+                base_speed=current_speed+slip_ax*dt
                 base_vx=base_speed*torch.cos(beta);base_vy=base_speed*torch.sin(beta)
                 if is_dynamic_residual:
                     dp=dynamic_params;vx_safe=torch.clamp(torch.abs(s[:,0]),min=.5)

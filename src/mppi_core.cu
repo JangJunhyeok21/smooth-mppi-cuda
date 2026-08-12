@@ -215,11 +215,9 @@ namespace mppi
         const float speed_cmd=fminf(p.max_speed,fmaxf(p.min_speed,u.accel));
         const float steer=fminf(.55f,fmaxf(-.55f,p.kinematic_steer_scale*u.steer+p.kinematic_steer_bias));
         const float base_ax=fminf(p.max_accel,fmaxf(p.min_accel,p.speed_servo_kp*(speed_cmd-s.v)));
-        // min/max_speed are command limits, not instantaneous state limits.
-        // Preserve an already measured out-of-range state and let acceleration
-        // dynamics return it gradually instead of jumping in one time step.
-        const float state_lo=fminf(p.min_speed,s.v),state_hi=fmaxf(p.max_speed,s.v);
-        const float base_v=fminf(state_hi,fmaxf(state_lo,s.v+base_ax*p.dt));
+        // min/max_speed constrain the command only. The predicted state is the
+        // unconstrained result of integrating the bounded acceleration.
+        const float base_v=s.v+base_ax*p.dt;
         const float target_w=s.v*tanf(steer)/(p.l_f+p.l_r);
         const float base_w=s.omega+fminf(p.kinematic_max_yaw_accel,fmaxf(-p.kinematic_max_yaw_accel,
             (target_w-s.omega)/fmaxf(p.kinematic_yaw_rate_time_constant,1e-3f)))*p.dt;
@@ -249,8 +247,7 @@ namespace mppi
         const float speed=hypotf(s.v,s.vy);
         const float beta=atan2f(s.vy,s.v);
         const float base_ax=fminf(p.max_accel,fmaxf(p.min_accel,p.speed_servo_kp*(speed_cmd-speed)));
-        const float state_lo=fminf(p.min_speed,speed),state_hi=fmaxf(p.max_speed,speed);
-        const float base_speed=fminf(state_hi,fmaxf(state_lo,speed+base_ax*p.dt));
+        const float base_speed=speed+base_ax*p.dt;
         const float base_vx=base_speed*cosf(beta),base_vy=base_speed*sinf(beta);
         const float target_w=base_vx*tanf(steer)/(p.l_f+p.l_r);
         const float base_w=s.omega+fminf(p.kinematic_max_yaw_accel,fmaxf(-p.kinematic_max_yaw_accel,
@@ -299,8 +296,6 @@ namespace mppi
         const float steer=fminf(.55f,fmaxf(-.55f,previous_delta+rate*p.dt));
         const float speed=hypotf(s.v,s.vy);
         const float ax=fminf(p.max_accel,fmaxf(p.min_accel,p.speed_servo_kp*(speed_cmd-speed)));
-        const float lo=fminf(p.min_speed,speed),hi=fmaxf(p.max_speed,speed);
-        const float next_speed=fminf(hi,fmaxf(lo,speed+ax*p.dt));
         const float safe_vx=fmaxf(fabsf(s.v),.5f);
         const float af=steer-atan2f(s.vy+p.l_f*s.omega,safe_vx);
         const float ar=-atan2f(s.vy-p.l_r*s.omega,safe_vx);

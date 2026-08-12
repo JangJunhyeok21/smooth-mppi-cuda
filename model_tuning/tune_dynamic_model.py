@@ -21,12 +21,12 @@ VISUALIZE_PREPROCESS_DATA = True  # set True to plot the regression data and fit
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DATASET_PATH = PROJECT_ROOT / "model_tuning/data/ifac0807_mppi_observation.npz"
 OUTPUT_PATH = PROJECT_ROOT / "model_tuning/results/suite_dynamic_regression_0807"
-MASS=3.74; LF=.163; LR=.161; STEER_SCALE=.50927964; STEER_BIAS=.01015773
+MASS=3.74; I_Z=.04712; LF=.163; LR=.161; STEER_SCALE=.50927964; STEER_BIAS=.01015773
 MIN_ACCEL=-8.; MAX_ACCEL=8.5; SMOOTH_WINDOW=21; MIN_SPEED=.7; MAX_SPEED=10.
 MAX_YAW_RATE=8.; MAX_FIT_SAMPLES=30000; MAX_NFEV=500; RANDOM_SEED=7
 PARAMETER_NAMES = (
     "speed_kp", "B_f", "C_f", "D_f", "E_f",
-    "B_r", "C_r", "D_r", "E_r", "I_z",
+    "B_r", "C_r", "D_r", "E_r",
 )
 
 
@@ -49,8 +49,8 @@ def smooth_by_segment(values, bag_ids, window, dt):
 def dynamic_derivative(state, command, parameters, fixed):
     speed, beta, yaw_rate = state.T
     steer_cmd, speed_cmd = command.T
-    kp, bf, cf, df, ef, br, cr, dr, er, iz = parameters
-    mass, lf, lr, gravity, steer_scale, steer_bias, min_accel, max_accel = fixed
+    kp, bf, cf, df, ef, br, cr, dr, er = parameters
+    mass, iz, lf, lr, gravity, steer_scale, steer_bias, min_accel, max_accel = fixed
     steer = np.clip(steer_scale * steer_cmd + steer_bias, -.55, .55)
     vx = np.maximum(speed * np.cos(beta), .5)
     vy = speed * np.sin(beta)
@@ -73,6 +73,8 @@ def main():
     parser.add_argument("dataset",nargs="?",default=str(DATASET_PATH))
     parser.add_argument("-o", "--output", default=str(OUTPUT_PATH))
     parser.add_argument("--mass", type=float, default=MASS)
+    parser.add_argument("--iz", type=float, default=I_Z,
+                        help="fixed yaw moment of inertia [kg m^2]; not optimized")
     parser.add_argument("--lf", type=float, default=LF)
     parser.add_argument("--lr", type=float, default=LR)
     parser.add_argument("--steer-scale", type=float, default=STEER_SCALE)
@@ -151,6 +153,7 @@ def main():
     command = raw[:, [7, 9]]  # steer, /drive.speed
     valid = (
         np.all(np.isfinite(np.c_[state, observed, command]), axis=1)
+        & ((raw[:, 10] == 0) if raw.shape[1] > 10 else True)
         & (state[:, 0] >= args.min_speed) & (state[:, 0] <= args.max_speed)
         & (np.abs(state[:, 2]) <= args.max_yaw_rate)
         & (command[:, 1] >= 0.) & (command[:, 1] <= 12.)
@@ -166,20 +169,24 @@ def main():
             indices, args.max_fit_samples, replace=False
         )
     state, command, observed = state[indices], command[indices], observed[indices]
-    fixed = (args.mass, args.lf, args.lr, 9.81, args.steer_scale,
+    fixed = (args.mass, args.iz, args.lf, args.lr, 9.81, args.steer_scale,
              args.steer_bias, args.min_accel, args.max_accel)
-    initial = np.array([8., 6., 1.4, .8, .1, 6., 1.4, .8, .1, .04712])
-    lower = np.array([.1, .1, .5, .05, -1., .1, .5, .05, -1., .005])
-    upper = np.array([30., 30., 3., 2., 1., 30., 3., 2., 1., .5])
-    scale = np.array([2., 4., 20.])
+    initial = np.array([8., 6., 1.4, .8, .1, 6., 1.4, .8, .1])
+    lower = np.array([.1, .1, .5, .05, -1., .1, .5, .05, -1.])
+    upper = np.array([30., 30., 3., 2., 1., 30., 3., 2., 1.])
+    scale = np.array([2., 4., 1.])
     objective = lambda p: ((dynamic_derivative(state, command, p, fixed)-observed)/scale).ravel()
     fit = least_squares(objective, initial, bounds=(lower, upper), loss="soft_l1",
                         max_nfev=args.max_nfev, verbose=1)
     prediction = dynamic_derivative(state, command, fit.x, fixed)
     rmse = np.sqrt(np.mean((prediction-observed)**2, axis=0))
+    fitted_parameters = dict(zip(PARAMETER_NAMES, map(float, fit.x)))
+    # Keep I_z in parameters for compatibility with train_mlp.py and the MPPI
+    # exporter, while explicitly recording that it was fixed during fitting.
+    fitted_parameters["I_z"] = float(args.iz)
     result = {
-        "parameters": dict(zip(PARAMETER_NAMES, map(float, fit.x))),
-        "fixed": {"mass": args.mass, "l_f": args.lf, "l_r": args.lr,
+        "parameters": fitted_parameters,
+        "fixed": {"mass": args.mass, "I_z": args.iz, "l_f": args.lf, "l_r": args.lr,
                   "steer_scale": args.steer_scale, "steer_bias": args.steer_bias},
         "rmse": dict(zip(("v_dot", "beta_dot", "yaw_rate_dot"), map(float, rmse))),
         "samples": int(len(indices)), "dt": dt, "optimizer_cost": float(fit.cost),

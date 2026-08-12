@@ -16,16 +16,16 @@ POSITION_SPEED_SCALE=None;KF_CF=None;KF_CR=None
 
 def load_runtime_binary(path, net):
  data=np.fromfile(path,dtype=np.float32)
- expected=3523+40
- if data.size!=expected:raise ValueError(f'{path}: expected {expected} float32 values, got {data.size}')
+ n_in=net.net[0].in_features;expected=64*n_in+2243+2*n_in
+ if data.size!=expected:raise ValueError(f'{path}: expected {expected} float32 values for {n_in}-D MLP, got {data.size}')
  offset=0
  state={}
- for key,shape in (("net.0.weight",(64,20)),("net.0.bias",(64,)),
+ for key,shape in (("net.0.weight",(64,n_in)),("net.0.bias",(64,)),
                    ("net.2.weight",(32,64)),("net.2.bias",(32,)),
                    ("net.4.weight",(3,32)),("net.4.bias",(3,))):
   count=int(np.prod(shape));state[key]=torch.from_numpy(data[offset:offset+count].copy().reshape(shape));offset+=count
  net.load_state_dict(state)
- return data[offset:offset+20].copy(),data[offset+20:offset+40].copy()
+ return data[offset:offset+n_in].copy(),data[offset+n_in:offset+2*n_in].copy()
 
 class MLP(nn.Module):
  def __init__(self,n_in):
@@ -41,11 +41,24 @@ def main():
  kf_cf=(a.kf_cf if a.kf_cf is not None else float(mkf.get('front',cfg['kf_cornering_stiffness_front'])));kf_cr=(a.kf_cr if a.kf_cr is not None else float(mkf.get('rear',cfg['kf_cornering_stiffness_rear'])))
  prep=argparse.Namespace(pose_window=21,horizon=a.horizon_steps*dt,history=a.history_offset+1,max_pose_step=.25,min_speed=.3,max_speed=10.,max_beta=.7,max_omega=8.,impact_decel=-10.,impact_margin=.5,min_windows=1,strict_no_imu=False,imu_wz_sign=float(signs.get('wz',cfg['imu_wz_sign'])),imu_ay_sign=float(signs.get('ay',cfg['imu_ay_sign'])),kf_cornering_stiffness_front=kf_cf,kf_cornering_stiffness_rear=kf_cr)
  pose,polar,_,_,starts,_,horizon=prepare(a.dataset,prep);body=np.c_[polar[:,0]*np.cos(polar[:,1]),polar[:,0]*np.sin(polar[:,1]),polar[:,2]].astype(np.float32)
- net=MLP(20)
+ # A combined archive stores 0=train and 1=test in column 10. Evaluate only
+ # fully held-out windows when a test split exists; never mix training replay
+ # into reported deployment metrics.
+ if raw.shape[1]>10 and np.any(raw[:,10]==1):
+  last=starts+a.history_offset+horizon
+  starts=starts[(raw[starts,10]==1)&(raw[last,10]==1)]
+  if not len(starts):raise SystemExit('no held-out test windows survived preprocessing')
+ if a.weights_bin:
+  packed_size=np.fromfile(a.weights_bin,dtype=np.float32).size
+  n_in=(packed_size-2243)//66
+  if n_in<=0 or 66*n_in+2243!=packed_size:raise ValueError(f'{a.weights_bin}: cannot infer MLP input dimension from {packed_size} floats')
+ else:
+  norm=np.load(result/'normalization.npz');n_in=int(len(norm['base_mean'])+10)
+ net=MLP(n_in)
  if a.weights_bin:
   packed_mean,packed_std=load_runtime_binary(a.weights_bin,net)
  else:
-  norm=np.load(result/'normalization.npz');packed_mean=np.r_[norm['base_mean'],np.tile(norm['command_mean'],5)].astype(np.float32);packed_std=np.r_[norm['base_std'],np.tile(norm['command_std'],5)].astype(np.float32);net.load_state_dict(torch.load(result/'model.pt',map_location='cpu',weights_only=True))
+  packed_mean=np.r_[norm['base_mean'],np.tile(norm['command_mean'],5)].astype(np.float32);packed_std=np.r_[norm['base_std'],np.tile(norm['command_std'],5)].astype(np.float32);net.load_state_dict(torch.load(result/'model.pt',map_location='cpu',weights_only=True))
  net.eval()
  if meta.get('slip_yaw_source')=='imu':
   bag=raw[:,11].astype(int);w=float(signs.get('wz',cfg['imu_wz_sign']))*raw[:,12].astype(np.float32)
@@ -65,19 +78,18 @@ def main():
   ii=np.flatnonzero(bag==bid);effective[ii[0]]=np.clip(sa*command[ii[0],0]+sb,-.55,.55)
   for kk in range(1,len(ii)):
    target=np.clip(sa*command[ii[kk],0]+sb,-.55,.55);rate=np.clip((target-effective[ii[kk-1]])/max(tau,1e-6),-maxrate,maxrate) if tau>0 else 0.;effective[ii[kk]]=effective[ii[kk-1]]+rate*dt if tau>0 else target
- all_pred={False:[],True:[]};batch=512
+ all_pred=[];batch=512
  with torch.no_grad():
   for q in range(0,len(starts),batch):
    ids=starts[q:q+batch];j0=ids+a.history_offset;b=len(ids);uall=torch.tensor(command);hist=torch.stack([uall[j0-d] for d in range(5,0,-1)],1);hist[:,:,1].clamp_(minv,maxv)
-   for preserve in (False,True):
+   for _ in (None,):
     s=torch.tensor(body[j0]);xyq=torch.tensor(pose[j0],dtype=torch.float32);tr=[torch.cat((xyq,s),1)]
     h=hist.clone();delta=torch.tensor(effective[j0]);axay=torch.tensor(imu[j0,1:3])
     for k in range(horizon):
      u=uall[j0+k].clone();u[:,0].clamp_(-float(cfg['max_steer']),float(cfg['max_steer']));u[:,1].clamp_(minv,maxv);target=torch.clamp(sa*u[:,0]+sb,-.55,.55);delta=(delta+torch.clamp((target-delta)/tau,-maxrate,maxrate)*dt) if tau>0 else target;steer=delta
      speed=torch.hypot(s[:,0],s[:,1]);beta=torch.atan2(s[:,1],s[:,0]);baseax=torch.clamp(kp*(u[:,1]-speed),mina,maxa)
-     lower=torch.minimum(torch.full_like(speed,minv),speed) if preserve else torch.full_like(speed,minv)
-     upper=torch.maximum(torch.full_like(speed,maxv),speed) if preserve else torch.full_like(speed,maxv)
-     basespeed=torch.minimum(torch.maximum(speed+baseax*dt,lower),upper)
+     # Runtime min/max constrain the command above, not the predicted state.
+     basespeed=speed+baseax*dt
      if meta.get('model')=='dynamic_residual':
       dp=meta['dynamic_classic_params'];vxs=torch.clamp(torch.abs(s[:,0]),min=.5);af=steer-torch.atan2(s[:,1]+float(cfg['l_f'])*s[:,2],vxs);ar=-torch.atan2(s[:,1]-float(cfg['l_r'])*s[:,2],vxs);fzf=dp['mass']*9.81*float(cfg['l_r'])/wb;fzr=dp['mass']*9.81*float(cfg['l_f'])/wb;fyf=fzf*dp['Df']*torch.sin(dp['Cf']*torch.atan(dp['Bf']*af-dp['Ef']*(dp['Bf']*af-torch.atan(dp['Bf']*af))));fyr=fzr*dp['Dr']*torch.sin(dp['Cr']*torch.atan(dp['Br']*ar-dp['Er']*(dp['Br']*ar-torch.atan(dp['Br']*ar))));cay=(fyf*torch.cos(steer)+fyr)/dp['mass'];classic=torch.stack((s[:,0]+(baseax+s[:,1]*s[:,2])*dt,s[:,1]+(cay-s[:,0]*s[:,2])*dt,s[:,2]+(float(cfg['l_f'])*fyf*torch.cos(steer)-float(cfg['l_r'])*fyr)/dp['Iz']*dt),1)
      else:
@@ -85,12 +97,15 @@ def main():
      if meta.get('model') in ('dynamic_imu','e2e_mlp'):
       basew=s[:,0]*torch.tan(steer)/wb;baseay=s[:,0]*basew;fbase=torch.cat((s,axay,u,baseax[:,None],baseay[:,None],basew[:,None]),1);f=torch.cat((fbase,h.reshape(b,-1)),1);pred=torch.tanh(net((f-mean)/std))*scale;next_axay=pred[:,:2];nw=pred[:,2];s=torch.stack((s[:,0]+(next_axay[:,0]+s[:,1]*s[:,2])*dt,s[:,1]+(next_axay[:,1]-s[:,0]*s[:,2])*dt,nw),1);axay=next_axay
      else:
-      fbase=torch.cat((s,u,delta[:,None],(u[:,0]-h[:,-1,0])[:,None],classic),1);f=torch.cat((fbase,h.reshape(b,-1)),1);corr=(torch.zeros((b,3)) if a.disable_mlp else torch.tanh(net((f-mean)/std))*scale);s=classic+corr*dt
+      if n_in==18:fbase=torch.cat((s,u,classic),1)
+      elif n_in==20:fbase=torch.cat((s,u,delta[:,None],(u[:,0]-h[:,-1,0])[:,None],classic),1)
+      else:raise RuntimeError(f'unsupported {n_in}-D residual feature layout in bag replay')
+      f=torch.cat((fbase,h.reshape(b,-1)),1);corr=(torch.zeros((b,3)) if a.disable_mlp else torch.tanh(net((f-mean)/std))*scale);s=classic+corr*dt
      sn=torch.hypot(s[:,0],s[:,1]);bn=torch.atan2(s[:,1],s[:,0]);xyq=torch.stack((xyq[:,0]+pscale*sn*torch.cos(xyq[:,2]+bn)*dt,xyq[:,1]+pscale*sn*torch.sin(xyq[:,2]+bn)*dt,xyq[:,2]+s[:,2]*dt),1);tr.append(torch.cat((xyq,s),1));h=torch.cat((h[:,1:],u[:,None]),1)
-    all_pred[preserve].append(torch.stack(tr,1).numpy())
+    all_pred.append(torch.stack(tr,1).numpy())
  gt=np.stack([pose[starts+a.history_offset+k] for k in range(horizon+1)],1);metrics={};arrays={'starts':starts,'gt_pose':gt}
- for preserve,label in ((False,'current_cuda_hard_state_clamp'),(True,'fixed_preserve_measured_overspeed')):
-  pred=np.concatenate(all_pred[preserve]);arrays[label]=pred
+ for label in ('current_cuda_unclamped_state',):
+  pred=np.concatenate(all_pred);arrays[label]=pred
   points={}
   for step in (min(50,horizon),horizon):
    e=np.linalg.norm(pred[:,step,:2]-gt[:,step,:2],axis=1);yaw=np.arctan2(np.sin(pred[:,step,2]-gt[:,step,2]),np.cos(pred[:,step,2]-gt[:,step,2]))
@@ -107,18 +122,29 @@ def main():
  import matplotlib.pyplot as plt
  labels=list(metrics);keys=('trajectory_mean_m','trajectory_p95_m','speed_mae_mps','yaw_rate_mae_radps');fig,axes=plt.subplots(2,2,figsize=(11,8))
  for ax,key in zip(axes.flat,keys):
-  x=np.arange(2);w=.35
+  x=np.arange(len(labels));w=.35
   for j,t in enumerate((f'{min(50,horizon)*dt:.2f}s',f'{horizon*dt:.2f}s')):ax.bar(x+(j-.5)*w,[metrics[n][t][key] for n in labels],w,label=t)
-  ax.set_xticks(x,('Current CUDA clamp','Preserve overspeed'));ax.set_title(key);ax.legend();ax.grid(axis='y',alpha=.25)
+  ax.set_xticks(x,('Unclamped state',));ax.set_title(key);ax.legend();ax.grid(axis='y',alpha=.25)
  fig.tight_layout();fig.savefig(out/'runtime_replay_comparison.png',dpi=180);plt.close(fig);print(json.dumps(metrics,indent=2))
- pred=arrays['current_cuda_hard_state_clamp'];final_error=np.linalg.norm(pred[:,-1,:2]-gt[:,-1,:2],axis=1);order=np.argsort(final_error)
+ pred=arrays['current_cuda_unclamped_state'];final_error=np.linalg.norm(pred[:,-1,:2]-gt[:,-1,:2],axis=1);order=np.argsort(final_error)
  chosen=(order[0],order[len(order)//2],order[-1]);titles=('Best','Median','Worst')
- fig,axes=plt.subplots(2,3,figsize=(14,8))
+ fig,axes=plt.subplots(4,3,figsize=(15,14))
  for col,(index,title) in enumerate(zip(chosen,titles)):
   axes[0,col].plot(gt[index,:,0],gt[index,:,1],'k-',lw=2,label='GT');axes[0,col].plot(pred[index,:,0],pred[index,:,1],'--',color='tab:orange',lw=2,label='Config .bin prediction');axes[0,col].set_title(f'{title}: {final_error[index]:.3f} m');axes[0,col].axis('equal');axes[0,col].grid(alpha=.25);axes[0,col].legend()
   t=np.arange(horizon+1)*dt;axes[1,col].plot(t,np.hypot(pred[index,:,3],pred[index,:,4]),'b--',label='Predicted speed');axes[1,col].plot(t,polar[starts[index]+a.history_offset:starts[index]+a.history_offset+horizon+1,0],'b-',label='GT speed');axes[1,col].plot(t,pred[index,:,5],'g--',label='Predicted yaw rate');axes[1,col].plot(t,polar[starts[index]+a.history_offset:starts[index]+a.history_offset+horizon+1,2],'g-',label='GT yaw rate');axes[1,col].set_xlabel('Time [s]');axes[1,col].grid(alpha=.25);axes[1,col].legend(fontsize=8)
+  row0=starts[index]+a.history_offset;gt_vy_case=body[row0:row0+horizon+1,1]
+  vy_mae=float(np.mean(np.abs(pred[index,:,4]-gt_vy_case)))
+  axes[2,col].plot(t,gt_vy_case,color='tab:blue',lw=2,label=r'GT $v_y$')
+  axes[2,col].plot(t,pred[index,:,4],'--',color='tab:orange',lw=2,label=r'Predicted $v_y$')
+  axes[2,col].set_title(rf'$v_y$ MAE: {vy_mae:.3f} m/s');axes[2,col].set_ylabel(r'$v_y$ [m/s]');axes[2,col].set_xlabel('Time [s]');axes[2,col].grid(alpha=.25);axes[2,col].legend(fontsize=8)
+  # Body-frame identity used by both training and CUDA: ay=d(vy)/dt+vx*r.
+  pred_ay=np.diff(pred[index,:,4])/dt+pred[index,:-1,3]*pred[index,:-1,5]
+  gt_ay=imu[row0+1:row0+horizon+1,2];ay_mae=float(np.mean(np.abs(pred_ay-gt_ay)))
+  axes[3,col].plot(t[1:],gt_ay,color='tab:blue',lw=2,label=r'GT IMU $a_y$')
+  axes[3,col].plot(t[1:],pred_ay,'--',color='tab:orange',lw=2,label=r'Predicted $a_y$')
+  axes[3,col].set_title(rf'$a_y$ MAE: {ay_mae:.3f} m/s$^2$');axes[3,col].set_ylabel(r'$a_y$ [m/s$^2$]');axes[3,col].set_xlabel('Time [s]');axes[3,col].grid(alpha=.25);axes[3,col].legend(fontsize=8)
  fig.tight_layout();fig.savefig(out/'config_bin_best_median_worst.png',dpi=180);plt.close(fig)
- pred=arrays['current_cuda_hard_state_clamp'];rows=starts[:,None]+a.history_offset+np.arange(1,horizon+1)[None,:]
+ pred=arrays['current_cuda_unclamped_state'];rows=starts[:,None]+a.history_offset+np.arange(1,horizon+1)[None,:]
  gt_vx=raw[rows,4];gt_vy=body[rows,1];gt_w=body[rows,2];gt_dot_vx=imu[rows,1]+gt_vy*gt_w;gt_dot_vy=imu[rows,2]-gt_vx*gt_w
  signals=((np.diff(pred[:,:,3],axis=1)/dt,gt_dot_vx,r'$\dot v_x$ [m/s$^2$]'),(np.diff(pred[:,:,4],axis=1)/dt,gt_dot_vy,r'$\dot v_y$ [m/s$^2$]'),(pred[:,1:,3],gt_vx,r'$v_x$ [m/s]'),(pred[:,1:,4],gt_vy,r'$v_y$ [m/s]'),(pred[:,1:,5],gt_w,'yaw rate [rad/s]'))
  fig,axes=plt.subplots(3,2,figsize=(12,10));axes.flat[-1].axis('off');t=np.arange(1,horizon+1)*dt

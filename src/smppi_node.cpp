@@ -23,11 +23,9 @@ public:
     MPPINode() : Node("smppi_controller") {
         load_parameters();
         validate_parameters();
+        cache_fixed_model_properties();
 
-        if (mppi_params_.dynamics_model == mppi::SLIP_KINEMATIC_WITH_IMU_DIRECT_SPEED ||
-            mppi_params_.dynamics_model == mppi::DYNAMIC_IMU_RECURSIVE ||
-            mppi_params_.dynamics_model == mppi::DYNAMIC_MLP_RESIDUAL ||
-            mppi_params_.dynamics_model == mppi::DYNAMIC_MLP_RESIDUAL_SERVO_LAG) {
+        if (uses_lateral_velocity_kf_) {
             lateral_velocity_kf_.initialize(lateral_velocity_kf_params_);
         }
 
@@ -108,6 +106,30 @@ public:
     }
 
 private:
+    void cache_fixed_model_properties() {
+        const int model = mppi_params_.dynamics_model;
+        is_kinematic_residual_model_ = model == mppi::KINEMATIC_RESIDUAL;
+        uses_legacy_mlp_imu_ = model == mppi::KINEMATIC_MLP_RESIDUAL;
+        direct_speed_model_ =
+            model == mppi::KINEMATIC_NOSLIP_NO_IMU_DIRECT_SPEED ||
+            model == mppi::SLIP_KINEMATIC_WITH_IMU_DIRECT_SPEED ||
+            model == mppi::DYNAMIC_IMU_RECURSIVE ||
+            model == mppi::DYNAMIC_MLP_RESIDUAL ||
+            model == mppi::DYNAMIC_MLP_RESIDUAL_SERVO_LAG;
+        uses_command_history_ = uses_legacy_mlp_imu_ || direct_speed_model_ ||
+            model == mppi::KINEMATIC_MLP_NO_IMU_RESIDUAL;
+        uses_actuator_state_ =
+            model == mppi::SLIP_KINEMATIC_WITH_IMU_DIRECT_SPEED ||
+            model == mppi::DYNAMIC_MLP_RESIDUAL_SERVO_LAG;
+        uses_lateral_velocity_kf_ =
+            model == mppi::SLIP_KINEMATIC_WITH_IMU_DIRECT_SPEED ||
+            model == mppi::DYNAMIC_IMU_RECURSIVE ||
+            model == mppi::DYNAMIC_MLP_RESIDUAL ||
+            model == mppi::DYNAMIC_MLP_RESIDUAL_SERVO_LAG;
+        wheelbase_ = mppi_params_.l_f + mppi_params_.l_r;
+        direct_speed_step_ = mppi_params_.max_accel_rate * mppi_params_.dt;
+    }
+
     void mcl_pose_callback(const geometry_msgs::msg::PoseStamped::SharedPtr msg) {
         const auto &ori = msg->pose.orientation;
         const double yaw = std::atan2(
@@ -334,7 +356,7 @@ private:
         float lat_g  = (ay_abs >= 9.5f) ? mppi_params_.q_lat_g * expf(-3.f*(ay_abs-9.5f)) : 0.f;
 
         float min_bnd   = compute_min_boundary_distance(s, idx);
-        float safe_dist = mppi_params_.collision_radius + 0.4f;
+        float safe_dist = mppi_params_.collision_radius + mppi_params_.boundary_soft_margin;
         float bnd_cost  = 0.f;
         if (min_bnd < safe_dist) {
             float pen = safe_dist - min_bnd;
@@ -342,7 +364,7 @@ private:
             if (min_bnd < mppi_params_.collision_radius * 1.2f)
                 hrd = mppi_params_.q_collision *
                       std::log(1.f + std::exp(-40.f*(min_bnd - mppi_params_.collision_radius)));
-            bnd_cost = 150.f * pen * pen + hrd;
+            bnd_cost = mppi_params_.q_boundary_soft * pen * pen + hrd;
         }
 
         msg.dist_cost       = mppi_params_.q_dist * dist_error;
@@ -409,9 +431,19 @@ private:
         this->declare_parameter("max_accel",            9.0);    mppi_params_.max_accel     = this->get_parameter("max_accel").as_double();
         this->declare_parameter("min_speed",            0.0);    mppi_params_.min_speed     = this->get_parameter("min_speed").as_double();
         this->declare_parameter("max_speed",            10.0);   mppi_params_.max_speed     = this->get_parameter("max_speed").as_double();
+        this->declare_parameter("heading_speed_limit_gain", 8.0);
+        heading_speed_limit_gain_ = this->get_parameter("heading_speed_limit_gain").as_double();
+        this->declare_parameter("contour_speed_limit_gain", 2.0);
+        contour_speed_limit_gain_ = this->get_parameter("contour_speed_limit_gain").as_double();
+        this->declare_parameter("boundary_stop_margin", 0.25);
+        boundary_stop_margin_ = this->get_parameter("boundary_stop_margin").as_double();
+        this->declare_parameter("boundary_braking_decel", 4.0);
+        boundary_braking_decel_ = this->get_parameter("boundary_braking_decel").as_double();
         this->declare_parameter("q_dist",               1.5);    mppi_params_.q_dist        = this->get_parameter("q_dist").as_double();
         this->declare_parameter("q_contour",            0.5);    mppi_params_.q_contour     = this->get_parameter("q_contour").as_double();
         this->declare_parameter("q_lag",                5.0);    mppi_params_.q_lag         = this->get_parameter("q_lag").as_double();
+        this->declare_parameter("q_heading",            12.0);   mppi_params_.q_heading     = this->get_parameter("q_heading").as_double();
+        this->declare_parameter("q_error_speed",        8.0);    mppi_params_.q_error_speed = this->get_parameter("q_error_speed").as_double();
         this->declare_parameter("q_v",                  2.0);    mppi_params_.q_v           = this->get_parameter("q_v").as_double();
         this->declare_parameter("q_du",                 0.8);    mppi_params_.q_du          = this->get_parameter("q_du").as_double();
         this->declare_parameter("q_steer",              0.3);    mppi_params_.q_steer       = this->get_parameter("q_steer").as_double();
@@ -422,6 +454,8 @@ private:
         this->declare_parameter("q_progress",           13.0);   mppi_params_.q_progress    = this->get_parameter("q_progress").as_double();
         this->declare_parameter("q_escape_vel",         6.5);    mppi_params_.q_escape_vel  = this->get_parameter("q_escape_vel").as_double();
         this->declare_parameter("collision_radius",     0.19);   mppi_params_.collision_radius = this->get_parameter("collision_radius").as_double();
+        this->declare_parameter("boundary_soft_margin", 0.60);   mppi_params_.boundary_soft_margin = this->get_parameter("boundary_soft_margin").as_double();
+        this->declare_parameter("q_boundary_soft",      150.0);  mppi_params_.q_boundary_soft = this->get_parameter("q_boundary_soft").as_double();
         this->declare_parameter("all_rollouts_fault_cost_threshold", 5000.0);
         mppi_params_.all_rollouts_fault_cost_threshold =
             this->get_parameter("all_rollouts_fault_cost_threshold").as_double();
@@ -476,6 +510,7 @@ private:
         this->declare_parameter("dynamic_mlp_D_r", 0.4480617878); mppi_params_.dynamic_mlp_D_r=this->get_parameter("dynamic_mlp_D_r").as_double();
         this->declare_parameter("dynamic_mlp_E_r",-1.0);          mppi_params_.dynamic_mlp_E_r=this->get_parameter("dynamic_mlp_E_r").as_double();
         this->declare_parameter("dynamic_mlp_I_z", 0.5);          mppi_params_.dynamic_mlp_I_z=this->get_parameter("dynamic_mlp_I_z").as_double();
+        this->declare_parameter("dynamic_mlp_min_speed", 0.8);    mppi_params_.dynamic_mlp_min_speed=this->get_parameter("dynamic_mlp_min_speed").as_double();
 
         // 정하중 (pacejka_sysid/helpers/generate_predictions.py 와 동일한 규약)
         //   F_zf = m*g*l_r/l_wb,  F_zr = m*g*l_f/l_wb,  l_wb = l_f + l_r
@@ -549,8 +584,20 @@ private:
             std::swap(mppi_params_.min_speed, mppi_params_.max_speed);
         if (horizon_steps_ < 1) horizon_steps_ = 1;
         if (mppi_params_.lambda <= 0.0f) mppi_params_.lambda = 1.0f;
+        if (mppi_params_.max_accel_rate <= 0.0f)
+            mppi_params_.max_accel_rate = 1.5f;
+        heading_speed_limit_gain_ = std::max(0.0f, heading_speed_limit_gain_);
+        contour_speed_limit_gain_ = std::max(0.0f, contour_speed_limit_gain_);
+        boundary_stop_margin_ = std::max(0.0f, boundary_stop_margin_);
+        boundary_braking_decel_ = std::max(0.1f, boundary_braking_decel_);
         if (mppi_params_.collision_radius < 0.0f)
             mppi_params_.collision_radius = std::abs(mppi_params_.collision_radius);
+        if (mppi_params_.boundary_soft_margin < 0.0f)
+            mppi_params_.boundary_soft_margin = 0.0f;
+        if (mppi_params_.q_boundary_soft < 0.0f)
+            mppi_params_.q_boundary_soft = 0.0f;
+        if (mppi_params_.dynamic_mlp_min_speed < 0.0f)
+            mppi_params_.dynamic_mlp_min_speed = 0.0f;
         if (mppi_params_.all_rollouts_fault_cost_threshold <= 0.0f)
             mppi_params_.all_rollouts_fault_cost_threshold = 5000.0f;
     }
@@ -614,7 +661,7 @@ private:
             return;
         }
         auto start = std::chrono::high_resolution_clock::now();
-        if(mppi_params_.dynamics_model==mppi::KINEMATIC_MLP_RESIDUAL) {
+        if(uses_legacy_mlp_imu_) {
             mppi_params_.residual_imu[0]=aligned_imu_valid_?aligned_imu_[0]:current_state_.omega;
             mppi_params_.residual_imu[1]=aligned_imu_valid_?aligned_imu_[1]:current_ax_;
             mppi_params_.residual_imu[2]=aligned_imu_valid_?aligned_imu_[2]:current_state_.ay;
@@ -622,18 +669,12 @@ private:
             while(command_history_.size()<5) command_history_.push_front(command_history_.front());
             for(int i=0;i<5;++i){mppi_params_.residual_command_history[2*i]=command_history_[i][0];mppi_params_.residual_command_history[2*i+1]=command_history_[i][1];}
         }
-        if(mppi_params_.dynamics_model==mppi::KINEMATIC_MLP_NO_IMU_RESIDUAL ||
-           mppi_params_.dynamics_model==mppi::KINEMATIC_NOSLIP_NO_IMU_DIRECT_SPEED ||
-	           mppi_params_.dynamics_model==mppi::SLIP_KINEMATIC_WITH_IMU_DIRECT_SPEED ||
-	           mppi_params_.dynamics_model==mppi::DYNAMIC_IMU_RECURSIVE ||
-	           mppi_params_.dynamics_model==mppi::DYNAMIC_MLP_RESIDUAL ||
-	           mppi_params_.dynamics_model==mppi::DYNAMIC_MLP_RESIDUAL_SERVO_LAG) {
+        if(uses_command_history_ && !uses_legacy_mlp_imu_) {
             if(command_history_.empty()) command_history_.push_back({last_steer_cmd_,last_speed_cmd_});
             while(command_history_.size()<5) command_history_.push_front(command_history_.front());
             for(int i=0;i<5;++i){mppi_params_.residual_command_history[2*i]=command_history_[i][0];mppi_params_.residual_command_history[2*i+1]=command_history_[i][1];}
         }
-        if(mppi_params_.dynamics_model==mppi::SLIP_KINEMATIC_WITH_IMU_DIRECT_SPEED ||
-           mppi_params_.dynamics_model==mppi::DYNAMIC_MLP_RESIDUAL_SERVO_LAG) {
+        if(uses_actuator_state_) {
             const float target=std::clamp(mppi_params_.kinematic_steer_scale*last_steer_cmd_+
                 mppi_params_.kinematic_steer_bias,-.55f,.55f);
             const float rate=std::clamp((target-mppi_params_.actuator_steer_state)/
@@ -642,11 +683,10 @@ private:
             mppi_params_.actuator_steer_state=std::clamp(
                 mppi_params_.actuator_steer_state+rate*mppi_params_.dt,-.55f,.55f);
         }
-        if (mppi_params_.dynamics_model == mppi::KINEMATIC_RESIDUAL) {
-            const float wb=mppi_params_.l_f+mppi_params_.l_r;
-            const float beta=std::atan((mppi_params_.l_r/wb)*std::tan(last_steer_cmd_));
+        if (is_kinematic_residual_model_) {
+            const float beta=std::atan((mppi_params_.l_r/wheelbase_)*std::tan(last_steer_cmd_));
             const float classic_v=std::min(mppi_params_.max_speed,std::max(mppi_params_.min_speed,last_speed_cmd_));
-            const float classic_w=current_state_.v*std::cos(beta)*std::tan(last_steer_cmd_)/wb;
+            const float classic_w=current_state_.v*std::cos(beta)*std::tan(last_steer_cmd_)/wheelbase_;
             std::array<float,11> raw={current_state_.v,current_state_.vy,current_state_.omega,
                 // The selected checkpoint's three IMU channels are effectively
                 // constant in the extracted training set (std was clipped to
@@ -668,17 +708,40 @@ private:
         }
         solver_->update_params(mppi_params_);
         mppi::Control u = solver_->solve(current_state_);
-	        const bool direct_speed=(mppi_params_.dynamics_model==mppi::KINEMATIC_NOSLIP_NO_IMU_DIRECT_SPEED ||
-	                                 mppi_params_.dynamics_model==mppi::SLIP_KINEMATIC_WITH_IMU_DIRECT_SPEED ||
-	                                 mppi_params_.dynamics_model==mppi::DYNAMIC_IMU_RECURSIVE ||
-	                                 mppi_params_.dynamics_model==mppi::DYNAMIC_MLP_RESIDUAL ||
-	                                 mppi_params_.dynamics_model==mppi::DYNAMIC_MLP_RESIDUAL_SERVO_LAG);
         float next_v;
         float published_accel;
-        if(direct_speed) {
-            // u.accel==0 is the solver's explicit all-rollouts-fault stop.
-            next_v=(u.accel<=0.01f) ? 0.0f
-                                    : std::min(mppi_params_.max_speed,std::max(mppi_params_.min_speed,u.accel));
+        if(direct_speed_model_) {
+            const float previous_speed_command = has_published_command_
+                ? last_speed_cmd_ : current_state_.v;
+            const int nearest_idx = update_nearest_index(current_state_);
+            const float dx = current_state_.x - ref_path_xs_[nearest_idx];
+            const float dy = current_state_.y - ref_path_ys_[nearest_idx];
+            const float ref_yaw = ref_path_yaws_[nearest_idx];
+            const float contour_error = -std::sin(ref_yaw) * dx + std::cos(ref_yaw) * dy;
+            const float heading_error = std::atan2(
+                std::sin(current_state_.yaw - ref_yaw),
+                std::cos(current_state_.yaw - ref_yaw));
+            const float boundary_distance = compute_min_boundary_distance(current_state_, nearest_idx);
+            const float heading_speed_limit = mppi_params_.max_speed /
+                (1.0f + heading_speed_limit_gain_ * std::abs(heading_error));
+            const float contour_speed_limit = mppi_params_.max_speed /
+                (1.0f + contour_speed_limit_gain_ * std::abs(contour_error));
+            const float braking_distance = std::max(
+                0.0f, boundary_distance - boundary_stop_margin_);
+            const float boundary_speed_limit = std::sqrt(
+                2.0f * boundary_braking_decel_ * braking_distance);
+            const float safety_speed_limit = std::clamp(
+                std::min({heading_speed_limit, contour_speed_limit, boundary_speed_limit}),
+                0.0f, mppi_params_.max_speed);
+            const float recovery_speed_floor = std::min(
+                mppi_params_.min_speed, safety_speed_limit);
+            const float desired_speed = std::clamp(
+                u.accel, recovery_speed_floor, safety_speed_limit);
+            const float requested_speed = std::clamp(
+                desired_speed,
+                previous_speed_command - direct_speed_step_,
+                previous_speed_command + direct_speed_step_);
+            next_v=std::clamp(requested_speed, 0.0f, mppi_params_.max_speed);
             published_accel=std::clamp(
                 (next_v-current_state_.v)/mppi_params_.dt,
                 mppi_params_.min_accel,
@@ -697,6 +760,7 @@ private:
         drive_msg.drive.speed                   = next_v;
         drive_msg.drive.acceleration            = published_accel;
         drive_pub_->publish(drive_msg);
+        has_published_command_=true;
         last_steer_cmd_=u.steer; last_speed_cmd_=next_v;
         command_history_.push_back({last_steer_cmd_,last_speed_cmd_});while(command_history_.size()>5)command_history_.pop_front();
 
@@ -710,14 +774,26 @@ private:
     }
 
     void publish_mppi_trajectory() {
-        const auto &bt = solver_->get_best_trajectory();
+        const auto &bt = solver_->get_weighted_control_trajectory();
         const auto &oc = solver_->get_optimal_controls();
         if (bt.empty() || oc.empty()) return;
         smppi_cuda_controller::msg::MppiTrajectory msg;
         msg.header.stamp = this->now(); msg.header.frame_id = "map";
         int T = solver_->get_T();
         msg.steer.reserve(T); msg.accel.reserve(T);
-        for (int t = 0; t < T; ++t) { msg.steer.push_back(oc[t].steer); msg.accel.push_back(oc[t].accel); }
+        msg.predicted_x.reserve(T); msg.predicted_y.reserve(T);
+        msg.predicted_yaw.reserve(T); msg.predicted_v.reserve(T);
+        msg.predicted_vy.reserve(T); msg.predicted_yaw_rate.reserve(T);
+        for (int t = 0; t < T; ++t) {
+            msg.steer.push_back(oc[t].steer);
+            msg.accel.push_back(oc[t].accel);
+            msg.predicted_x.push_back(bt[t].x);
+            msg.predicted_y.push_back(bt[t].y);
+            msg.predicted_yaw.push_back(bt[t].yaw);
+            msg.predicted_v.push_back(bt[t].v);
+            msg.predicted_vy.push_back(bt[t].vy);
+            msg.predicted_yaw_rate.push_back(bt[t].omega);
+        }
         append_best_traj_costs(bt, oc, msg);
         traj_pub_->publish(msg);
     }
@@ -834,6 +910,19 @@ private:
     double last_odom_y_{0.0};
     double last_odom_yaw_{0.0};
     double control_rate_hz_{50.0};
+    float heading_speed_limit_gain_{8.0f};
+    float contour_speed_limit_gain_{2.0f};
+    float boundary_stop_margin_{0.25f};
+    float boundary_braking_decel_{4.0f};
+    bool has_published_command_{false};
+    bool direct_speed_model_{false};
+    bool uses_command_history_{false};
+    bool uses_legacy_mlp_imu_{false};
+    bool uses_actuator_state_{false};
+    bool uses_lateral_velocity_kf_{false};
+    bool is_kinematic_residual_model_{false};
+    float wheelbase_{0.0f};
+    float direct_speed_step_{0.0f};
     double last_body_vx_{0.0};
     float last_steer_cmd_{0.f}, last_speed_cmd_{0.f}, current_ax_{0.f};
     std::deque<std::array<float,RESIDUAL_FEATURES>> residual_history_;

@@ -13,6 +13,8 @@ install/
 model_tuning/**
 !model_tuning/extract_training_data.py
 !model_tuning/evaluate_mppi_bag_replay.py
+!model_tuning/real_car_v2/
+!model_tuning/real_car_v2/**
 model_tuning_utils/tiv_collision_vesc_p_focus3x/history.csv
 model_tuning_utils/__pycache__/**
 model_tuning_utils/all_bags_tuned_lstm_finetune/**.json

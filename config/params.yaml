@@ -52,12 +52,19 @@
     max_accel: 1.0           # m/s^2
     min_speed: 0.5
     max_speed: 4.0
+    # Racing-line 자유도를 위해 중앙선 오차 기반 publish 속도 제한은 사용하지 않는다.
+    heading_speed_limit_gain: 0.0
+    contour_speed_limit_gain: 0.0
+    boundary_stop_margin: 0.10 # 실제 경계에 매우 가까울 때만 제동거리 상한 적용
+    boundary_braking_decel: 4.0
 
     # --- Costs (최적화 결과 반영) ---
     q_v: 2.0
     q_dist: 0.0             # legacy Euclidean path cost (MPCC에서는 0 유지)
-    q_contour: 0.6          # 횡방향 오차; 낮게 두어 racing line 탐색 허용
-    q_lag: 6.0              # 진행방향 오차; 연속 progress와 차량 위치 결합
+    q_contour: 0.0          # 중앙선 고정 대신 track boundary 안에서 racing line 허용
+    q_lag: 0.0              # 중앙선 접선방향 위치 오차는 랩타임 목적에 사용하지 않음
+    q_heading: 1.0          # 역주행/불안정 억제를 위한 약한 방향 regularization만 유지
+    q_error_speed: 0.0      # 중앙선 오차에 따른 속도 억제 비활성화
     q_du: 0.2
     q_steer: 0.5
     q_collision: 300.0
@@ -65,11 +72,13 @@
     lat_g_soft_limit: 6.0                 # friction ellipse ay axis [m/s^2]
     longitudinal_accel_soft_limit: 4.0    # friction ellipse ax axis [m/s^2]
     collision_radius: 0.15
+    boundary_soft_margin: 0.25 # 경계 근처에서만 soft cost 활성화
+    q_boundary_soft: 70.0
     # Minimum rollout cost interpreted as "all candidates faulted".
     all_rollouts_fault_cost_threshold: 5000.0
-    q_progress: 30.0        # 실제 진행 거리[m] 보상
-    q_escape_vel: 10.0       # 종단 경로방향 속도[m/s] 보상(선형)
-    horizon_steps: 80
+    q_progress: 30.0        # 실제 track 진행 거리[m]를 적극 보상
+    q_escape_vel: 10.0      # horizon 말단의 전진속도 보상
+    horizon_steps: 60       # dt=0.02 s 기준 1.2 s prediction horizon
     
     # --- Obstacle Avoidance Params ---
     car_radius: 0.25
@@ -78,12 +87,13 @@
     # --- Noise & Tuning ---
     noise_steer_std: 0.4     # rad/s
     noise_accel_std: 2.0     # m/s^3
-    max_steer_rate: 0.5      # rad/s
-    max_accel_rate: 1.5    # m/s^3
+    max_steer_rate: 50.0    # rad/s
+    # Input slew rate: m/s^2 for direct-speed models, m/s^3 for acceleration-command models.
+    max_accel_rate: 4.0
     lambda: 30.0
-    num_samples: 6000        # MPPI rollout 후보 개수 K
+    num_samples: 2000        # Orin NX에서 안정적인 50 Hz를 위한 rollout 후보 개수 K
     visualize_candidates: true
-    control_rate_hz: 50.0
+    control_rate_hz: 50.0    # 20 ms timer; MPPI 계산도 이 주기보다 짧아야 함
     
     # --- Dynamic Model Params (Pacejka & Kinematics) ---
     mass: 3.74
@@ -137,6 +147,7 @@
     dynamic_mlp_D_r: 0.05906540313616536
     dynamic_mlp_E_r: -0.9999999996403817
     dynamic_mlp_I_z: 0.04712
+    dynamic_mlp_min_speed: 0.8 # 이 속도 아래에서는 residual 외삽 대신 kinematic baseline 사용
 
     # --- Topics (공통 키) ---
     odom_topic: /ego_racecar/odom

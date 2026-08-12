@@ -314,6 +314,51 @@ namespace mppi
         const float previous_steering_command = command_history[8];
         const float previous_actuator_steering_angle = command_history[10];
 
+        // The residual checkpoint is not valid around standstill and can
+        // otherwise extrapolate to negative longitudinal velocity or reverse
+        // the steering response. Use a calibrated, causal kinematic baseline
+        // until the measured/predicted speed enters the training regime.
+        if (hypotf(current_state.v, current_state.vy) < params.dynamic_mlp_min_speed) {
+            const float steering_angle = fminf(
+                MAX_STEERING_ANGLE,
+                fmaxf(-MAX_STEERING_ANGLE,
+                      params.kinematic_steer_scale * control.steer
+                          + params.kinematic_steer_bias));
+            const float longitudinal_acceleration = fminf(
+                params.max_accel,
+                fmaxf(params.min_accel,
+                      params.speed_servo_kp * (speed_command - current_state.v)));
+            State next_state = current_state;
+            next_state.v = fmaxf(0.0f,
+                current_state.v + longitudinal_acceleration * params.dt);
+            next_state.vy = 0.0f;
+            const float target_yaw_rate = next_state.v * tanf(steering_angle)
+                / (params.l_f + params.l_r);
+            next_state.omega = current_state.omega + fminf(
+                params.kinematic_max_yaw_accel,
+                fmaxf(-params.kinematic_max_yaw_accel,
+                      (target_yaw_rate - current_state.omega)
+                          / fmaxf(params.kinematic_yaw_rate_time_constant, 1.0e-3f)))
+                * params.dt;
+            next_state.ax = longitudinal_acceleration;
+            next_state.ay = next_state.v * next_state.omega;
+            next_state.x = current_state.x
+                + params.kinematic_position_speed_scale * next_state.v
+                    * cosf(current_state.yaw) * params.dt;
+            next_state.y = current_state.y
+                + params.kinematic_position_speed_scale * next_state.v
+                    * sinf(current_state.yaw) * params.dt;
+            next_state.yaw = angle_normalize(
+                current_state.yaw + next_state.omega * params.dt);
+            next_state.slip_angle = 0.0f;
+            for (int i = 0; i < 8; ++i)
+                command_history[i] = command_history[i + 2];
+            command_history[8] = control.steer;
+            command_history[9] = speed_command;
+            command_history[10] = steering_angle;
+            return next_state;
+        }
+
         float steering_angle;
         if (use_servo_lag) {
             const float target_steering_angle = fminf(
@@ -461,12 +506,12 @@ namespace mppi
             float dot_y = vel * fast_sin(yaw);
             float dot_yaw = vel * tanf(u.steer) / wheelbase;
             float dot_vel = u.accel;
-            
+
             next_s.x = px + dot_x * p.dt;
             next_s.y = py + dot_y * p.dt;
             next_s.yaw = angle_normalize(yaw + dot_yaw * p.dt);
             next_s.v = vel + dot_vel * p.dt;
-            
+
             // 기존 MPC 기준 미사용 변수 초기화 (omega는 제어 연속성을 위해 dot_yaw 인가)
             next_s.omega = dot_yaw; 
             next_s.slip_angle = 0.0f;
@@ -585,10 +630,12 @@ namespace mppi
         float ref_sin = fast_sin(ref_yaws[nearest_idx]);
         float contour_error = -ref_sin * dx_ref + ref_cos * dy_ref;
         float lag_error = ref_cos * dx_ref + ref_sin * dy_ref;
+        float heading_error = angle_normalize(s.yaw - ref_yaws[nearest_idx]);
         float dist_error = min_dist_sq;  // 이전 설정과의 호환용
         float path_cost = p.q_dist * dist_error
                         + p.q_contour * contour_error * contour_error
-                        + p.q_lag * lag_error * lag_error;
+                        + p.q_lag * lag_error * lag_error
+                        + p.q_heading * heading_error * heading_error;
 
         // 2. 랩타임 속도 비용
         // 경로 접선 방향 속도는 보상하되 max_speed를 넘는 속도는 제곱 비용으로
@@ -597,6 +644,11 @@ namespace mppi
         float overspeed = fmaxf(0.0f, s.v - p.max_speed);
         float vel_cost = -(p.q_v * 0.2f) * forward_v
                        +  p.q_v * overspeed * overspeed;
+        // Do not reward high speed while the vehicle is still recovering its
+        // lateral position or heading. This couples recovery urgency to speed
+        // without introducing a discontinuous speed cap.
+        float error_speed_cost = p.q_error_speed * s.v * s.v
+            * (contour_error * contour_error + heading_error * heading_error);
 
         // Combined longitudinal/lateral tire utilization.  Penalizing ay
         // alone incorrectly treats simultaneous braking and cornering as
@@ -619,11 +671,11 @@ namespace mppi
         
         // 6. Boundary Collision Cost
         float boundary_cost = 0.0f;
-        float safe_dist = p.collision_radius + 0.35f;
+        float safe_dist = p.collision_radius + p.boundary_soft_margin;
 
         if (min_bnd_dist < safe_dist) {
             float penetration = safe_dist - min_bnd_dist;
-            float soft_cost = 70.0f * (penetration * penetration); 
+            float soft_cost = p.q_boundary_soft * (penetration * penetration);
 
             float hard_cost = 0.0f;
             if (min_bnd_dist < p.collision_radius * 1.5f) {
@@ -648,7 +700,7 @@ namespace mppi
             }
         }
 
-        return path_cost + vel_cost + friction_ellipse_cost
+        return path_cost + vel_cost + error_speed_cost + friction_ellipse_cost
              + steer_cost + rate_cost + boundary_cost + obs_cost;
     }
 
@@ -826,17 +878,20 @@ namespace mppi
             float noise_delta_steer = filtered_steer * p.dt;   
             float noise_delta_accel = filtered_accel * p.dt;  
 
-            current_action.steer += fminf(fmaxf(mean_delta_steer + noise_delta_steer, -p.max_steer_rate * p.dt), p.max_steer_rate * p.dt);    
-            current_action.accel += fminf(fmaxf(mean_delta_accel + noise_delta_accel, -p.max_accel_rate * p.dt), p.max_accel_rate * p.dt);
-
-            Control u_clamped = current_action;
-            u_clamped.steer = fminf(fmaxf(u_clamped.steer, -p.max_steer), p.max_steer);
-            
             const bool direct_speed=(p.dynamics_model==KINEMATIC_NOSLIP_NO_IMU_DIRECT_SPEED ||
                                      p.dynamics_model==SLIP_KINEMATIC_WITH_IMU_DIRECT_SPEED ||
                                      p.dynamics_model==DYNAMIC_IMU_RECURSIVE || p.dynamics_model==DYNAMIC_MLP_RESIDUAL ||
                                      p.dynamics_model==DYNAMIC_MLP_RESIDUAL_SERVO_LAG);
-            if(direct_speed) u_clamped.accel=fminf(p.max_speed,fmaxf(p.min_speed,u_clamped.accel));
+            current_action.steer += fminf(fmaxf(mean_delta_steer + noise_delta_steer, -p.max_steer_rate * p.dt), p.max_steer_rate * p.dt);
+            current_action.accel += fminf(fmaxf(mean_delta_accel + noise_delta_accel, -p.max_accel_rate * p.dt), p.max_accel_rate * p.dt);
+
+            Control u_clamped = current_action;
+            u_clamped.steer = fminf(fmaxf(u_clamped.steer, -p.max_steer), p.max_steer);
+
+            if(direct_speed) {
+                const float speed_lower_bound=fminf(p.min_speed,prev_controls[0].accel);
+                u_clamped.accel=fminf(p.max_speed,fmaxf(speed_lower_bound,u_clamped.accel));
+            }
             else {
                 float v_next = x.v + u_clamped.accel * p.dt;
                 if (v_next >= p.max_speed && u_clamped.accel > 0.0f) u_clamped.accel = 0.0;
@@ -975,7 +1030,7 @@ namespace mppi
                                  params_.dynamics_model==DYNAMIC_IMU_RECURSIVE ||
                                  params_.dynamics_model==DYNAMIC_MLP_RESIDUAL ||
                                  params_.dynamics_model==DYNAMIC_MLP_RESIDUAL_SERVO_LAG);
-        const float initial_accel = direct_speed ? params_.max_speed :
+        const float initial_accel = direct_speed ? params_.min_speed :
             ((params_.dynamics_model == KINEMATIC) ? 1.0f : 0.0f);
         h_prev_controls_.resize(T, {neutral_steer, initial_accel});
         h_costs_.resize(K);
@@ -1165,6 +1220,20 @@ namespace mppi
     }
 
     Control MPPISolver::solve(const State &current_state) {
+        const bool direct_speed=(params_.dynamics_model==KINEMATIC_NOSLIP_NO_IMU_DIRECT_SPEED ||
+                                 params_.dynamics_model==SLIP_KINEMATIC_WITH_IMU_DIRECT_SPEED ||
+                                 params_.dynamics_model==DYNAMIC_IMU_RECURSIVE ||
+                                 params_.dynamics_model==DYNAMIC_MLP_RESIDUAL ||
+                                 params_.dynamics_model==DYNAMIC_MLP_RESIDUAL_SERVO_LAG);
+        if (direct_speed && !direct_speed_warm_start_initialized_) {
+            float speed=fminf(params_.max_speed,fmaxf(0.0f,current_state.v));
+            const float speed_step=params_.max_accel_rate*params_.dt;
+            for (int t=0;t<T_;++t) {
+                speed=fminf(params_.max_speed,speed+speed_step);
+                h_prev_controls_[t].accel=speed;
+            }
+            direct_speed_warm_start_initialized_=true;
+        }
         CUDA_CHECK(cudaMemcpy(d_prev_controls_, h_prev_controls_.data(), T_ * sizeof(Control), cudaMemcpyHostToDevice));
 
         int start_path_idx = 0;

@@ -88,6 +88,8 @@ struct Params {
     float q_dist;
     float q_contour;
     float q_lag;
+    float q_heading;
+    float q_error_speed;
     float q_v;
     float q_du;
     float q_steer;
@@ -98,6 +100,8 @@ struct Params {
     float q_progress;
     float q_escape_vel;
     float collision_radius;
+    float boundary_soft_margin;
+    float q_boundary_soft;
     float all_rollouts_fault_cost_threshold;
     
     // Obstacle Avoidance Params
@@ -148,6 +152,7 @@ struct Params {
     float dynamic_mlp_B_f, dynamic_mlp_C_f, dynamic_mlp_D_f, dynamic_mlp_E_f;
     float dynamic_mlp_B_r, dynamic_mlp_C_r, dynamic_mlp_D_r, dynamic_mlp_E_r;
     float dynamic_mlp_I_z;
+    float dynamic_mlp_min_speed;
 
     ButterworthCoeffs filter_coeffs;
 };
@@ -199,6 +204,7 @@ private:
     std::vector<State> h_states_;       
     std::vector<Control> h_controls_;   
     std::vector<Control> h_prev_controls_; 
+    bool direct_speed_warm_start_initialized_{false};
     std::vector<float> h_costs_;        
     std::vector<float> h_weights_;      
     int best_k_ = 0;

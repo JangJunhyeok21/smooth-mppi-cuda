@@ -4,6 +4,7 @@ from nav_msgs.msg import Odometry
 from geometry_msgs.msg import PoseWithCovarianceStamped
 from ackermann_msgs.msg import AckermannDriveStamped
 from std_msgs.msg import Bool
+from f1_msgs.msg import CollisionEvent
 import subprocess
 import time
 import csv
@@ -16,8 +17,15 @@ from ament_index_python.packages import get_package_share_directory
 CSV_FIELDNAMES = [
     'q_v', 'q_dist', 'q_du', 'q_steer', 'q_lat_g', 'q_collision', 'q_progress', 'q_escape_vel',
     'lat_g_soft_limit', 'longitudinal_accel_soft_limit',
-    'status', 'lap_time', 'max_distance',
+    'status', 'lap_time', 'max_distance', 'collision_source',
 ]
+
+# f1_msgs/CollisionEvent.source 값 -> 사람이 읽을 문자열
+_COLLISION_SOURCE_NAMES = {
+    CollisionEvent.NONE: 'none',
+    CollisionEvent.WALL: 'wall',
+    CollisionEvent.VEHICLE: 'vehicle',
+}
 
 class MPPIOptimizer(Node):
     def __init__(self):
@@ -58,6 +66,9 @@ class MPPIOptimizer(Node):
 
         self.odom_sub = self.create_subscription(Odometry, '/ego_racecar/odom', self.odom_callback, 10)
         self.collision_sub = self.create_subscription(Bool, '/collision0', self.collision_callback, 10)
+        # 벽/차량 충돌 원인 구분용 (ground-truth 분류, simulator.cpp classifyCollision 참고)
+        self.collision_event_sub = self.create_subscription(
+            CollisionEvent, '/collision_event0', self.collision_event_callback, 10)
 
         self.init_pose_pub = self.create_publisher(PoseWithCovarianceStamped, '/initialpose', 10)
         # 실제 시뮬레이터가 구독하는 토픽(/drive)으로 정지 명령을 보내야 한다.
@@ -73,6 +84,7 @@ class MPPIOptimizer(Node):
         self.start_time = 0.0
         self.is_running = False
         self.has_crashed = False
+        self.crash_source = CollisionEvent.NONE
         self.max_distance = 0.0
         self.mppi_process = None
         self.mppi_log_file = None
@@ -132,6 +144,15 @@ class MPPIOptimizer(Node):
             self.has_crashed = True
             self.get_logger().warn("Simulator reported a CRASH!")
 
+    def collision_event_callback(self, msg):
+        # Ignore during reset/grace periods or when controller not running (동일한 정책, collision_callback과 별개 신호)
+        if time.time() < self.crash_ignore_deadline:
+            return
+        if not self.is_running:
+            return
+        if msg.source != CollisionEvent.NONE:
+            self.crash_source = msg.source
+
     def reset_simulation(self):
         self.get_logger().info("Resetting Simulation...")
         stop_msg = AckermannDriveStamped()
@@ -150,6 +171,7 @@ class MPPIOptimizer(Node):
         self.init_pose_pub.publish(init_pose)
 
         self.has_crashed = False
+        self.crash_source = CollisionEvent.NONE
         # ignore collision messages briefly while simulator settles
         self.crash_ignore_deadline = time.time() + 1.0
         self.max_distance = 0.0
@@ -197,6 +219,7 @@ class MPPIOptimizer(Node):
         self.max_distance = 0.0
         # clear crash flag and set short grace period to ignore stale collision pub
         self.has_crashed = False
+        self.crash_source = CollisionEvent.NONE
         self.crash_ignore_deadline = time.time() + 1.0
         self.is_running = True
 
@@ -282,15 +305,19 @@ class MPPIOptimizer(Node):
         q_v, q_dist, q_du, q_steer, q_lat_g, q_col, q_progress, q_escape_vel, \
             lat_g_soft_limit, longitudinal_accel_soft_limit = \
             self.param_combinations[self.current_run]
+        collision_source = _COLLISION_SOURCE_NAMES.get(self.crash_source, 'none') if status == 'Crashed' else ''
         row = {
             'q_v': q_v, 'q_dist': q_dist, 'q_du': q_du, 'q_steer': q_steer,
             'q_lat_g': q_lat_g, 'q_collision': q_col, 'q_progress': q_progress, 'q_escape_vel': q_escape_vel,
             'lat_g_soft_limit': lat_g_soft_limit,
             'longitudinal_accel_soft_limit': longitudinal_accel_soft_limit,
             'status': status, 'lap_time': lap_time, 'max_distance': self.max_distance,
+            'collision_source': collision_source,
         }
         self._append_result(row)
-        self.get_logger().info(f"Ended: {status}, laps={self.lap_count}, Time: {lap_time:.2f}s, Dist: {self.max_distance:.2f}m")
+        self.get_logger().info(
+            f"Ended: {status}, laps={self.lap_count}, Time: {lap_time:.2f}s, "
+            f"Dist: {self.max_distance:.2f}m, CollisionSource: {collision_source or 'n/a'}")
         self.current_run += 1
 
 

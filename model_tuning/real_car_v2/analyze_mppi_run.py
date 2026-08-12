@@ -10,7 +10,7 @@ def stamp(msg,record_ns):
 def yaw(q): return np.arctan2(2*(q.w*q.z+q.x*q.y),1-2*(q.y*q.y+q.z*q.z))
 def wrap(x): return (x+np.pi)%(2*np.pi)-np.pi
 def main():
-    p=argparse.ArgumentParser();p.add_argument('bag');p.add_argument('--centerline',required=True);p.add_argument('--out',default='/tmp/mppi_run_analysis.json');a=p.parse_args()
+    p=argparse.ArgumentParser();p.add_argument('bag');p.add_argument('--centerline',required=True);p.add_argument('--out',default='/tmp/mppi_run_analysis.json');p.add_argument('--trajectory-dt',type=float,default=.02,help='seconds between published prediction knots');a=p.parse_args()
     import rosbag2_py
     from rclpy.serialization import deserialize_message
     from rosidl_runtime_py.utilities import get_message
@@ -25,13 +25,22 @@ def main():
         elif topic=='/drive':drive.append((t,m.drive.steering_angle,m.drive.speed))
         else:traj.append((t,np.asarray(m.predicted_x),np.asarray(m.predicted_y),np.asarray(m.predicted_yaw),np.asarray(m.predicted_v),np.asarray(m.predicted_vy),np.asarray(m.predicted_yaw_rate)))
     pose=np.asarray(pose);odom=np.asarray(odom);drive=np.asarray(drive);ref=np.loadtxt(a.centerline,delimiter=',',skiprows=1);d2=(pose[:,None,1]-ref[None,:,0])**2+(pose[:,None,2]-ref[None,:,1])**2;idx=d2.argmin(1);un=idx.astype(float)
+    tangent=np.arctan2(np.roll(ref[:,1],-1)-np.roll(ref[:,1],1),np.roll(ref[:,0],-1)-np.roll(ref[:,0],1));dx=pose[:,1]-ref[idx,0];dy=pose[:,2]-ref[idx,1];ey=-np.sin(tangent[idx])*dx+np.cos(tangent[idx])*dy;clearance=np.minimum(ref[idx,2]-ey,ref[idx,3]+ey)
     for i in range(1,len(un)):
         d=un[i]-un[i-1]
         if d < -len(ref)/2:un[i:]+=len(ref)
         elif d > len(ref)/2:un[i:]-=len(ref)
-    report={'duration_s':float(pose[-1,0]-pose[0,0]),'distance_m':float(np.hypot(np.diff(pose[:,1]),np.diff(pose[:,2])).sum()),'laps':float((un[-1]-un[0])/len(ref)),'centerline_error_mean_p95_max_m':[float(x) for x in (np.sqrt(d2.min(1)).mean(),np.quantile(np.sqrt(d2.min(1)),.95),np.sqrt(d2.min(1)).max())],'speed_min_mean_max_mps':[float(odom[:,1].min()),float(odom[:,1].mean()),float(odom[:,1].max())],'command_speed_mean_max_mps':[float(drive[:,2].mean()),float(drive[:,2].max())],'horizons':{}}
+    lap_crossings=[]
+    next_lap=(np.floor(un[0]/len(ref))+1)*len(ref)
+    for i in range(1,len(un)):
+        while un[i]>=next_lap and un[i]>un[i-1]:
+            ratio=(next_lap-un[i-1])/(un[i]-un[i-1])
+            lap_crossings.append(float(pose[i-1,0]+ratio*(pose[i,0]-pose[i-1,0])))
+            next_lap+=len(ref)
+    lap_times=np.diff(lap_crossings)
+    report={'duration_s':float(pose[-1,0]-pose[0,0]),'distance_m':float(np.hypot(np.diff(pose[:,1]),np.diff(pose[:,2])).sum()),'laps':float((un[-1]-un[0])/len(ref)),'lap_times_s':[float(x) for x in lap_times],'best_lap_s':float(lap_times.min()) if len(lap_times) else None,'centerline_error_mean_p95_max_m':[float(x) for x in (np.sqrt(d2.min(1)).mean(),np.quantile(np.sqrt(d2.min(1)),.95),np.sqrt(d2.min(1)).max())],'boundary_clearance_min_p05_mean_m':[float(x) for x in (clearance.min(),np.quantile(clearance,.05),clearance.mean())],'speed_min_mean_max_mps':[float(odom[:,1].min()),float(odom[:,1].mean()),float(odom[:,1].max())],'command_speed_mean_max_mps':[float(drive[:,2].mean()),float(drive[:,2].max())],'horizons':{}}
     for sec in (.2,.5,1.,1.2):
-        k=round(sec/.02)-1;es=[]
+        k=round(sec/a.trajectory_dt)-1;es=[]
         for t,px,py,pyaw,pv,pvy,pr in traj:
             if len(px)<=k:continue
             j=np.searchsorted(pose[:,0],t+sec);o=np.searchsorted(odom[:,0],t+sec)

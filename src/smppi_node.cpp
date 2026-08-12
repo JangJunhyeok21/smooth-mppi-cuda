@@ -118,7 +118,8 @@ private:
             model == mppi::SLIP_KINEMATIC_WITH_IMU_DIRECT_SPEED ||
             model == mppi::DYNAMIC_IMU_RECURSIVE ||
             model == mppi::DYNAMIC_MLP_RESIDUAL ||
-            model == mppi::DYNAMIC_MLP_RESIDUAL_SERVO_LAG;
+            model == mppi::DYNAMIC_MLP_RESIDUAL_SERVO_LAG ||
+            model == mppi::EFFECTIVE_HISTORY_STATE_RESIDUAL;
         uses_command_history_ = uses_legacy_mlp_imu_ || direct_speed_model_ ||
             model == mppi::KINEMATIC_MLP_NO_IMU_RESIDUAL;
         uses_actuator_state_ =
@@ -443,10 +444,6 @@ private:
         heading_speed_limit_gain_ = this->get_parameter("heading_speed_limit_gain").as_double();
         this->declare_parameter("contour_speed_limit_gain", 2.0);
         contour_speed_limit_gain_ = this->get_parameter("contour_speed_limit_gain").as_double();
-        this->declare_parameter("boundary_stop_margin", 0.25);
-        boundary_stop_margin_ = this->get_parameter("boundary_stop_margin").as_double();
-        this->declare_parameter("boundary_braking_decel", 4.0);
-        boundary_braking_decel_ = this->get_parameter("boundary_braking_decel").as_double();
         this->declare_parameter("q_dist",               1.5);    mppi_params_.q_dist        = this->get_parameter("q_dist").as_double();
         this->declare_parameter("q_contour",            0.5);    mppi_params_.q_contour     = this->get_parameter("q_contour").as_double();
         this->declare_parameter("q_lag",                5.0);    mppi_params_.q_lag         = this->get_parameter("q_lag").as_double();
@@ -609,8 +606,6 @@ private:
             mppi_params_.max_accel_rate = 1.5f;
         heading_speed_limit_gain_ = std::max(0.0f, heading_speed_limit_gain_);
         contour_speed_limit_gain_ = std::max(0.0f, contour_speed_limit_gain_);
-        boundary_stop_margin_ = std::max(0.0f, boundary_stop_margin_);
-        boundary_braking_decel_ = std::max(0.1f, boundary_braking_decel_);
         if (mppi_params_.collision_radius < 0.0f)
             mppi_params_.collision_radius = std::abs(mppi_params_.collision_radius);
         if (mppi_params_.boundary_soft_margin < 0.0f)
@@ -768,17 +763,12 @@ private:
             const float heading_error = std::atan2(
                 std::sin(current_state_.yaw - ref_yaw),
                 std::cos(current_state_.yaw - ref_yaw));
-            const float boundary_distance = compute_min_boundary_distance(current_state_, nearest_idx);
             const float heading_speed_limit = mppi_params_.max_speed /
                 (1.0f + heading_speed_limit_gain_ * std::abs(heading_error));
             const float contour_speed_limit = mppi_params_.max_speed /
                 (1.0f + contour_speed_limit_gain_ * std::abs(contour_error));
-            const float braking_distance = std::max(
-                0.0f, boundary_distance - boundary_stop_margin_);
-            const float boundary_speed_limit = std::sqrt(
-                2.0f * boundary_braking_decel_ * braking_distance);
             const float safety_speed_limit = std::clamp(
-                std::min({heading_speed_limit, contour_speed_limit, boundary_speed_limit}),
+                std::min(heading_speed_limit, contour_speed_limit),
                 0.0f, mppi_params_.max_speed);
             const float recovery_speed_floor = std::min(
                 mppi_params_.min_speed, safety_speed_limit);
@@ -961,8 +951,6 @@ private:
     double control_rate_hz_{50.0};
     float heading_speed_limit_gain_{8.0f};
     float contour_speed_limit_gain_{2.0f};
-    float boundary_stop_margin_{0.25f};
-    float boundary_braking_decel_{4.0f};
     bool has_published_command_{false};
     bool direct_speed_model_{false};
     bool uses_command_history_{false};

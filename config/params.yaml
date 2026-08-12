@@ -52,15 +52,13 @@
     min_accel: -1.0          # m/s^2
     max_accel: 1.0           # m/s^2
     min_speed: 0.5
-    max_speed: 2.5  # highest staged speed retained after data collection
+    max_speed: 4.0  # fastest validated lap-time setting
     # Racing-line 자유도를 위해 중앙선 오차 기반 publish 속도 제한은 사용하지 않는다.
     heading_speed_limit_gain: 0.0
     contour_speed_limit_gain: 0.0
-    boundary_stop_margin: 0.10 # 실제 경계에 매우 가까울 때만 제동거리 상한 적용
-    boundary_braking_decel: 4.0
 
     # --- Costs (최적화 결과 반영) ---
-    q_v: 2.0
+    q_v: 6.0
     q_dist: 0.0             # legacy Euclidean path cost (MPCC에서는 0 유지)
     q_contour: 0.0          # 중앙선 고정 대신 track boundary 안에서 racing line 허용
     q_lag: 0.0              # 중앙선 접선방향 위치 오차는 랩타임 목적에 사용하지 않음
@@ -68,17 +66,17 @@
     q_error_speed: 0.0      # 중앙선 오차에 따른 속도 억제 비활성화
     q_du: 0.2
     q_steer: 0.5
-    q_collision: 300.0
+    q_collision: 500.0
     q_lat_g: 200.0
-    lat_g_soft_limit: 6.0                 # friction ellipse ay axis [m/s^2]
+    lat_g_soft_limit: 7.5                 # validated real-car cornering envelope
     longitudinal_accel_soft_limit: 4.0    # friction ellipse ax axis [m/s^2]
-    collision_radius: 0.15
-    boundary_soft_margin: 0.25 # 경계 근처에서만 soft cost 활성화
-    q_boundary_soft: 70.0
+    collision_radius: 0.15     # aggressive racing-line clearance
+    boundary_soft_margin: 0.15 # start soft cost at 0.30 m clearance
+    q_boundary_soft: 100.0
     # Minimum rollout cost interpreted as "all candidates faulted".
     all_rollouts_fault_cost_threshold: 5000.0
-    q_progress: 30.0        # 실제 track 진행 거리[m]를 적극 보상
-    q_escape_vel: 10.0      # horizon 말단의 전진속도 보상
+    q_progress: 40.0        # 실제 track 진행 거리[m]를 적극 보상
+    q_escape_vel: 15.0      # horizon 말단의 전진속도 보상
     horizon_steps: 60       # model_dt=0.04 s 기준 2.4 s prediction horizon
     
     # --- Obstacle Avoidance Params ---
@@ -92,7 +90,7 @@
     # Input slew rate: m/s^2 for direct-speed models, m/s^3 for acceleration-command models.
     max_accel_rate: 4.0
     lambda: 30.0
-    num_samples: 2000        # Orin NX에서 안정적인 50 Hz를 위한 rollout 후보 개수 K
+    num_samples: 1600        # Orin NX 50 Hz 계산 예산 확보
     visualize_candidates: true
     control_rate_hz: 50.0    # 20 ms timer; MPPI 계산도 이 주기보다 짧아야 함
     model_dt: 0.04            # rollout knot: one held u, two internal 20 ms substeps

@@ -41,6 +41,8 @@ def generate_launch_description():
             config_dir, "dynamic_MLP.bin"),
         "dynamic_mlp_servo_lag_weights_path": os.path.join(
             config_dir, "dynamic_residual_v2.bin"),
+        "effective_history_weights_path": os.path.join(
+            config_dir, "effective_history_state_residual.bin"),
         "e2e_weights_path": os.path.join(
             config_dir, "E2E.bin"),
     }

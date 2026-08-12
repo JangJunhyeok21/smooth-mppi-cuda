@@ -35,6 +35,7 @@ DEFAULTS = dict(
     state_loss_weight=2.0, vx_loss_weight=2.0, vy_loss_weight=2.0,
     state_yaw_rate_loss_weight=8.0, position_loss_weight=1.0,
     yaw_loss_weight=8.0, yaw_rate_loss_weight=8.0,
+    imu_accel_loss_weight=.10,
     checkpoint_objective="position", resume=None, normalization="zscore",
     dynamic_params_json=None,
     disable_velocity_residual=False, yaw_target="imu", slip_yaw_source="imu",
@@ -94,6 +95,8 @@ def main():
     p.add_argument('--yaw-loss-weight',type=float,default=.4)
     p.add_argument('--yaw-rate-loss-weight',type=float,default=0.0,
                    help='extra direct supervision for recursive yaw-rate state')
+    p.add_argument('--imu-accel-loss-weight',type=float,default=.10,
+                   help='direct SmoothL1 supervision of predicted body ax/ay')
     p.add_argument('--checkpoint-objective',choices=('position','position_p95','loss'),default='position')
     p.add_argument('--resume',help='optional model.pt used to continue training')
     p.add_argument('--dynamic-params-json',default=None,
@@ -244,8 +247,9 @@ def main():
             dp=dynamic_params;fzf=dp['mass']*9.81*LR/(LF+LR);fzr=dp['mass']*9.81*LF/(LF+LR)
             fyf=fzf*dp['Df']*np.sin(dp['Cf']*np.arctan(dp['Bf']*af-dp['Ef']*(dp['Bf']*af-np.arctan(dp['Bf']*af))))
             fyr=fzr*dp['Dr']*np.sin(dp['Cr']*np.arctan(dp['Br']*ar-dp['Er']*(dp['Br']*ar-np.arctan(dp['Br']*ar))))
-            beta_dot=(fyf*np.cos(steer)+fyr)/(dp['mass']*np.maximum(measured_speed,.5))-w0
-            next_beta=measured_beta+beta_dot*dt;base_vx=base_speed*np.cos(next_beta);base_vy=base_speed*np.sin(next_beta)
+            classic_ay=(fyf*np.cos(steer)+fyr)/dp['mass']
+            base_vx=target_body[:,0]+(base_ax+target_body[:,1]*w0)*dt
+            base_vy=target_body[:,1]+(classic_ay-target_body[:,0]*w0)*dt
             base_r=w0+(LF*fyf*np.cos(steer)-LR*fyr)/dp['Iz']*dt
         else:
             target_r=base_vx*np.tan(steer)/(LF+LR)
@@ -332,8 +336,9 @@ def main():
                     fzf=dp['mass']*9.81*LR/(LF+LR);fzr=dp['mass']*9.81*LF/(LF+LR)
                     fyf=fzf*dp['Df']*torch.sin(dp['Cf']*torch.atan(dp['Bf']*af-dp['Ef']*(dp['Bf']*af-torch.atan(dp['Bf']*af))))
                     fyr=fzr*dp['Dr']*torch.sin(dp['Cr']*torch.atan(dp['Br']*ar-dp['Er']*(dp['Br']*ar-torch.atan(dp['Br']*ar))))
-                    beta_dot=(fyf*torch.cos(steer)+fyr)/(dp['mass']*torch.clamp(current_speed,min=.5))-s[:,2]
-                    nbeta=beta+beta_dot*dt;base_vx=base_speed*torch.cos(nbeta);base_vy=base_speed*torch.sin(nbeta)
+                    classic_ay=(fyf*torch.cos(steer)+fyr)/dp['mass']
+                    base_vx=s[:,0]+(slip_ax+s[:,1]*s[:,2])*dt
+                    base_vy=s[:,1]+(classic_ay-s[:,0]*s[:,2])*dt
                     base_r=s[:,2]+(LF*fyf*torch.cos(steer)-LR*fyr)/dp['Iz']*dt
                 else:
                     target_r=base_vx*torch.tan(steer)/(LF+LR)
@@ -368,16 +373,20 @@ def main():
             gt_s=target_body_t[ix+1];gt_q=pose_t[ix+1];gt_imu=imu_t[ix+1,1:3] # gt_s : vx,vy,r; gt_q : x,y,yaw; gt_imu : ax,ay
             state_component_loss=torch.nn.functional.smooth_l1_loss(
                 ns,gt_s,reduction='none')
-            state_loss=a.state_loss_weight*(
-                state_component_loss*state_component_weights).sum(1)/state_component_weights.sum()
+            component_weight_sum=state_component_weights.sum()
+            state_loss=(a.state_loss_weight*(state_component_loss*state_component_weights).sum(1)/component_weight_sum
+                        if a.state_loss_weight>0 and component_weight_sum>0
+                        else torch.zeros(b,device=device))
             yaw_rate_loss=a.yaw_rate_loss_weight*torch.nn.functional.smooth_l1_loss(
                 ns[:,2],gt_s[:,2],reduction='none')
             yaw_loss=a.yaw_loss_weight*torch.nn.functional.smooth_l1_loss(nq[:,2],gt_q[:,2],reduction='none')
             pos_loss=a.position_loss_weight*torch.linalg.vector_norm(nq[:,:2]-gt_q[:,:2],dim=1)
-            imu_loss=(.04*torch.nn.functional.smooth_l1_loss(next_axay,gt_imu,reduction='none').mean(1)
-                      if is_e2e else 0.)
+            imu_loss=(a.imu_accel_loss_weight*torch.nn.functional.smooth_l1_loss(
+                next_axay,gt_imu,reduction='none').mean(1)
+                if (is_e2e or is_dynamic_residual) else 0.)
             losses.append(state_loss+yaw_rate_loss+yaw_loss+pos_loss+imu_loss)
             s,q,axay=ns,nq,next_axay;hist=torch.cat((hist[:,1:],u[:,None]),1)
+            # s : vx,vy,r; q : x,y,yaw; axay : ax,ay
             if collect:traj.append(torch.cat((q,s,axay),1))
         loss=torch.stack(losses,1).mean()
         return loss,(torch.stack(traj,1) if collect else None)
@@ -462,6 +471,7 @@ def main():
       'position_speed_scale':a.position_speed_scale,
       'loss_weights':{'state':a.state_loss_weight,'position':a.position_loss_weight,
                       'yaw':a.yaw_loss_weight,'yaw_rate':a.yaw_rate_loss_weight,
+                      'imu_acceleration':a.imu_accel_loss_weight,
                       'state_components':{'vx':a.vx_loss_weight,
                                           'vy':a.vy_loss_weight,
                                           'yaw_rate':a.state_yaw_rate_loss_weight}},

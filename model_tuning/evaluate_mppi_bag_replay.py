@@ -79,7 +79,7 @@ def main():
      upper=torch.maximum(torch.full_like(speed,maxv),speed) if preserve else torch.full_like(speed,maxv)
      basespeed=torch.minimum(torch.maximum(speed+baseax*dt,lower),upper)
      if meta.get('model')=='dynamic_residual':
-      dp=meta['dynamic_classic_params'];vxs=torch.clamp(torch.abs(s[:,0]),min=.5);af=steer-torch.atan2(s[:,1]+float(cfg['l_f'])*s[:,2],vxs);ar=-torch.atan2(s[:,1]-float(cfg['l_r'])*s[:,2],vxs);fzf=dp['mass']*9.81*float(cfg['l_r'])/wb;fzr=dp['mass']*9.81*float(cfg['l_f'])/wb;fyf=fzf*dp['Df']*torch.sin(dp['Cf']*torch.atan(dp['Bf']*af-dp['Ef']*(dp['Bf']*af-torch.atan(dp['Bf']*af))));fyr=fzr*dp['Dr']*torch.sin(dp['Cr']*torch.atan(dp['Br']*ar-dp['Er']*(dp['Br']*ar-torch.atan(dp['Br']*ar))));bd=(fyf*torch.cos(steer)+fyr)/(dp['mass']*torch.clamp(speed,min=.5))-s[:,2];nb=beta+bd*dt;classic=torch.stack((basespeed*torch.cos(nb),basespeed*torch.sin(nb),s[:,2]+(float(cfg['l_f'])*fyf*torch.cos(steer)-float(cfg['l_r'])*fyr)/dp['Iz']*dt),1)
+      dp=meta['dynamic_classic_params'];vxs=torch.clamp(torch.abs(s[:,0]),min=.5);af=steer-torch.atan2(s[:,1]+float(cfg['l_f'])*s[:,2],vxs);ar=-torch.atan2(s[:,1]-float(cfg['l_r'])*s[:,2],vxs);fzf=dp['mass']*9.81*float(cfg['l_r'])/wb;fzr=dp['mass']*9.81*float(cfg['l_f'])/wb;fyf=fzf*dp['Df']*torch.sin(dp['Cf']*torch.atan(dp['Bf']*af-dp['Ef']*(dp['Bf']*af-torch.atan(dp['Bf']*af))));fyr=fzr*dp['Dr']*torch.sin(dp['Cr']*torch.atan(dp['Br']*ar-dp['Er']*(dp['Br']*ar-torch.atan(dp['Br']*ar))));cay=(fyf*torch.cos(steer)+fyr)/dp['mass'];classic=torch.stack((s[:,0]+(baseax+s[:,1]*s[:,2])*dt,s[:,1]+(cay-s[:,0]*s[:,2])*dt,s[:,2]+(float(cfg['l_f'])*fyf*torch.cos(steer)-float(cfg['l_r'])*fyr)/dp['Iz']*dt),1)
      else:
       basevx=basespeed*torch.cos(beta);basevy=basespeed*torch.sin(beta);targetw=basevx*torch.tan(steer)/wb;basew=s[:,2]+torch.clamp((targetw-s[:,2])/yawtau,-maxyawacc,maxyawacc)*dt;classic=torch.stack((basevx,basevy,basew),1)
      if meta.get('model') in ('dynamic_imu','e2e_mlp'):
@@ -96,6 +96,12 @@ def main():
    e=np.linalg.norm(pred[:,step,:2]-gt[:,step,:2],axis=1);yaw=np.arctan2(np.sin(pred[:,step,2]-gt[:,step,2]),np.cos(pred[:,step,2]-gt[:,step,2]))
    gt_speed=polar[starts+a.history_offset+step,0];gt_w=polar[starts+a.history_offset+step,2];ps=np.hypot(pred[:,step,3],pred[:,step,4])
    points[f'{step*dt:.2f}s']={'trajectory_mean_m':float(e.mean()),'trajectory_median_m':float(np.median(e)),'trajectory_p95_m':float(np.quantile(e,.95)),'trajectory_worst_m':float(e.max()),'speed_mae_mps':float(np.mean(abs(ps-gt_speed))),'yaw_rate_mae_radps':float(np.mean(abs(pred[:,step,5]-gt_w))),'yaw_mae_deg':float(np.degrees(np.mean(abs(yaw))))}
+  pred_dot_vx=np.diff(pred[:,:,3],axis=1)/dt;pred_dot_vy=np.diff(pred[:,:,4],axis=1)/dt
+  rows=starts[:,None]+a.history_offset+np.arange(1,horizon+1)[None,:]
+  gt_vx=raw[rows,4];gt_vy=body[rows,1];gt_w=body[rows,2]
+  gt_dot_vx=imu[rows,1]+gt_vy*gt_w;gt_dot_vy=imu[rows,2]-gt_vx*gt_w
+  def mae(x,y):return float(np.mean(np.abs(x-y)))
+  points['open_loop_all_steps']={'dot_vx_mae_mps2':mae(pred_dot_vx,gt_dot_vx),'dot_vy_mae_mps2':mae(pred_dot_vy,gt_dot_vy),'vx_mae_mps':mae(pred[:,1:,3],gt_vx),'vy_mae_mps':mae(pred[:,1:,4],gt_vy),'yaw_rate_mae_radps':mae(pred[:,1:,5],gt_w)}
   metrics[label]=points
  out=Path(a.output);out.mkdir(parents=True,exist_ok=True);(out/'metrics.json').write_text(json.dumps(metrics,indent=2)+'\n');np.savez_compressed(out/'predictions.npz',**arrays)
  import matplotlib.pyplot as plt
@@ -112,4 +118,10 @@ def main():
   axes[0,col].plot(gt[index,:,0],gt[index,:,1],'k-',lw=2,label='GT');axes[0,col].plot(pred[index,:,0],pred[index,:,1],'--',color='tab:orange',lw=2,label='Config .bin prediction');axes[0,col].set_title(f'{title}: {final_error[index]:.3f} m');axes[0,col].axis('equal');axes[0,col].grid(alpha=.25);axes[0,col].legend()
   t=np.arange(horizon+1)*dt;axes[1,col].plot(t,np.hypot(pred[index,:,3],pred[index,:,4]),'b--',label='Predicted speed');axes[1,col].plot(t,polar[starts[index]+a.history_offset:starts[index]+a.history_offset+horizon+1,0],'b-',label='GT speed');axes[1,col].plot(t,pred[index,:,5],'g--',label='Predicted yaw rate');axes[1,col].plot(t,polar[starts[index]+a.history_offset:starts[index]+a.history_offset+horizon+1,2],'g-',label='GT yaw rate');axes[1,col].set_xlabel('Time [s]');axes[1,col].grid(alpha=.25);axes[1,col].legend(fontsize=8)
  fig.tight_layout();fig.savefig(out/'config_bin_best_median_worst.png',dpi=180);plt.close(fig)
+ pred=arrays['current_cuda_hard_state_clamp'];rows=starts[:,None]+a.history_offset+np.arange(1,horizon+1)[None,:]
+ gt_vx=raw[rows,4];gt_vy=body[rows,1];gt_w=body[rows,2];gt_dot_vx=imu[rows,1]+gt_vy*gt_w;gt_dot_vy=imu[rows,2]-gt_vx*gt_w
+ signals=((np.diff(pred[:,:,3],axis=1)/dt,gt_dot_vx,r'$\dot v_x$ [m/s$^2$]'),(np.diff(pred[:,:,4],axis=1)/dt,gt_dot_vy,r'$\dot v_y$ [m/s$^2$]'),(pred[:,1:,3],gt_vx,r'$v_x$ [m/s]'),(pred[:,1:,4],gt_vy,r'$v_y$ [m/s]'),(pred[:,1:,5],gt_w,'yaw rate [rad/s]'))
+ fig,axes=plt.subplots(3,2,figsize=(12,10));axes.flat[-1].axis('off');t=np.arange(1,horizon+1)*dt
+ for axis,(prediction,target,title) in zip(axes.flat,signals):axis.plot(t,np.mean(np.abs(prediction-target),axis=0));axis.set_title(title+' open-loop MAE');axis.set_xlabel('Time [s]');axis.grid(alpha=.25)
+ fig.tight_layout();fig.savefig(out/'open_loop_state_derivative_mae.png',dpi=180);plt.close(fig)
 if __name__=='__main__':main()

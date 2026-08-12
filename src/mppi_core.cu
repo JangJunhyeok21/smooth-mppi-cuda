@@ -297,7 +297,7 @@ namespace mppi
         const float rate=fminf(p.actuator_max_steer_rate,fmaxf(-p.actuator_max_steer_rate,
             (target-previous_delta)/fmaxf(p.steer_servo_time_constant,1e-3f)));
         const float steer=fminf(.55f,fmaxf(-.55f,previous_delta+rate*p.dt));
-        const float speed=hypotf(s.v,s.vy),beta=atan2f(s.vy,s.v);
+        const float speed=hypotf(s.v,s.vy);
         const float ax=fminf(p.max_accel,fmaxf(p.min_accel,p.speed_servo_kp*(speed_cmd-speed)));
         const float lo=fminf(p.min_speed,speed),hi=fmaxf(p.max_speed,speed);
         const float next_speed=fminf(hi,fmaxf(lo,speed+ax*p.dt));
@@ -309,15 +309,17 @@ namespace mppi
             bfa-p.dynamic_mlp_E_f*(bfa-atanf(bfa))));
         const float fyr=p.F_zr*p.dynamic_mlp_D_r*sinf(p.dynamic_mlp_C_r*atanf(
             bra-p.dynamic_mlp_E_r*(bra-atanf(bra))));
-        const float beta_dot=(fyf*cosf(steer)+fyr)/(p.mass*fmaxf(speed,.5f))-s.omega;
-        const float nbeta=beta+beta_dot*p.dt;
-        const float bvx=next_speed*cosf(nbeta),bvy=next_speed*sinf(nbeta);
+        const float classic_ay=(fyf*cosf(steer)+fyr)/p.mass;
+        // Body-frame equations: ax=d(vx)/dt-vy*r, ay=d(vy)/dt+vx*r.
+        // `ax` is the commanded physical longitudinal acceleration.
+        const float bvx=s.v+(ax+s.vy*s.omega)*p.dt;
+        const float bvy=s.vy+(classic_ay-s.v*s.omega)*p.dt;
         const float bw=s.omega+(p.l_f*fyf*cosf(steer)-p.l_r*fyr)/p.dynamic_mlp_I_z*p.dt;
         float raw[20]={s.v,s.vy,s.omega,u.steer,speed_cmd,steer,u.steer-previous_command,bvx,bvy,bw};
         for(int i=0;i<10;++i)raw[10+i]=history[i];
         float corr[3];split_mlp<20>(raw,dmr_mean,dmr_std,dmr_w1,dmr_b1,dmr_w2,dmr_b2,dmr_w3,dmr_b3,corr);
         State n=s;n.v=bvx+corr[0]*p.dt;n.vy=bvy+corr[1]*p.dt;n.omega=bw+corr[2]*p.dt;
-        n.ax=(n.v-s.v)/p.dt-s.vy*s.omega;n.ay=(n.vy-s.vy)/p.dt+s.v*s.omega;
+        n.ax=ax+corr[0];n.ay=classic_ay+corr[1];
         const float ns=hypotf(n.v,n.vy),nb=atan2f(n.vy,n.v);
         n.x=s.x+p.kinematic_position_speed_scale*ns*cosf(s.yaw+nb)*p.dt;
         n.y=s.y+p.kinematic_position_speed_scale*ns*sinf(s.yaw+nb)*p.dt;

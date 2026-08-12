@@ -48,10 +48,9 @@
     kf_max_steer: 0.4788
     # --- Limits ---
     max_steer: 0.4788        # rad
-    min_accel: -4.0          # m/s^2
-    max_accel: 4.5           # m/s^2
+    min_accel: -1.0          # m/s^2
+    max_accel: 1.0           # m/s^2
     min_speed: 0.5
-    target_speed: 3.0        # m/s, Map1 안정 완주 우선 목표 속도
     max_speed: 4.0
 
     # --- Costs (최적화 결과 반영) ---
@@ -63,11 +62,13 @@
     q_steer: 0.5
     q_collision: 300.0
     q_lat_g: 200.0
-    collision_radius: 0.3
+    lat_g_soft_limit: 6.0 # ay
+    collision_radius: 0.15
     # Minimum rollout cost interpreted as "all candidates faulted".
     all_rollouts_fault_cost_threshold: 5000.0
-    q_progress: 220.0        # 실제 진행 거리[m] 보상
-    q_escape_vel: 18.0       # 종단 경로방향 속도[m/s] 보상(선형)
+    q_progress: 100.0        # 실제 진행 거리[m] 보상
+    q_escape_vel: 100.0       # 종단 경로방향 속도[m/s] 보상(선형)
+    horizon_steps: 80
     
     # --- Obstacle Avoidance Params ---
     car_radius: 0.25
@@ -76,10 +77,10 @@
     # --- Noise & Tuning ---
     noise_steer_std: 0.4     # rad/s
     noise_accel_std: 2.0     # m/s^3
-    max_steer_rate: 4.0      # rad/s
-    max_accel_rate: 100.0    # m/s^3
-    lambda: 15.0
-    num_samples: 4000        # MPPI rollout 후보 개수 K
+    max_steer_rate: 0.1      # rad/s
+    max_accel_rate: 5.0    # m/s^3
+    lambda: 30.0
+    num_samples: 6000        # MPPI rollout 후보 개수 K
     visualize_candidates: true
     control_rate_hz: 50.0
     
@@ -142,4 +143,5 @@
     velocity_topic: /odom
     drive_topic: /drive
     path_topic: /mppi_target_path
+
     use_mcl_pose: true       # 실차: map pose와 wheel odometry twist 분리

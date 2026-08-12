@@ -31,7 +31,7 @@ public:
             lateral_velocity_kf_.initialize(lateral_velocity_kf_params_);
         }
 
-        solver_ = std::make_unique<mppi::MPPISolver>(num_samples_, 80, mppi_params_);
+        solver_ = std::make_unique<mppi::MPPISolver>(num_samples_, horizon_steps_, mppi_params_);
         if (mppi_params_.dynamics_model == mppi::KINEMATIC_RESIDUAL)
             solver_->load_residual_weights(residual_weights_path_);
         if (mppi_params_.dynamics_model == mppi::KINEMATIC_MLP_RESIDUAL)
@@ -326,7 +326,7 @@ private:
 
         float dx = s.x - ref_path_xs_[idx], dy = s.y - ref_path_ys_[idx];
         float dist_error = dx*dx + dy*dy;
-        float speed_err  = s.v - mppi_params_.target_speed;
+        float speed_err  = s.v - mppi_params_.max_speed;
         float overspeed  = (speed_err > 0.f) ? mppi_params_.q_v * speed_err * speed_err : 0.f;
 
         float d_steer = u.steer - u_prev.steer, d_accel = u.accel - u_prev.accel;
@@ -402,11 +402,12 @@ private:
         }
         this->declare_parameter("num_samples",          8000);
         num_samples_ = this->get_parameter("num_samples").as_int();
+        this->declare_parameter("horizon_steps",        80);
+        horizon_steps_ = this->get_parameter("horizon_steps").as_int();
         this->declare_parameter("max_steer",            0.507);  mppi_params_.max_steer     = this->get_parameter("max_steer").as_double();
         this->declare_parameter("min_accel",            -9.0);   mppi_params_.min_accel     = this->get_parameter("min_accel").as_double();
         this->declare_parameter("max_accel",            9.0);    mppi_params_.max_accel     = this->get_parameter("max_accel").as_double();
         this->declare_parameter("min_speed",            0.0);    mppi_params_.min_speed     = this->get_parameter("min_speed").as_double();
-        this->declare_parameter("target_speed",         6.0);    mppi_params_.target_speed  = this->get_parameter("target_speed").as_double();
         this->declare_parameter("max_speed",            10.0);   mppi_params_.max_speed     = this->get_parameter("max_speed").as_double();
         this->declare_parameter("q_dist",               1.5);    mppi_params_.q_dist        = this->get_parameter("q_dist").as_double();
         this->declare_parameter("q_contour",            0.5);    mppi_params_.q_contour     = this->get_parameter("q_contour").as_double();
@@ -416,6 +417,7 @@ private:
         this->declare_parameter("q_steer",              0.3);    mppi_params_.q_steer       = this->get_parameter("q_steer").as_double();
         this->declare_parameter("q_collision",          400.0);  mppi_params_.q_collision   = this->get_parameter("q_collision").as_double();
         this->declare_parameter("q_lat_g",              200.0);  mppi_params_.q_lat_g       = this->get_parameter("q_lat_g").as_double();
+        this->declare_parameter("lat_g_soft_limit",     9.81);   mppi_params_.lat_g_soft_limit = this->get_parameter("lat_g_soft_limit").as_double();
         this->declare_parameter("q_progress",           13.0);   mppi_params_.q_progress    = this->get_parameter("q_progress").as_double();
         this->declare_parameter("q_escape_vel",         6.5);    mppi_params_.q_escape_vel  = this->get_parameter("q_escape_vel").as_double();
         this->declare_parameter("collision_radius",     0.19);   mppi_params_.collision_radius = this->get_parameter("collision_radius").as_double();
@@ -541,6 +543,7 @@ private:
     void validate_parameters() {
         if (mppi_params_.min_speed > mppi_params_.max_speed)
             std::swap(mppi_params_.min_speed, mppi_params_.max_speed);
+        if (horizon_steps_ < 1) horizon_steps_ = 1;
         if (mppi_params_.lambda <= 0.0f) mppi_params_.lambda = 1.0f;
         if (mppi_params_.collision_radius < 0.0f)
             mppi_params_.collision_radius = std::abs(mppi_params_.collision_radius);
@@ -790,6 +793,7 @@ private:
     }
 
     std::int16_t num_samples_;
+    std::int16_t horizon_steps_{80};
     mppi::Params mppi_params_;
     std::unique_ptr<mppi::MPPISolver> solver_;
     mppi::State  current_state_;

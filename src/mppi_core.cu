@@ -578,18 +578,16 @@ namespace mppi
                         + p.q_lag * lag_error * lag_error;
 
         // 2. 랩타임 속도 비용
-        // 경로 접선 방향 속도는 보상하되 target_speed를 넘는 속도는 제곱 비용으로
-        // 억제한다. 기존 구현은 target_speed를 전혀 사용하지 않아 max_speed까지
-        // 무조건 가속하는 것이 유리했다.
+        // 경로 접선 방향 속도는 보상하되 max_speed를 넘는 속도는 제곱 비용으로
+        // 억제한다.
         float forward_v = s.v * fast_cos(s.yaw - ref_yaws[nearest_idx]);
-        float overspeed = fmaxf(0.0f, s.v - p.target_speed);
+        float overspeed = fmaxf(0.0f, s.v - p.max_speed);
         float vel_cost = -(p.q_v * 0.2f) * forward_v
                        +  p.q_v * overspeed * overspeed;
 
-        // hard fault(1.3 g)에 닿기 전에 부드럽게 감속 후보를 선택하게 한다.
+        // hard fault에 닿기 전에 부드럽게 감속 후보를 선택하게 한다.
         // q_lat_g는 기존에는 파라미터만 있고 실제 rollout 비용에는 빠져 있었다.
-        constexpr float LAT_G_SOFT_LIMIT = 9.81f;  // 1.0 g
-        float lat_g_excess = fmaxf(0.0f, fabsf(s.ay) - LAT_G_SOFT_LIMIT);
+        float lat_g_excess = fmaxf(0.0f, fabsf(s.ay) - p.lat_g_soft_limit);
         float lat_g_cost = p.q_lat_g * 0.02f * lat_g_excess * lat_g_excess;
 
         // 4. Control Input Cost
@@ -954,7 +952,7 @@ namespace mppi
                                  params_.dynamics_model==DYNAMIC_IMU_RECURSIVE ||
                                  params_.dynamics_model==DYNAMIC_MLP_RESIDUAL ||
                                  params_.dynamics_model==DYNAMIC_MLP_RESIDUAL_SERVO_LAG);
-        const float initial_accel = direct_speed ? params_.target_speed :
+        const float initial_accel = direct_speed ? params_.max_speed :
             ((params_.dynamics_model == KINEMATIC) ? 1.0f : 0.0f);
         h_prev_controls_.resize(T, {neutral_steer, initial_accel});
         h_costs_.resize(K);

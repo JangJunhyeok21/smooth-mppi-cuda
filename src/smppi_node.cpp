@@ -401,7 +401,7 @@ private:
         dynamic_mlp_servo_lag_weights_path_=this->get_parameter("dynamic_mlp_servo_lag_weights_path").as_string();
         this->declare_parameter("e2e_weights_path", "/home/a/smooth-mppi-cuda/config/E2E.bin");
         e2e_weights_path_=this->get_parameter("e2e_weights_path").as_string();
-        this->declare_parameter("effective_history_weights_path", "/home/a/smooth-mppi-cuda/model_tuning/results/effective_history_recursive_5_10_20_30_50_60_seed31/effective_history_state_residual.bin");
+        this->declare_parameter("effective_history_weights_path", "/home/a/smooth-mppi-cuda/model_tuning/results/effective_history_recursive_correct_history_seed31/effective_history_state_residual.bin");
         effective_history_weights_path_=this->get_parameter("effective_history_weights_path").as_string();
         if (dynamics_model_name_ == "legacy_hybrid") {
             mppi_params_.dynamics_model = mppi::LEGACY_HYBRID;
@@ -524,10 +524,13 @@ private:
         this->declare_parameter("dynamic_mlp_I_z", 0.5);          mppi_params_.dynamic_mlp_I_z=this->get_parameter("dynamic_mlp_I_z").as_double();
         this->declare_parameter("dynamic_mlp_min_speed", 0.8);    mppi_params_.dynamic_mlp_min_speed=this->get_parameter("dynamic_mlp_min_speed").as_double();
         this->declare_parameter("model_dt",0.04);mppi_params_.model_dt=this->get_parameter("model_dt").as_double();
-        mppi_params_.effective_steer_scale=.51f;mppi_params_.effective_steer_bias=.01f;
-        mppi_params_.effective_yaw_response_tau=.10f;mppi_params_.effective_max_yaw_accel=15.f;
-        mppi_params_.effective_speed_response_gain=.76f;mppi_params_.effective_max_accel=1.f;
-        mppi_params_.effective_vy_decay_tau=.12f;
+        this->declare_parameter("effective_steer_scale",0.51);mppi_params_.effective_steer_scale=this->get_parameter("effective_steer_scale").as_double();
+        this->declare_parameter("effective_steer_bias",0.01);mppi_params_.effective_steer_bias=this->get_parameter("effective_steer_bias").as_double();
+        this->declare_parameter("effective_yaw_response_tau",0.10);mppi_params_.effective_yaw_response_tau=this->get_parameter("effective_yaw_response_tau").as_double();
+        this->declare_parameter("effective_max_yaw_accel",15.0);mppi_params_.effective_max_yaw_accel=this->get_parameter("effective_max_yaw_accel").as_double();
+        this->declare_parameter("effective_speed_response_gain",0.76);mppi_params_.effective_speed_response_gain=this->get_parameter("effective_speed_response_gain").as_double();
+        this->declare_parameter("effective_max_accel",1.0);mppi_params_.effective_max_accel=this->get_parameter("effective_max_accel").as_double();
+        this->declare_parameter("effective_vy_decay_tau",0.12);mppi_params_.effective_vy_decay_tau=this->get_parameter("effective_vy_decay_tau").as_double();
 
         // 정하중 (pacejka_sysid/helpers/generate_predictions.py 와 동일한 규약)
         //   F_zf = m*g*l_r/l_wb,  F_zr = m*g*l_f/l_wb,  l_wb = l_f + l_r
@@ -619,6 +622,13 @@ private:
         if(mppi_params_.dynamics_model==mppi::EFFECTIVE_HISTORY_STATE_RESIDUAL &&
            (std::abs(mppi_params_.control_dt-.02f)>1e-6f || std::abs(mppi_params_.model_dt-.04f)>1e-6f))
             throw std::invalid_argument("effective_history_state_residual requires control_dt=0.02 and model_dt=0.04");
+        if(mppi_params_.dynamics_model==mppi::EFFECTIVE_HISTORY_STATE_RESIDUAL &&
+           (mppi_params_.effective_yaw_response_tau<=0.f ||
+            mppi_params_.effective_max_yaw_accel<=0.f ||
+            mppi_params_.effective_speed_response_gain<=0.f ||
+            mppi_params_.effective_max_accel<=0.f ||
+            mppi_params_.effective_vy_decay_tau<=0.f))
+            throw std::invalid_argument("effective_history_state_residual effective response parameters must be positive");
         if (mppi_params_.all_rollouts_fault_cost_threshold <= 0.0f)
             mppi_params_.all_rollouts_fault_cost_threshold = 5000.0f;
     }

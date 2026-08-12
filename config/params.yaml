@@ -14,7 +14,7 @@
     dynamic_imu_weights_path: config/ifac2026_dynamic_imu_recursive.bin
     dynamic_mlp_weights_path: config/dynamic_MLP_ackermann_previous_steer.bin
     dynamic_mlp_servo_lag_weights_path: config/dynamic_residual_v2.bin
-    effective_history_weights_path: /home/a/smooth-mppi-cuda/model_tuning/results/effective_history_recursive_correct_history_seed31/effective_history_state_residual.bin
+    effective_history_weights_path: config/effective_history_state_residual.bin
     e2e_weights_path: config/E2E.bin
     # IMU is causally aligned to odometry and is also used by the 2-state vy KF.
     imu_topic: /imu/data
@@ -96,6 +96,15 @@
     visualize_candidates: true
     control_rate_hz: 50.0    # 20 ms timer; MPPI 계산도 이 주기보다 짧아야 함
     model_dt: 0.04            # rollout knot: one held u, two internal 20 ms substeps
+    # effective_history_state_residual training contract. These describe the
+    # joint command-to-state response, not a measured physical servo.
+    effective_steer_scale: 0.51
+    effective_steer_bias: 0.01
+    effective_yaw_response_tau: 0.10
+    effective_max_yaw_accel: 15.0
+    effective_speed_response_gain: 0.76
+    effective_max_accel: 1.0
+    effective_vy_decay_tau: 0.12
     
     # --- Dynamic Model Params (Pacejka & Kinematics) ---
     mass: 3.74

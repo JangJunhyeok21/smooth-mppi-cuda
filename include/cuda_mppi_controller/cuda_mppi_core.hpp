@@ -41,6 +41,7 @@ enum DynamicsModel : int {
     SLIP_KINEMATIC_WITH_IMU_DIRECT_SPEED = 7,
     DYNAMIC_MLP_RESIDUAL = 8,
     DYNAMIC_MLP_RESIDUAL_SERVO_LAG = 9,
+    EFFECTIVE_HISTORY_STATE_RESIDUAL = 10,
 };
 
 struct alignas(16) ButterworthCoeffs {
@@ -65,12 +66,17 @@ struct alignas(8) Control {
 };
 
 struct Params {
+    // Controller/publisher period and rollout state-transition period are
+    // deliberately separate. Legacy models continue to use dt.
     float dt;
+    float control_dt;
+    float model_dt;
 
     // Runtime-selectable rollout model (DynamicsModel).
     int dynamics_model;
     float residual_imu[3];
     float residual_command_history[10];
+    float effective_command_history[20];
     float actuator_steer_state;
     float actuator_speed_reference_state;
     float steer_servo_time_constant;
@@ -159,6 +165,16 @@ struct Params {
     float dynamic_mlp_I_z;
     float dynamic_mlp_min_speed;
 
+    // Command-to-state effective model. These are joint response parameters,
+    // not claims about a measured physical steering servo.
+    float effective_steer_scale;
+    float effective_steer_bias;
+    float effective_yaw_response_tau;
+    float effective_max_yaw_accel;
+    float effective_speed_response_gain;
+    float effective_max_accel;
+    float effective_vy_decay_tau;
+
     ButterworthCoeffs filter_coeffs;
 };
 
@@ -176,11 +192,15 @@ public:
     void load_slip_kinematic_with_imu_direct_weights(const std::string& path);
     void load_dynamic_imu_recursive_weights(const std::string& path);
     void load_dynamic_mlp_residual_weights(const std::string& path);
+    void load_effective_history_state_residual_weights(const std::string& path);
     // Validation-only entry point. It launches the exact CUDA rollout step,
     // including actuator states, feature construction, MLP and integration.
     State debug_dynamic_mlp_residual_step(
         const State& state, const Control& control,
         std::array<float, 12>& command_history, bool use_servo_lag);
+    State debug_effective_history_state_residual_step(
+        const State& state, const Control& control,
+        std::array<float, 20>& command_history);
     
     // 경로 및 바운더리 설정
     void set_reference_path(const std::vector<float>& xs, const std::vector<float>& ys,
@@ -215,6 +235,7 @@ private:
     std::vector<Control> h_controls_;   
     std::vector<Control> h_prev_controls_; 
     bool direct_speed_warm_start_initialized_{false};
+    int model_knot_phase_{0};
     std::vector<float> h_costs_;        
     std::vector<float> h_weights_;      
     int best_k_ = 0;

@@ -73,6 +73,11 @@ target_include_directories(mppi_step_parity PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
 target_link_libraries(mppi_step_parity smppi_lib ${CUDA_LIBRARIES})
 
+add_executable(effective_history_parity model_tuning/effective_history/effective_history_parity.cu)
+target_include_directories(effective_history_parity PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
+target_link_libraries(effective_history_parity smppi_lib ${CUDA_LIBRARIES})
+
 target_compile_options(smppi_node PRIVATE
   $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CXX_COMPILER_ID:Clang>>:-Xcompiler=-Wno-gnu-line-directive>
 )
@@ -123,7 +128,7 @@ ament_target_dependencies(path_publisher
   geometry_msgs
 )
 
-install(TARGETS smppi_node path_publisher mppi_step_parity
+install(TARGETS smppi_node path_publisher mppi_step_parity effective_history_parity
   RUNTIME DESTINATION lib/${PROJECT_NAME})
 install(TARGETS smppi_lib
   ARCHIVE DESTINATION lib

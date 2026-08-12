@@ -48,6 +48,8 @@ public:
             solver_->load_dynamic_mlp_residual_weights(
                 mppi_params_.dynamics_model == mppi::DYNAMIC_MLP_RESIDUAL
                     ? dynamic_mlp_weights_path_ : dynamic_mlp_servo_lag_weights_path_);
+        if (mppi_params_.dynamics_model == mppi::EFFECTIVE_HISTORY_STATE_RESIDUAL)
+            solver_->load_effective_history_state_residual_weights(effective_history_weights_path_);
 
         drive_pub_ = this->create_publisher<ackermann_msgs::msg::AckermannDriveStamped>(drive_topic_, 10);
         vis_pub_   = this->create_publisher<visualization_msgs::msg::MarkerArray>("/mppi_viz", 50);
@@ -87,7 +89,8 @@ public:
             mppi_params_.dynamics_model == mppi::SLIP_KINEMATIC_WITH_IMU_DIRECT_SPEED ||
             mppi_params_.dynamics_model == mppi::DYNAMIC_IMU_RECURSIVE ||
             mppi_params_.dynamics_model == mppi::DYNAMIC_MLP_RESIDUAL ||
-            mppi_params_.dynamics_model == mppi::DYNAMIC_MLP_RESIDUAL_SERVO_LAG) {
+            mppi_params_.dynamics_model == mppi::DYNAMIC_MLP_RESIDUAL_SERVO_LAG ||
+            mppi_params_.dynamics_model == mppi::EFFECTIVE_HISTORY_STATE_RESIDUAL) {
             imu_sub_ = this->create_subscription<sensor_msgs::msg::Imu>(
                 imu_topic_, 20, std::bind(&MPPINode::imu_callback,this,std::placeholders::_1));
         }
@@ -125,7 +128,8 @@ private:
             model == mppi::SLIP_KINEMATIC_WITH_IMU_DIRECT_SPEED ||
             model == mppi::DYNAMIC_IMU_RECURSIVE ||
             model == mppi::DYNAMIC_MLP_RESIDUAL ||
-            model == mppi::DYNAMIC_MLP_RESIDUAL_SERVO_LAG;
+            model == mppi::DYNAMIC_MLP_RESIDUAL_SERVO_LAG ||
+            model == mppi::EFFECTIVE_HISTORY_STATE_RESIDUAL;
         wheelbase_ = mppi_params_.l_f + mppi_params_.l_r;
         direct_speed_step_ = mppi_params_.max_accel_rate * mppi_params_.dt;
     }
@@ -397,6 +401,8 @@ private:
         dynamic_mlp_servo_lag_weights_path_=this->get_parameter("dynamic_mlp_servo_lag_weights_path").as_string();
         this->declare_parameter("e2e_weights_path", "/home/a/smooth-mppi-cuda/config/E2E.bin");
         e2e_weights_path_=this->get_parameter("e2e_weights_path").as_string();
+        this->declare_parameter("effective_history_weights_path", "/home/a/smooth-mppi-cuda/model_tuning/results/effective_history_recursive_5_10_20_30_50_60_seed31/effective_history_state_residual.bin");
+        effective_history_weights_path_=this->get_parameter("effective_history_weights_path").as_string();
         if (dynamics_model_name_ == "legacy_hybrid") {
             mppi_params_.dynamics_model = mppi::LEGACY_HYBRID;
         } else if (dynamics_model_name_ == "kinematic") {
@@ -419,6 +425,8 @@ private:
             mppi_params_.dynamics_model = mppi::DYNAMIC_MLP_RESIDUAL;
         } else if (dynamics_model_name_ == "dynamic_mlp_residual_servo_lag") {
             mppi_params_.dynamics_model = mppi::DYNAMIC_MLP_RESIDUAL_SERVO_LAG;
+        } else if (dynamics_model_name_ == "effective_history_state_residual") {
+            mppi_params_.dynamics_model = mppi::EFFECTIVE_HISTORY_STATE_RESIDUAL;
         } else {
             throw std::invalid_argument("Unknown dynamics_model: " + dynamics_model_name_);
         }
@@ -515,6 +523,11 @@ private:
         this->declare_parameter("dynamic_mlp_E_r",-1.0);          mppi_params_.dynamic_mlp_E_r=this->get_parameter("dynamic_mlp_E_r").as_double();
         this->declare_parameter("dynamic_mlp_I_z", 0.5);          mppi_params_.dynamic_mlp_I_z=this->get_parameter("dynamic_mlp_I_z").as_double();
         this->declare_parameter("dynamic_mlp_min_speed", 0.8);    mppi_params_.dynamic_mlp_min_speed=this->get_parameter("dynamic_mlp_min_speed").as_double();
+        this->declare_parameter("model_dt",0.04);mppi_params_.model_dt=this->get_parameter("model_dt").as_double();
+        mppi_params_.effective_steer_scale=.51f;mppi_params_.effective_steer_bias=.01f;
+        mppi_params_.effective_yaw_response_tau=.10f;mppi_params_.effective_max_yaw_accel=15.f;
+        mppi_params_.effective_speed_response_gain=.76f;mppi_params_.effective_max_accel=1.f;
+        mppi_params_.effective_vy_decay_tau=.12f;
 
         // 정하중 (pacejka_sysid/helpers/generate_predictions.py 와 동일한 규약)
         //   F_zf = m*g*l_r/l_wb,  F_zr = m*g*l_f/l_wb,  l_wb = l_f + l_r
@@ -577,6 +590,7 @@ private:
         path_topic_  = this->get_parameter("path_topic").as_string();
 
         mppi_params_.dt            = 1.0 / std::max(1.0, control_rate_hz_);
+        mppi_params_.control_dt    = mppi_params_.dt;
         lateral_velocity_kf_params_.mass=mppi_params_.mass;lateral_velocity_kf_params_.yaw_inertia=mppi_params_.I_z;
         lateral_velocity_kf_params_.l_f=mppi_params_.l_f;lateral_velocity_kf_params_.l_r=mppi_params_.l_r;
         lateral_velocity_kf_params_.dt=mppi_params_.dt;
@@ -602,6 +616,9 @@ private:
             mppi_params_.q_boundary_soft = 0.0f;
         if (mppi_params_.dynamic_mlp_min_speed < 0.0f)
             mppi_params_.dynamic_mlp_min_speed = 0.0f;
+        if(mppi_params_.dynamics_model==mppi::EFFECTIVE_HISTORY_STATE_RESIDUAL &&
+           (std::abs(mppi_params_.control_dt-.02f)>1e-6f || std::abs(mppi_params_.model_dt-.04f)>1e-6f))
+            throw std::invalid_argument("effective_history_state_residual requires control_dt=0.02 and model_dt=0.04");
         if (mppi_params_.all_rollouts_fault_cost_threshold <= 0.0f)
             mppi_params_.all_rollouts_fault_cost_threshold = 5000.0f;
     }
@@ -677,6 +694,14 @@ private:
             if(command_history_.empty()) command_history_.push_back({last_steer_cmd_,last_speed_cmd_});
             while(command_history_.size()<5) command_history_.push_front(command_history_.front());
             for(int i=0;i<5;++i){mppi_params_.residual_command_history[2*i]=command_history_[i][0];mppi_params_.residual_command_history[2*i+1]=command_history_[i][1];}
+            if(mppi_params_.dynamics_model==mppi::EFFECTIVE_HISTORY_STATE_RESIDUAL) {
+                while(command_history_.size()<10)command_history_.push_front(command_history_.front());
+                for(int i=0;i<10;++i){mppi_params_.effective_command_history[2*i]=command_history_[i][0];mppi_params_.effective_command_history[2*i+1]=command_history_[i][1];}
+                current_state_.ax=aligned_imu_valid_?aligned_imu_[1]:current_ax_;
+                current_state_.ay=aligned_imu_valid_?aligned_imu_[2]:current_state_.v*current_state_.omega;
+                current_state_.vy=0.f; // matches the causal 0813 training input contract
+                if(aligned_imu_valid_)current_state_.omega=aligned_imu_[0];
+            }
         }
         if(uses_actuator_state_) {
             const float target=std::clamp(mppi_params_.kinematic_steer_scale*last_steer_cmd_+
@@ -774,7 +799,9 @@ private:
         drive_pub_->publish(drive_msg);
         has_published_command_=true;
         last_steer_cmd_=u.steer; last_speed_cmd_=next_v;
-        command_history_.push_back({last_steer_cmd_,last_speed_cmd_});while(command_history_.size()>5)command_history_.pop_front();
+        command_history_.push_back({last_steer_cmd_,last_speed_cmd_});
+        const size_t command_history_limit=mppi_params_.dynamics_model==mppi::EFFECTIVE_HISTORY_STATE_RESIDUAL?10:5;
+        while(command_history_.size()>command_history_limit)command_history_.pop_front();
 
         if (mppi_params_.visualize_candidates) { publish_path_visualization(); publish_mppi_trajectory(); }
 
@@ -908,7 +935,7 @@ private:
     rclcpp::TimerBase::SharedPtr timer_;
 
     std::string odom_topic_, pose_topic_, velocity_topic_, drive_topic_, path_topic_, imu_topic_, dynamics_model_name_, residual_weights_path_,mlp_weights_path_;
-    std::string kinematic_noslip_noimu_weights_path_,slip_kinematic_with_imu_weights_path_,dynamic_imu_weights_path_,dynamic_mlp_weights_path_,dynamic_mlp_servo_lag_weights_path_,e2e_weights_path_;
+    std::string kinematic_noslip_noimu_weights_path_,slip_kinematic_with_imu_weights_path_,dynamic_imu_weights_path_,dynamic_mlp_weights_path_,dynamic_mlp_servo_lag_weights_path_,e2e_weights_path_,effective_history_weights_path_;
     mppi::LateralVelocityKF lateral_velocity_kf_;
     mppi::LateralVelocityKFParams lateral_velocity_kf_params_;
     float kf_steer_scale_{1.1058064699f},kf_steer_bias_{-0.0300696939f},kf_max_steer_{0.4788f};

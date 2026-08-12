@@ -39,6 +39,8 @@ def generate_launch_description():
             config_dir, "slip_kinmatic_MLP.bin"),
         "dynamic_mlp_weights_path": os.path.join(
             config_dir, "dynamic_MLP.bin"),
+        "dynamic_mlp_servo_lag_weights_path": os.path.join(
+            config_dir, "dynamic_residual_v2.bin"),
         "e2e_weights_path": os.path.join(
             config_dir, "E2E.bin"),
     }

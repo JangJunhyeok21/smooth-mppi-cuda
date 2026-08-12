@@ -12,8 +12,8 @@
     kinematic_noslip_noimu_weights_path: config/ifac0807_strict_noslip_noimu_16d.bin
     slip_kinematic_with_imu_weights_path: config/slip_kinmatic_MLP.bin
     dynamic_imu_weights_path: config/ifac2026_dynamic_imu_recursive.bin
-    dynamic_mlp_weights_path: /home/a/smooth-mppi-cuda/config/dynamic_MLP_ackermann_previous_steer.bin
-    dynamic_mlp_servo_lag_weights_path: /home/a/smooth-mppi-cuda/config/dynamic_residual_v2.bin
+    dynamic_mlp_weights_path: config/dynamic_MLP_ackermann_previous_steer.bin
+    dynamic_mlp_servo_lag_weights_path: config/dynamic_residual_v2.bin
     e2e_weights_path: config/E2E.bin
     # IMU is causally aligned to odometry and is also used by the 2-state vy KF.
     imu_topic: /imu/data
@@ -51,7 +51,7 @@
     min_accel: -1.0          # m/s^2
     max_accel: 1.0           # m/s^2
     min_speed: 0.5
-    max_speed: 2.0  # first real-car shakedown; checkpoint was trained through 4 m/s
+    max_speed: 2.5  # highest staged speed retained after data collection
     # Racing-line 자유도를 위해 중앙선 오차 기반 publish 속도 제한은 사용하지 않는다.
     heading_speed_limit_gain: 0.0
     contour_speed_limit_gain: 0.0

@@ -139,21 +139,36 @@ private:
         odom_received_ = true;
     }
 
+    // GPU 커널의 compute_min_boundary_distance(mppi_core.cu)와 동일한 multi-circle
+    // 등가 거리 치환을 사용하는 호스트측 미러 — /mppi_optimal_trajectory 진단 로그가
+    // 실제 계획 경로와 어긋나지 않도록 유지한다 (계획 자체에는 영향 없음).
     float compute_min_boundary_distance(const mppi::State &s, int current_path_idx) {
         if (left_xs_.empty() || right_xs_.empty() ||
             left_xs_.size() != right_xs_.size() || ref_path_xs_.empty()) return 1e9f;
 
-        float dx = s.x - ref_path_xs_[current_path_idx];
-        float dy = s.y - ref_path_ys_[current_path_idx];
         float ref_yaw = ref_path_yaws_[current_path_idx];
         float nx = -std::sin(ref_yaw), ny = std::cos(ref_yaw);
-        float e_y = dx * nx + dy * ny;
 
         float dx_l = left_xs_[current_path_idx]  - ref_path_xs_[current_path_idx];
         float dy_l = left_ys_[current_path_idx]  - ref_path_ys_[current_path_idx];
         float dx_r = right_xs_[current_path_idx] - ref_path_xs_[current_path_idx];
         float dy_r = right_ys_[current_path_idx] - ref_path_ys_[current_path_idx];
-        return std::min(std::hypot(dx_l, dy_l) - e_y, std::hypot(dx_r, dy_r) + e_y);
+        float w_left  = std::hypot(dx_l, dy_l);
+        float w_right = std::hypot(dx_r, dy_r);
+
+        float sin_yaw = std::sin(s.yaw), cos_yaw = std::cos(s.yaw);
+        float min_equiv_dist = 1e9f;
+        for (int i = 0; i < mppi_params_.num_circles; ++i) {
+            float cx = s.x + mppi_params_.circle_offset[i] * cos_yaw;
+            float cy = s.y + mppi_params_.circle_offset[i] * sin_yaw;
+            float dx = cx - ref_path_xs_[current_path_idx];
+            float dy = cy - ref_path_ys_[current_path_idx];
+            float e_y = dx * nx + dy * ny;
+            float raw_dist_i = std::min(w_left - e_y, w_right + e_y);
+            float equiv_i = raw_dist_i - mppi_params_.circle_radius + mppi_params_.collision_radius;
+            min_equiv_dist = std::min(min_equiv_dist, equiv_i);
+        }
+        return min_equiv_dist;
     }
 
     int nearest_index_xy(float x, float y) {
@@ -381,6 +396,50 @@ private:
                         mppi_params_.F_zf, mppi_params_.F_zr,
                         mppi_params_.mass, mppi_params_.l_f, mppi_params_.l_r);
         }
+
+        // ── Multi-Circle 차체 형상 근사 (base_link=후륜축 기준 충돌 체크) ──────────
+        // wheelbase 기본값은 l_f+l_r과 일치시킨다 (동역학 모델과 어긋나지 않도록).
+        this->declare_parameter("wheelbase", mppi_params_.l_f + mppi_params_.l_r);
+        double wheelbase = this->get_parameter("wheelbase").as_double();
+        this->declare_parameter("vehicle_length", 0.50);  // 범퍼~범퍼 전장 [m] — 실측값으로 교체 필요
+        double vehicle_length = this->get_parameter("vehicle_length").as_double();
+        this->declare_parameter("vehicle_width", 0.30);   // 전폭 [m] — 실측값으로 교체 필요
+        double vehicle_width = this->get_parameter("vehicle_width").as_double();
+
+        // rear/front_overhang을 명시적으로 주지 않으면 vehicle_length-wheelbase로부터
+        // 균등 분배해 근사한다 (ROS2 파라미터 기본값 메커니즘을 그대로 활용).
+        double overhang_fallback = std::max(0.0, (vehicle_length - wheelbase) / 2.0);
+        this->declare_parameter("rear_overhang", overhang_fallback);
+        double rear_overhang = this->get_parameter("rear_overhang").as_double();
+        this->declare_parameter("front_overhang", overhang_fallback);
+        double front_overhang = this->get_parameter("front_overhang").as_double();
+
+        this->declare_parameter("num_circles", 3);
+        int num_circles = this->get_parameter("num_circles").as_int();
+        this->declare_parameter("circle_safety_margin", 1.05);
+        double circle_safety_margin = this->get_parameter("circle_safety_margin").as_double();
+
+        mppi_params_.circle_radius = static_cast<float>(vehicle_width / 2.0 * circle_safety_margin);
+
+        auto circle_offsets = mppi::compute_circle_offsets(
+            num_circles, static_cast<float>(rear_overhang),
+            static_cast<float>(front_overhang), static_cast<float>(wheelbase));
+        mppi_params_.num_circles = std::min(static_cast<int>(circle_offsets.size()), MAX_CIRCLES);
+        for (int i = 0; i < mppi_params_.num_circles; ++i)
+            mppi_params_.circle_offset[i] = circle_offsets[i];
+
+        std::string coverage_reason;
+        if (!mppi::validate_circle_coverage(circle_offsets, mppi_params_.circle_radius,
+                                             static_cast<float>(vehicle_width), &coverage_reason)) {
+            RCLCPP_WARN(this->get_logger(),
+                        "Multi-circle 커버리지 경고: %s (num_circles=%d, circle_radius=%.3f, vehicle_width=%.3f)",
+                        coverage_reason.c_str(), num_circles, mppi_params_.circle_radius, vehicle_width);
+        }
+        RCLCPP_INFO(this->get_logger(),
+                    "Multi-circle 차체 근사: num_circles=%d, circle_radius=%.3f, wheelbase=%.3f, "
+                    "rear_overhang=%.3f, front_overhang=%.3f",
+                    mppi_params_.num_circles, mppi_params_.circle_radius, wheelbase,
+                    rear_overhang, front_overhang);
 
         this->declare_parameter("odom_topic",   "/odom0");
         odom_topic_  = this->get_parameter("odom_topic").as_string();

@@ -121,7 +121,17 @@ install(TARGETS smppi_node smppi_lib path_publisher
 
 install(DIRECTORY launch config data msg
   DESTINATION share/${PROJECT_NAME})
-  
+
 ament_export_dependencies(rosidl_default_runtime)
+
+if(BUILD_TESTING)
+  find_package(ament_cmake_gtest REQUIRED)
+  ament_add_gtest(test_circle_offsets test/test_circle_offsets.cpp)
+  target_include_directories(test_circle_offsets PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    ${CUDA_INCLUDE_DIRS}
+  )
+  target_link_libraries(test_circle_offsets smppi_lib)
+endif()
 
 ament_package()

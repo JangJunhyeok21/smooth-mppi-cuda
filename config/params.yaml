@@ -40,7 +40,17 @@
     l_r: 0.161
     I_z: 0.04712
     Cm0: 0.04                # 고속 감쇠용 모터 역기전력 계수
-    
+
+    # --- Vehicle Footprint (Multi-Circle Collision Check) ---
+    # base_link(후륜축) 기준으로 차체를 N개의 원으로 근사해 충돌 체크의 기하학적 정확도를 높인다.
+    # 아래 값은 플레이스홀더 추정치이며 실측값으로 반드시 교체할 것.
+    vehicle_length: 0.50       # 범퍼~범퍼 전장 [m]
+    vehicle_width: 0.30        # 전폭 [m]
+    wheelbase: 0.324           # 기본값은 l_f+l_r과 동일; 필요 시 실측값으로 override
+    # rear_overhang / front_overhang은 생략 시 (vehicle_length-wheelbase)/2 로 자동 계산됨
+    num_circles: 3
+    circle_safety_margin: 1.05 # circle_radius = vehicle_width/2 * 이 값
+
     # Pacejka 4-파라미터 (ForzaETH On-Track-SysID 규약)
     #   F_y = F_z * D * sin( C * atan( B*a - E*(B*a - atan(B*a)) ) )
     # D 는 **무차원 마찰계수**이고, 힘의 크기는 정하중이 만든다 —

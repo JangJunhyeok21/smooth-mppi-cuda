@@ -34,6 +34,17 @@ namespace mppi
 #endif
     }
 
+    // heading 회전(sin/cos)을 1회 계산해 모든 원 오프셋 계산에 재사용하기 위한 결합 호출
+    __host__ __device__ inline void fast_sincos(float x, float *s, float *c)
+    {
+#ifdef __CUDA_ARCH__
+        __sincosf(x, s, c);
+#else
+        *s = sinf(x);
+        *c = cosf(x);
+#endif
+    }
+
     __host__ __device__ float angle_normalize(float angle)
     {
         while (angle > M_PI)
@@ -130,6 +141,7 @@ namespace mppi
         const Control &u, const Control &u_prev,
         const Params &p,
         float min_bnd_dist,
+        float sin_yaw, float cos_yaw,
         int *last_idx)
     {
         float min_dist_sq = 1e9f;
@@ -201,21 +213,41 @@ namespace mppi
         //    예전의 q_obs/(dist-car_radius+eps) 나눗셈 공식은 dist가 car_radius보다
         //    작아지면(=장애물에 침투하면) 분모가 음수가 되어 비용이 거대한 음수(보상)로
         //    뒤집혀 MPPI가 오히려 장애물을 관통하는 궤적을 선호하는 버그가 있었다.
+        //
+        //    Multi-Circle: 차체를 base_link 기준 원 num_circles개로 근사한다. 장애물 i마다
+        //    "가장 가까운 원"이 그 장애물에 대한 위험도를 결정하도록, 원-장애물 거리를
+        //    circle_radius(실제 원 반경) 대신 car_radius(기존 파라미터) 기준 등가 거리로
+        //    치환해 하류(penetration/capped) 수식은 그대로 재사용한다.
+        //    (num_circles=1, circle_offset=[0], circle_radius==car_radius 이면
+        //     eff_dist == 기존 단일점 dist와 정확히 일치)
         float obs_cost = 0.0f;
         float obs_safe_dist = p.car_radius + p.collision_radius; // 자차 반경 + 장애물 반경(접촉 거리)
-        for (int i = 0; i < p.num_obstacles; ++i)
+        #pragma unroll
+        for (int i = 0; i < MAX_OBS; ++i)
         {
-            float dx = s.x - p.obs_x[i];
-            float dy = s.y - p.obs_y[i];
-            float dist = sqrtf(dx * dx + dy * dy);
-            if (dist < 0.5f)
+            if (i >= p.num_obstacles) break;
+
+            float eff_dist = 1e9f;
+            #pragma unroll
+            for (int c = 0; c < MAX_CIRCLES; ++c)
             {
-                float penetration = 0.5f - dist;
+                if (c >= p.num_circles) break;
+                float cx = s.x + p.circle_offset[c] * cos_yaw;
+                float cy = s.y + p.circle_offset[c] * sin_yaw;
+                float dx = cx - p.obs_x[i];
+                float dy = cy - p.obs_y[i];
+                float dist_c = sqrtf(dx * dx + dy * dy) - p.circle_radius + p.car_radius;
+                eff_dist = fminf(eff_dist, dist_c);
+            }
+
+            if (eff_dist < 0.5f)
+            {
+                float penetration = 0.5f - eff_dist;
                 obs_cost += p.q_obs * penetration * penetration;
 
-                if (dist < obs_safe_dist * 1.5f)
+                if (eff_dist < obs_safe_dist * 1.5f)
                 {
-                    float capped = fmaxf(dist - obs_safe_dist, 1.0e-5f);
+                    float capped = fmaxf(eff_dist - obs_safe_dist, 1.0e-5f);
                     obs_cost += p.q_collision * logf(1.0f + __expf(-30.0f * capped));
                 }
             }
@@ -237,8 +269,17 @@ namespace mppi
     }
 
     // [수정된 함수] O(N) 바운더리 탐색을 대체하는 O(1) 횡방향 오차 기반 거리 연산
+    //
+    // Multi-Circle: 차체를 base_link(원점, s.x/s.y) 기준 종축 원 num_circles개로 근사한다.
+    // 경로상 최근접 인덱스(nearest_idx)는 대표점(offset=0, base_link)으로 1회만 탐색해 재사용하고
+    // (원들이 서로 가까워 개별 재탐색은 불필요), 각 원의 실제 벽 여유 거리(raw_dist_i)를 구한 뒤
+    //   equiv_i = raw_dist_i - circle_radius + collision_radius
+    // 로 "collision_radius 크기의 점"이라는 기존 기준으로 재환산해 최소값을 반환한다.
+    // 이렇게 하면 이 함수를 호출하는 쪽(boundary_cost, is_fault)의 collision_radius 비교 로직은
+    // 전혀 바뀌지 않는다. num_circles=1, circle_offset=[0], circle_radius==collision_radius이면
+    // equiv_i == raw_dist_i(점) 이므로 기존 단일 원 결과와 정확히 일치한다.
     __device__ float compute_min_boundary_distance(
-        const State &s,
+        const State &s, const Params &p, float sin_yaw, float cos_yaw,
         const float *ref_xs, const float *ref_ys, const float *ref_yaws,
         const float *left_xs, const float *left_ys,
         const float *right_xs, const float *right_ys,
@@ -247,7 +288,7 @@ namespace mppi
         if (ref_xs == nullptr || left_xs == nullptr || path_len <= 0)
             return 1e9f;
 
-        // 1. 이전 인덱스 근처에서 가장 가까운 중심점(Reference) 탐색
+        // 1. 이전 인덱스 근처에서 가장 가까운 중심점(Reference) 탐색 (base_link 대표점 기준, 1회)
         float min_dist_sq = 1e9f;
         int nearest_idx = current_path_idx;
         int search_window = 30;
@@ -278,16 +319,10 @@ namespace mppi
         if (nearest_idx_out != nullptr)
             *nearest_idx_out = nearest_idx;
 
-        // 2. 중심선 기준 법선 벡터를 통한 횡방향 편차(e_y) 도출
-        float dx = s.x - ref_xs[nearest_idx];
-        float dy = s.y - ref_ys[nearest_idx];
         float ref_yaw = ref_yaws[nearest_idx];
-
         float nx = -fast_sin(ref_yaw);
         float ny = fast_cos(ref_yaw);
-        float e_y = dx * nx + dy * ny;
 
-        // 3. 해당 지점의 실제 좌우 도로 폭 연산
         float dx_l = left_xs[nearest_idx] - ref_xs[nearest_idx];
         float dy_l = left_ys[nearest_idx] - ref_ys[nearest_idx];
         float w_left = sqrtf(dx_l * dx_l + dy_l * dy_l);
@@ -296,8 +331,27 @@ namespace mppi
         float dy_r = right_ys[nearest_idx] - ref_ys[nearest_idx];
         float w_right = sqrtf(dx_r * dx_r + dy_r * dy_r);
 
-        // 4. 차량에서 양쪽 바운더리까지의 최단 거리 반환
-        return fminf(w_left - e_y, w_right + e_y);
+        // 2. 원마다 heading 회전(sin_yaw/cos_yaw, 스텝당 1회 계산되어 전달됨)으로 월드 좌표를
+        //    구하고, 같은 nearest_idx의 법선/폭을 재사용해 등가 거리의 최솟값을 취한다.
+        float min_equiv_dist = 1e9f;
+        #pragma unroll
+        for (int i = 0; i < MAX_CIRCLES; ++i)
+        {
+            if (i >= p.num_circles) break;
+
+            float cx = s.x + p.circle_offset[i] * cos_yaw;
+            float cy = s.y + p.circle_offset[i] * sin_yaw;
+
+            float dx = cx - ref_xs[nearest_idx];
+            float dy = cy - ref_ys[nearest_idx];
+            float e_y = dx * nx + dy * ny;
+
+            float raw_dist_i = fminf(w_left - e_y, w_right + e_y);
+            float equiv_i = raw_dist_i - p.circle_radius + p.collision_radius;
+            min_equiv_dist = fminf(min_equiv_dist, equiv_i);
+        }
+
+        return min_equiv_dist;
     }
 
     __global__ void init_rng_kernel(curandState *states, long seed, int K, int T)
@@ -387,13 +441,19 @@ namespace mppi
             states[idx] = x;
             controls[idx] = u_clamped;
 
+            // heading 회전은 스텝당 1회만 계산해 이번 스텝의 모든 원 오프셋 계산(벽/장애물
+            // 하드 리젝션, compute_min_boundary_distance, compute_cost_cuda의 obs_cost)에 재사용
+            float sin_yaw, cos_yaw;
+            fast_sincos(x.yaw, &sin_yaw, &cos_yaw);
+
             if (fabsf(x.ay) > p.lat_g_fault_threshold)
             { // 실제 최대 그립(~7.48 m/s²)보다 여유를 둔 하드 페일 임계값
                 is_fault = true;
             }
 
             float min_dist = compute_min_boundary_distance(
-                x, ref_xs, ref_ys, ref_yaws, left_bnd_xs, left_bnd_ys, right_bnd_xs, right_bnd_ys, path_len, local_path_idx, &local_path_idx);
+                x, p, sin_yaw, cos_yaw,
+                ref_xs, ref_ys, ref_yaws, left_bnd_xs, left_bnd_ys, right_bnd_xs, right_bnd_ys, path_len, local_path_idx, &local_path_idx);
 
             if (min_dist < p.collision_radius)
             {
@@ -401,12 +461,22 @@ namespace mppi
             }
 
             // 장애물도 벽과 동일하게 하드 충돌 판정을 받는다 (기존엔 소프트 obs_cost만 있었음).
+            // Multi-Circle: 차체 원 각각과 장애물 사이 거리 중 최솟값(가장 가까운 원-장애물 쌍)을 취한다.
             float min_obs_gap = 1e9f;
-            for (int i = 0; i < p.num_obstacles; ++i)
+            #pragma unroll
+            for (int i = 0; i < MAX_OBS; ++i)
             {
-                float dx = x.x - p.obs_x[i];
-                float dy = x.y - p.obs_y[i];
-                min_obs_gap = fminf(min_obs_gap, sqrtf(dx * dx + dy * dy) - p.car_radius);
+                if (i >= p.num_obstacles) break;
+                #pragma unroll
+                for (int c = 0; c < MAX_CIRCLES; ++c)
+                {
+                    if (c >= p.num_circles) break;
+                    float cx = x.x + p.circle_offset[c] * cos_yaw;
+                    float cy = x.y + p.circle_offset[c] * sin_yaw;
+                    float dx = cx - p.obs_x[i];
+                    float dy = cy - p.obs_y[i];
+                    min_obs_gap = fminf(min_obs_gap, sqrtf(dx * dx + dy * dy) - p.circle_radius);
+                }
             }
             if (min_obs_gap < p.collision_radius)
             {
@@ -448,7 +518,7 @@ namespace mppi
                 total_cost += compute_cost_cuda(
                     x,
                     ref_xs, ref_ys, ref_yaws, path_len,
-                    u_clamped, last_u, p, min_dist, &local_path_idx);
+                    u_clamped, last_u, p, min_dist, sin_yaw, cos_yaw, &local_path_idx);
             }
 
             // 종점 진행도 보상
@@ -474,6 +544,56 @@ namespace mppi
     }
 
     // --- Host Functions ---
+
+    // base_link(후륜축) 기준 +x 방향 [-rear_overhang, wheelbase+front_overhang] 구간을
+    // num_circles개의 원으로 등간격 커버하는 오프셋을 생성한다.
+    // num_circles<=1이면 base_link 원점(offset=0) 하나로 수렴한다.
+    // 특수 케이스(rear_overhang=front_overhang=0, num_circles=3)는 [0, wheelbase/2, wheelbase]가 된다.
+    __host__ std::vector<float> compute_circle_offsets(
+        int num_circles, float rear_overhang, float front_overhang, float wheelbase)
+    {
+        if (num_circles <= 1)
+            return {0.0f};
+
+        float x_min = -rear_overhang;
+        float x_max = wheelbase + front_overhang;
+
+        std::vector<float> offsets(num_circles);
+        for (int i = 0; i < num_circles; ++i)
+        {
+            float t = static_cast<float>(i) / static_cast<float>(num_circles - 1);
+            offsets[i] = x_min + t * (x_max - x_min);
+        }
+        return offsets;
+    }
+
+    __host__ bool validate_circle_coverage(
+        const std::vector<float> &offsets, float circle_radius, float vehicle_width,
+        std::string *reason_out)
+    {
+        bool ok = true;
+
+        if (circle_radius < vehicle_width / 2.0f - 1.0e-4f)
+        {
+            ok = false;
+            if (reason_out)
+                *reason_out += "circle_radius가 vehicle_width/2보다 작아 차폭을 다 덮지 못함; ";
+        }
+
+        for (size_t i = 1; i < offsets.size(); ++i)
+        {
+            float spacing = offsets[i] - offsets[i - 1];
+            if (spacing > 2.0f * circle_radius)
+            {
+                ok = false;
+                if (reason_out)
+                    *reason_out += "인접 원 사이 간격이 2*circle_radius보다 커서 커버리지 빈틈 발생; ";
+            }
+        }
+
+        return ok;
+    }
+
     __host__ ButterworthCoeffs compute_butterworth_coeffs(float fc, float dt)
     {
         ButterworthCoeffs coeffs;

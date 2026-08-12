@@ -6,6 +6,7 @@
 #include <memory>
 #include <iostream>
 #include <cstdio>
+#include <string>
 
 #ifdef __CUDACC__
 #define HOST_DEVICE __host__ __device__
@@ -21,7 +22,8 @@
         } \
     } while (0)
 
-#define MAX_OBS 5 // 처리 가능한 최대 장애물 개수
+#define MAX_OBS 5      // 처리 가능한 최대 장애물 개수
+#define MAX_CIRCLES 8  // 차체 형상 근사에 쓰는 최대 원 개수 (변경 시 smppi_lib/smppi_node 재컴파일 필요)
 
 namespace mppi {
 
@@ -77,6 +79,11 @@ struct Params {
     float car_radius;
     float q_obs;
 
+    // Multi-Circle 차체 형상 근사 (base_link=후륜축 기준, +x 전방 로컬 오프셋)
+    int num_circles;
+    float circle_offset[MAX_CIRCLES];
+    float circle_radius;  // 모든 원 공통 반지름 [m] = vehicle_width/2 * safety_margin
+
     // Noise & Tuning
     float noise_steer_std;
     float noise_accel_std;
@@ -105,6 +112,21 @@ struct Params {
 
     ButterworthCoeffs filter_coeffs;
 };
+
+// base_link(후륜축) 기준 +x 방향으로 [-rear_overhang, wheelbase+front_overhang] 구간을
+// num_circles개의 원으로 등간격 커버하는 오프셋을 생성한다.
+// num_circles<=1이면 base_link 원점(offset=0) 하나로 수렴한다 (단일 원 기존 동작과 동일).
+// (호스트 전용 함수 — 정의부인 mppi_core.cu에서는 __host__로 컴파일되지만, 이 헤더는
+//  smppi_node.cpp 등 nvcc가 아닌 일반 C++ 번역 단위에서도 include되므로 선언에는
+//  __host__를 붙이지 않는다 — MPPISolver 멤버 함수들과 동일한 관례)
+std::vector<float> compute_circle_offsets(
+    int num_circles, float rear_overhang, float front_overhang, float wheelbase);
+
+// 원들이 차량 폭(vehicle_width)과 종방향 간격을 빈틈없이 커버하는지 점검한다.
+// 실패 시 false를 반환하고, reason_out이 non-null이면 사유를 덧붙인다.
+bool validate_circle_coverage(
+    const std::vector<float>& offsets, float circle_radius, float vehicle_width,
+    std::string* reason_out = nullptr);
 
 class MPPISolver {
 public:

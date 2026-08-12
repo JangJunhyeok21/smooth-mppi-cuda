@@ -13,12 +13,86 @@ feature order is in `contract.py` and matches `update_dynamic_mlp_residual`.
 On the training PC:
 
 ```bash
-python3 regress_longitudinal_actuator.py
-python3 build_dataset.py
-python3 validate_dataset.py DATASET.npz
-python3 train.py DATASET.npz --out result
-python3 check_mppi_step_parity.py
+cd /home/a/smooth-mppi-cuda
+source /home/a/anaconda3/etc/profile.d/conda.sh
+conda activate RL
+python model_tuning/real_car_v2/run_dynamic_40ms_pipeline.py
 ```
+
+The runner above is the recommended command. It executes the complete 40 ms
+dynamic + servo-lag residual pipeline in this order:
+
+1. `build_dataset.py`: combine the direct-bag 20 ms NPZ files and assign
+   session-disjoint train/validation/test splits.
+2. `regress_dynamic_40ms.py`: fit the Pacejka classic model for one 40 ms MPPI
+   knot, internally using two causal 20 ms actuator/physics substeps.
+3. `build_dynamic_40ms_dataset.py`: calculate classic predictions and the
+   derivative residual targets `[delta_ax, delta_ay, delta_yaw_accel]`.
+4. `train_dynamic_40ms.py`: train the 20-64-32-3 MLP using one-step targets.
+5. `finetune_dynamic_40ms_recursive.py`: perform 1.2 s free-recursive training.
+   The runner performs two recursive passes; stage 2 starts from stage 1.
+6. `evaluate_dynamic_40ms.py`: evaluate validation and aggressive test bags
+   over a 1.2 s open-loop horizon and save JSON and NPZ traces.
+7. `deploy_dynamic_40ms_to_mppi.py`: verify and copy the 14252-byte CUDA
+   binary, insert the fitted Pacejka parameters and weight path into
+   `config/params.yaml`, and select `dynamic_mlp_residual_servo_lag`.
+
+All frequently changed paths and hyperparameters are constants at the top of
+the corresponding script. No CLI arguments are needed for the canonical run.
+The runner also has `RUN_*` switches at its top, so a completed expensive stage
+can be skipped without constructing a long command.
+
+`RUN_EXPORT_TO_MPPI=True` enables the final YAML/deployment step. The deployment
+script settings are at its top: `RESULT_PATH`, `REGRESSION_PATH`, `YAML_PATH`,
+`RUNTIME_BINARY_PATH`, and `ACTIVATE_MODEL`. It changes runtime data only, so a
+`colcon build` is not needed; restart the ROS node so it reloads YAML and binary.
+
+The individual no-argument commands are:
+
+```bash
+python model_tuning/real_car_v2/build_dataset.py
+python model_tuning/real_car_v2/regress_dynamic_40ms.py
+python model_tuning/real_car_v2/build_dynamic_40ms_dataset.py
+python model_tuning/real_car_v2/train_dynamic_40ms.py
+python model_tuning/real_car_v2/finetune_dynamic_40ms_recursive.py
+python model_tuning/real_car_v2/evaluate_dynamic_40ms.py
+python model_tuning/real_car_v2/deploy_dynamic_40ms_to_mppi.py
+```
+
+The best artifact produced by the two-stage canonical run is:
+
+```text
+model_tuning/results/dynamic_40ms_recursive_stage2_seed31/dynamic_40ms_residual.bin
+```
+
+Its binary contract remains little-endian float32, 3563 floats / 14252 bytes:
+three linear-layer weights and biases followed by 20 feature means and 20
+feature standard deviations.
+
+## Commands used for the reported 0813 result
+
+The reported result was generated with the same stages as the runner. Before
+the no-argument defaults were added, the parameterized training stages were:
+
+```bash
+python model_tuning/real_car_v2/train_dynamic_40ms.py \
+  model_tuning/data/dynamic_40ms_residual.npz \
+  --out model_tuning/results/dynamic_40ms_residual_seed31 \
+  --epochs 300 --seed 31 --device cuda
+
+python model_tuning/real_car_v2/finetune_dynamic_40ms_recursive.py \
+  model_tuning/results/dynamic_40ms_residual_seed31 \
+  --out model_tuning/results/dynamic_40ms_recursive_seed31 \
+  --epochs 100 --seed 31
+
+python model_tuning/real_car_v2/finetune_dynamic_40ms_recursive.py \
+  model_tuning/results/dynamic_40ms_recursive_seed31 \
+  --out model_tuning/results/dynamic_40ms_recursive_stage2_seed31 \
+  --epochs 100 --seed 31
+```
+
+These long commands are retained here only as the experiment record. For a new
+canonical run, use `run_dynamic_40ms_pipeline.py` without arguments.
 
 `regress_longitudinal_actuator.py` identifies acceleration/braking speed-reference
 time constants and its slew-rate limit from 1 s recursive odom-vx rollouts. It

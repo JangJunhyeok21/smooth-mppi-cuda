@@ -15,8 +15,11 @@ sys.path.insert(0,str(ROOT));sys.path.insert(0,str(HERE))
 from contract import Contract, FEATURES, OUTPUTS, actuator_step, longitudinal_actuator_step
 from model_tuning_utils.lateral_velocity_kf import LateralVelocityKFParams,estimate_dataset
 
-SOURCE_DIR=ROOT/"model_tuning/data/real_car_v2_drive"
-OUTPUT=ROOT/"model_tuning/data/real_car_v2_dynamic_residual.npz"
+SOURCE_DIRS=(
+    ROOT/"model_tuning/data/real_car_v2_drive",
+    ROOT/"model_tuning/results/effective_vs_dynamic_0813/data",
+)
+OUTPUT=ROOT/"model_tuning/data/dynamic_40ms_all_drive_source_20ms.npz"
 REPORT=OUTPUT.with_suffix(".json")
 FORBIDDEN="prediction_vs_actual_run12_reconstructed.csv"
 TRAINING_MAX_SPEED=4.0  # retain high-speed bag samples even during 2 m/s shakedown deployment
@@ -28,8 +31,8 @@ def ema(x,alpha=.25):
 
 def main():
     cfg=yaml.safe_load((ROOT/"config/params.yaml").read_text())["/**"]["ros__parameters"]
-    files=sorted(SOURCE_DIR.glob("*.npz"));
-    if not files:raise SystemExit(f"no direct-bag NPZ in {SOURCE_DIR}")
+    files=sorted({p.resolve() for source in SOURCE_DIRS for p in source.glob("*.npz")})
+    if not files:raise SystemExit(f"no direct-bag NPZ in {SOURCE_DIRS}")
     if any(FORBIDDEN in str(p) for p in files):raise RuntimeError("diagnostic reconstructed CSV/derivative is forbidden")
     features=[];targets=[];bag_ids=[];split_ids=[];valids=[];manifest=[];next_bag=0;c=Contract(
         steer_scale=float(cfg["kinematic_steer_scale"]),steer_bias=float(cfg["kinematic_steer_bias"]),
@@ -42,8 +45,11 @@ def main():
         low_speed_center=float(cfg["dynamic_mlp_min_speed"]))
     # Source-session-disjoint split. Large, representative sessions are held
     # out; collision bags remain diagnostic-only segments after filtering.
-    test_names={"rosbag2_2026_08_10-21_45_57.npz","rosbag2_2026_08_10-21_52_23.npz"}
-    val_names={"rosbag2_2026_08_08-16_54_33.npz"}
+    # The new 4 m/s aggressive runs are never shown to the optimizer.  The
+    # speed30 session and an older independent bag form validation; all other
+    # collision-cleaned /drive sessions are training data.
+    test_names={"aggressive_boundary_run1.npz","aggressive_boundary_run2.npz"}
+    val_names={"effective_speed30_run1.npz","rosbag2_2026_08_08-16_54_33.npz"}
     for source_id,path in enumerate(files):
         z=np.load(path);a=z["samples"].astype(float);names={str(x):i for i,x in enumerate(z["columns"])};dt=float(z["dt"])
         if abs(dt-c.dt)>1e-9:raise RuntimeError(f"{path}: dt={dt}")

@@ -7,13 +7,13 @@
     # kinematic_residual은 아래 binary GRU checkpoint를 CUDA rollout 안에서 실행한다.
     # Keep the controller rollout identical to the simulator plant. The MLP
     # residual produced a persistent yaw-rate bias in closed-loop simulation.
-    dynamics_model: effective_history_state_residual
+    dynamics_model: dynamic_mlp_residual_servo_lag
     residual_weights_path: config/kinematic_residual_gru.bin
     kinematic_noslip_noimu_weights_path: config/ifac0807_strict_noslip_noimu_16d.bin
     slip_kinematic_with_imu_weights_path: config/slip_kinmatic_MLP.bin
     dynamic_imu_weights_path: config/ifac2026_dynamic_imu_recursive.bin
     dynamic_mlp_weights_path: config/dynamic_MLP_ackermann_previous_steer.bin
-    dynamic_mlp_servo_lag_weights_path: config/dynamic_residual_v2.bin
+    dynamic_mlp_servo_lag_weights_path: config/dynamic_40ms_residual_servo_lag.bin
     effective_history_weights_path: config/effective_history_state_residual.bin
     e2e_weights_path: config/E2E.bin
     # IMU is causally aligned to odometry and is also used by the 2-state vy KF.
@@ -93,7 +93,7 @@
     num_samples: 1600        # Orin NX 50 Hz 계산 예산 확보
     visualize_candidates: true
     control_rate_hz: 50.0    # 20 ms timer; MPPI 계산도 이 주기보다 짧아야 함
-    model_dt: 0.04            # rollout knot: one held u, two internal 20 ms substeps
+    model_dt: 0.04  # rollout knot: one held u, two internal 20 ms substeps
     # effective_history_state_residual training contract. These describe the
     # joint command-to-state response, not a measured physical servo.
     effective_steer_scale: 0.51
@@ -151,14 +151,14 @@
     E_r: 0.0597
 
     # 0807 dynamic regression; used only by dynamic_mlp_residual.
-    dynamic_mlp_B_f: 3.879070152566808
-    dynamic_mlp_C_f: 1.6471076687680233
-    dynamic_mlp_D_f: 0.0710062229162444
-    dynamic_mlp_E_f: -0.9999999999999989
-    dynamic_mlp_B_r: 2.321287285513187
-    dynamic_mlp_C_r: 1.9234527357451916
-    dynamic_mlp_D_r: 0.05906540313616536
-    dynamic_mlp_E_r: -0.9999999996403817
+    dynamic_mlp_B_f: 14.999999999999998
+    dynamic_mlp_C_f: 1.3
+    dynamic_mlp_D_f: 0.38761617277058136
+    dynamic_mlp_E_f: 0.0
+    dynamic_mlp_B_r: 2.776024549208539
+    dynamic_mlp_C_r: 1.3
+    dynamic_mlp_D_r: 0.8058612710699417
+    dynamic_mlp_E_r: 0.0
     dynamic_mlp_I_z: 0.04712
     dynamic_mlp_min_speed: 0.8 # residual sigmoid gate center; no hard model switch
 

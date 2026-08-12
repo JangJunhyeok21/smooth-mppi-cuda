@@ -56,9 +56,13 @@ def activate_yaml(path, dynamics_model, weight_key, binary, metrics):
     }
     actuator=metrics.get("actuator_model") or {}
     steering=metrics.get("steering_command_mapping") or {}
-    if actuator:
-        replacements["steer_servo_time_constant"]=actuator["servo_time_constant_s"]
-        replacements["actuator_max_steer_rate"]=actuator["max_steering_rate_rad_s"]
+    # Direct previous-command steering does not use servo parameters. Preserve
+    # the separately selectable servo-lag model's tau/rate in the shared YAML.
+    if actuator and not actuator.get("direct_steer", False):
+        if actuator.get("servo_time_constant_s") is not None:
+            replacements["steer_servo_time_constant"]=actuator["servo_time_constant_s"]
+        if actuator.get("max_steering_rate_rad_s") is not None:
+            replacements["actuator_max_steer_rate"]=actuator["max_steering_rate_rad_s"]
     yaw_actuator=metrics.get("yaw_rate_actuator_model") or {}
     if yaw_actuator:
         replacements["kinematic_yaw_rate_time_constant"]=yaw_actuator["time_constant_s"]

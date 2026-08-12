@@ -285,42 +285,151 @@ namespace mppi
 
     // Pacejka dynamic classic base + residual MLP. This is byte-for-byte the
     // same 20-D feature order used by train_mlp.py model=dynamic_residual.
-    __device__ State update_dynamic_mlp_residual(const State &s,const Control &u,
-                                                  const Params &p,float *history)
+    __device__ State update_dynamic_mlp_residual(
+        const State &current_state,
+        const Control &control,
+        const Params &params,
+        float *command_history,
+        bool use_servo_lag)
     {
-        const float speed_cmd=fminf(p.max_speed,fmaxf(p.min_speed,u.accel));
-        const float target=fminf(.55f,fmaxf(-.55f,p.kinematic_steer_scale*u.steer+p.kinematic_steer_bias));
-        const float previous_command=history[8],previous_delta=history[10];
-        const float rate=fminf(p.actuator_max_steer_rate,fmaxf(-p.actuator_max_steer_rate,
-            (target-previous_delta)/fmaxf(p.steer_servo_time_constant,1e-3f)));
-        const float steer=fminf(.55f,fmaxf(-.55f,previous_delta+rate*p.dt));
-        const float speed=hypotf(s.v,s.vy);
-        const float ax=fminf(p.max_accel,fmaxf(p.min_accel,p.speed_servo_kp*(speed_cmd-speed)));
-        const float safe_vx=fmaxf(fabsf(s.v),.5f);
-        const float af=steer-atan2f(s.vy+p.l_f*s.omega,safe_vx);
-        const float ar=-atan2f(s.vy-p.l_r*s.omega,safe_vx);
-        const float bfa=p.dynamic_mlp_B_f*af,bra=p.dynamic_mlp_B_r*ar;
-        const float fyf=p.F_zf*p.dynamic_mlp_D_f*sinf(p.dynamic_mlp_C_f*atanf(
-            bfa-p.dynamic_mlp_E_f*(bfa-atanf(bfa))));
-        const float fyr=p.F_zr*p.dynamic_mlp_D_r*sinf(p.dynamic_mlp_C_r*atanf(
-            bra-p.dynamic_mlp_E_r*(bra-atanf(bra))));
-        const float classic_ay=(fyf*cosf(steer)+fyr)/p.mass;
+        constexpr float MAX_STEERING_ANGLE = 0.55f;
+        constexpr float MIN_DYNAMIC_SPEED = 0.5f;
+
+        const float speed_command = fminf(
+            params.max_speed,
+            fmaxf(params.min_speed, control.accel));
+        const float previous_steering_command = command_history[8];
+        const float previous_actuator_steering_angle = command_history[10];
+
+        float steering_angle;
+        if (use_servo_lag) {
+            const float target_steering_angle = fminf(
+                MAX_STEERING_ANGLE,
+                fmaxf(-MAX_STEERING_ANGLE,
+                      params.kinematic_steer_scale * control.steer
+                          + params.kinematic_steer_bias));
+            const float steering_rate = fminf(
+                params.actuator_max_steer_rate,
+                fmaxf(-params.actuator_max_steer_rate,
+                      (target_steering_angle - previous_actuator_steering_angle)
+                          / fmaxf(params.steer_servo_time_constant, 1.0e-3f)));
+            steering_angle = fminf(
+                MAX_STEERING_ANGLE,
+                fmaxf(-MAX_STEERING_ANGLE,
+                      previous_actuator_steering_angle + steering_rate * params.dt));
+        } else {
+            // Causal direct command model used during training: delta[t] is
+            // exactly the previous Ackermann steering command, without scale/bias.
+            steering_angle = fminf(
+                MAX_STEERING_ANGLE,
+                fmaxf(-MAX_STEERING_ANGLE, previous_steering_command));
+        }
+
+        const float current_speed = hypotf(current_state.v, current_state.vy);
+        const float classic_longitudinal_acceleration = fminf(
+            params.max_accel,
+            fmaxf(params.min_accel,
+                  params.speed_servo_kp * (speed_command - current_speed)));
+        const float safe_longitudinal_velocity = fmaxf(
+            fabsf(current_state.v), MIN_DYNAMIC_SPEED);
+
+        const float front_tire_slip_angle = steering_angle - atan2f(
+            current_state.vy + params.l_f * current_state.omega,
+            safe_longitudinal_velocity);
+        const float rear_tire_slip_angle = -atan2f(
+            current_state.vy - params.l_r * current_state.omega,
+            safe_longitudinal_velocity);
+
+        // Pacejka inner term: B*alpha - E*(B*alpha - atan(B*alpha)).
+        const float front_stiffness_times_slip =
+            params.dynamic_mlp_B_f * front_tire_slip_angle;
+        const float rear_stiffness_times_slip =
+            params.dynamic_mlp_B_r * rear_tire_slip_angle;
+        const float front_pacejka_inner = front_stiffness_times_slip
+            - params.dynamic_mlp_E_f
+                * (front_stiffness_times_slip - atanf(front_stiffness_times_slip));
+        const float rear_pacejka_inner = rear_stiffness_times_slip
+            - params.dynamic_mlp_E_r
+                * (rear_stiffness_times_slip - atanf(rear_stiffness_times_slip));
+        const float front_lateral_tire_force =
+            params.F_zf * params.dynamic_mlp_D_f
+            * sinf(params.dynamic_mlp_C_f * atanf(front_pacejka_inner));
+        const float rear_lateral_tire_force =
+            params.F_zr * params.dynamic_mlp_D_r
+            * sinf(params.dynamic_mlp_C_r * atanf(rear_pacejka_inner));
+        const float classic_lateral_acceleration =
+            (front_lateral_tire_force * cosf(steering_angle)
+             + rear_lateral_tire_force) / params.mass;
+
         // Body-frame equations: ax=d(vx)/dt-vy*r, ay=d(vy)/dt+vx*r.
-        // `ax` is the commanded physical longitudinal acceleration.
-        const float bvx=s.v+(ax+s.vy*s.omega)*p.dt;
-        const float bvy=s.vy+(classic_ay-s.v*s.omega)*p.dt;
-        const float bw=s.omega+(p.l_f*fyf*cosf(steer)-p.l_r*fyr)/p.dynamic_mlp_I_z*p.dt;
-        float raw[20]={s.v,s.vy,s.omega,u.steer,speed_cmd,steer,u.steer-previous_command,bvx,bvy,bw};
-        for(int i=0;i<10;++i)raw[10+i]=history[i];
-        float corr[3];split_mlp<20>(raw,dmr_mean,dmr_std,dmr_w1,dmr_b1,dmr_w2,dmr_b2,dmr_w3,dmr_b3,corr);
-        State n=s;n.v=bvx+corr[0]*p.dt;n.vy=bvy+corr[1]*p.dt;n.omega=bw+corr[2]*p.dt;
-        n.ax=ax+corr[0];n.ay=classic_ay+corr[1];
-        const float ns=hypotf(n.v,n.vy),nb=atan2f(n.vy,n.v);
-        n.x=s.x+p.kinematic_position_speed_scale*ns*cosf(s.yaw+nb)*p.dt;
-        n.y=s.y+p.kinematic_position_speed_scale*ns*sinf(s.yaw+nb)*p.dt;
-        n.yaw=angle_normalize(s.yaw+n.omega*p.dt);n.slip_angle=nb;
-        for(int i=0;i<8;++i)history[i]=history[i+2];history[8]=u.steer;history[9]=speed_cmd;history[10]=steer;
-        return n;
+        const float classic_next_longitudinal_velocity = current_state.v
+            + (classic_longitudinal_acceleration
+               + current_state.vy * current_state.omega) * params.dt;
+        const float classic_next_lateral_velocity = current_state.vy
+            + (classic_lateral_acceleration
+               - current_state.v * current_state.omega) * params.dt;
+        const float classic_yaw_moment =
+            params.l_f * front_lateral_tire_force * cosf(steering_angle)
+            - params.l_r * rear_lateral_tire_force;
+        const float classic_next_yaw_rate = current_state.omega
+            + classic_yaw_moment / params.dynamic_mlp_I_z * params.dt;
+
+        // Keep this exact 20-D order synchronized with train_mlp.py:
+        // [vx, vy, yaw_rate, steer_cmd, speed_cmd, applied_steer,
+        //  steer_cmd_delta, classic_next_vx, classic_next_vy,
+        //  classic_next_yaw_rate, five previous (steer_cmd, speed_cmd) pairs].
+        float mlp_features[20] = {
+            current_state.v,
+            current_state.vy,
+            current_state.omega,
+            control.steer,
+            speed_command,
+            steering_angle,
+            control.steer - previous_steering_command,
+            classic_next_longitudinal_velocity,
+            classic_next_lateral_velocity,
+            classic_next_yaw_rate
+        };
+        for (int feature_index = 0; feature_index < 10; ++feature_index) {
+            mlp_features[10 + feature_index] = command_history[feature_index];
+        }
+
+        // MLP outputs residual derivatives [delta_ax, delta_ay, delta_yaw_accel].
+        float residual_derivatives[3];
+        split_mlp<20>(
+            mlp_features, dmr_mean, dmr_std,
+            dmr_w1, dmr_b1, dmr_w2, dmr_b2, dmr_w3, dmr_b3,
+            residual_derivatives);
+
+        State next_state = current_state;
+        next_state.v = classic_next_longitudinal_velocity
+            + residual_derivatives[0] * params.dt;
+        next_state.vy = classic_next_lateral_velocity
+            + residual_derivatives[1] * params.dt;
+        next_state.omega = classic_next_yaw_rate
+            + residual_derivatives[2] * params.dt;
+        next_state.ax = classic_longitudinal_acceleration + residual_derivatives[0];
+        next_state.ay = classic_lateral_acceleration + residual_derivatives[1];
+
+        const float next_speed = hypotf(next_state.v, next_state.vy);
+        const float next_body_slip_angle = atan2f(next_state.vy, next_state.v);
+        next_state.x = current_state.x
+            + params.kinematic_position_speed_scale * next_speed
+                * cosf(current_state.yaw + next_body_slip_angle) * params.dt;
+        next_state.y = current_state.y
+            + params.kinematic_position_speed_scale * next_speed
+                * sinf(current_state.yaw + next_body_slip_angle) * params.dt;
+        next_state.yaw = angle_normalize(
+            current_state.yaw + next_state.omega * params.dt);
+        next_state.slip_angle = next_body_slip_angle;
+
+        for (int history_index = 0; history_index < 8; ++history_index) {
+            command_history[history_index] = command_history[history_index + 2];
+        }
+        command_history[8] = control.steer;
+        command_history[9] = speed_command;
+        command_history[10] = steering_angle;
+        return next_state;
     }
 
     __host__ __device__ State update_legacy_hybrid(const State &s, const Control &u, const Params &p)
@@ -655,7 +764,7 @@ namespace mppi
         if(p.dynamics_model==KINEMATIC_MLP_RESIDUAL || p.dynamics_model==KINEMATIC_MLP_NO_IMU_RESIDUAL ||
            p.dynamics_model==KINEMATIC_NOSLIP_NO_IMU_DIRECT_SPEED ||
            p.dynamics_model==SLIP_KINEMATIC_WITH_IMU_DIRECT_SPEED || p.dynamics_model==DYNAMIC_IMU_RECURSIVE ||
-           p.dynamics_model==DYNAMIC_MLP_RESIDUAL)
+           p.dynamics_model==DYNAMIC_MLP_RESIDUAL || p.dynamics_model==DYNAMIC_MLP_RESIDUAL_SERVO_LAG)
         for(int i=0;i<10;++i) mlp_command_history[i]=p.residual_command_history[i];
         mlp_command_history[10]=p.actuator_steer_state;
         
@@ -706,7 +815,8 @@ namespace mppi
             
             const bool direct_speed=(p.dynamics_model==KINEMATIC_NOSLIP_NO_IMU_DIRECT_SPEED ||
                                      p.dynamics_model==SLIP_KINEMATIC_WITH_IMU_DIRECT_SPEED ||
-                                     p.dynamics_model==DYNAMIC_IMU_RECURSIVE || p.dynamics_model==DYNAMIC_MLP_RESIDUAL);
+                                     p.dynamics_model==DYNAMIC_IMU_RECURSIVE || p.dynamics_model==DYNAMIC_MLP_RESIDUAL ||
+                                     p.dynamics_model==DYNAMIC_MLP_RESIDUAL_SERVO_LAG);
             if(direct_speed) u_clamped.accel=fminf(p.max_speed,fmaxf(p.min_speed,u_clamped.accel));
             else {
                 float v_next = x.v + u_clamped.accel * p.dt;
@@ -729,8 +839,9 @@ namespace mppi
                 x=update_slip_kinematic_with_imu_direct(x,u_clamped,p,mlp_command_history);
             else if(p.dynamics_model==DYNAMIC_IMU_RECURSIVE)
                 x=update_dynamic_imu_recursive(x,u_clamped,p,mlp_command_history);
-            else if(p.dynamics_model==DYNAMIC_MLP_RESIDUAL)
-                x=update_dynamic_mlp_residual(x,u_clamped,p,mlp_command_history);
+            else if(p.dynamics_model==DYNAMIC_MLP_RESIDUAL || p.dynamics_model==DYNAMIC_MLP_RESIDUAL_SERVO_LAG)
+                x=update_dynamic_mlp_residual(x,u_clamped,p,mlp_command_history,
+                                              p.dynamics_model==DYNAMIC_MLP_RESIDUAL_SERVO_LAG);
             else x=update_dynamics(x,u_clamped,p);
             states[idx] = x;
             controls[idx] = u_clamped; 
@@ -796,8 +907,9 @@ namespace mppi
                 x=update_slip_kinematic_with_imu_direct(x,u,p,command_history);
             else if(p.dynamics_model==DYNAMIC_IMU_RECURSIVE)
                 x=update_dynamic_imu_recursive(x,u,p,command_history);
-            else if(p.dynamics_model==DYNAMIC_MLP_RESIDUAL)
-                x=update_dynamic_mlp_residual(x,u,p,command_history);
+            else if(p.dynamics_model==DYNAMIC_MLP_RESIDUAL || p.dynamics_model==DYNAMIC_MLP_RESIDUAL_SERVO_LAG)
+                x=update_dynamic_mlp_residual(x,u,p,command_history,
+                                              p.dynamics_model==DYNAMIC_MLP_RESIDUAL_SERVO_LAG);
             else
                 x=update_dynamics(x,u,p);
             states[t]=x;
@@ -840,7 +952,8 @@ namespace mppi
         const bool direct_speed=(params_.dynamics_model==KINEMATIC_NOSLIP_NO_IMU_DIRECT_SPEED ||
                                  params_.dynamics_model==SLIP_KINEMATIC_WITH_IMU_DIRECT_SPEED ||
                                  params_.dynamics_model==DYNAMIC_IMU_RECURSIVE ||
-                                 params_.dynamics_model==DYNAMIC_MLP_RESIDUAL);
+                                 params_.dynamics_model==DYNAMIC_MLP_RESIDUAL ||
+                                 params_.dynamics_model==DYNAMIC_MLP_RESIDUAL_SERVO_LAG);
         const float initial_accel = direct_speed ? params_.target_speed :
             ((params_.dynamics_model == KINEMATIC) ? 1.0f : 0.0f);
         h_prev_controls_.resize(T, {neutral_steer, initial_accel});
@@ -1148,7 +1261,8 @@ namespace mppi
             params_.dynamics_model==KINEMATIC_NOSLIP_NO_IMU_DIRECT_SPEED ||
             params_.dynamics_model==SLIP_KINEMATIC_WITH_IMU_DIRECT_SPEED ||
             params_.dynamics_model==DYNAMIC_IMU_RECURSIVE ||
-            params_.dynamics_model==DYNAMIC_MLP_RESIDUAL) && params_.visualize_candidates) {
+            (params_.dynamics_model==DYNAMIC_MLP_RESIDUAL ||
+             params_.dynamics_model==DYNAMIC_MLP_RESIDUAL_SERVO_LAG)) && params_.visualize_candidates) {
             // Host update_dynamics has no recurrent state. Use the actual
             // residual CUDA rollout selected by minimum cost for visualization
             // instead of drawing a misleading pure-kinematic trajectory.

@@ -38,7 +38,7 @@ USE_PLOT = True
 IMU_WZ_SIGN = -1.0; IMU_AY_SIGN = -1.0; IMU_EMA_ALPHA = .25
 KF_CF = 12.7222491; KF_CR = 75.0944752
 KF_STEER_SCALE = 1.1058064699; KF_STEER_BIAS = -0.0300696939; KF_MAX_STEER = .4788
-POSE_TOPIC = "/newmcl_pose"; VELOCITY_TOPIC = "/odom"; DRIVE_TOPIC = "/drive"; IMU_TOPIC = "/imu/data"
+POSE_TOPIC = "/newmcl_pose"; VELOCITY_TOPIC = "/odom"; COMMAND_TOPIC = "/ackermann_cmd"; IMU_TOPIC = "/imu/data"
 DT = .02; MAX_POSE_AGE = 1.0; MAX_VELOCITY_AGE = 1.0; MAX_COMMAND_AGE = 1.0; MAX_IMU_AGE = .05
 
 
@@ -121,7 +121,7 @@ def causal_hold(stream, times, max_age):
     return stream[clipped], valid
 
 
-def plot_extracted(samples, columns, dt, title):
+def plot_extracted(samples, columns, dt, title, command_topic):
     """Show one bag and block until its window is closed."""
     import matplotlib.pyplot as plt
     source_t=samples[:,0];x,y,heading=samples[:,1],samples[:,2],samples[:,3]
@@ -164,14 +164,14 @@ def plot_extracted(samples, columns, dt, title):
     axes[1,1].plot(t,heading,"--",alpha=.6,label="MCL yaw (wrapped)")
     axes[1,1].set_ylabel("yaw [rad]");axes[1,1].set_title("/newmcl_pose yaw vs time")
     axes[2,0].plot(t,vx,label="odom vx");axes[2,0].plot(t,pose_vx,label="pose-derived vx")
-    axes[2,0].plot(t,speed_cmd,label="/drive speed command");axes[2,0].set_title("Longitudinal velocity")
+    axes[2,0].plot(t,speed_cmd,label=f"{command_topic} speed command");axes[2,0].set_title("Longitudinal velocity")
     axes[2,1].plot(t,odom_vy,label="stored odom vy");axes[2,1].plot(t,pose_vy,label="pose-derived vy")
     axes[2,1].plot(t,kf_vy,label="training/runtime KF vy",lw=1.5)
     axes[2,1].set_title("Lateral velocity inputs/estimates")
     axes[3,0].plot(t,imu_ax,label="raw IMU ax");axes[3,0].plot(t,imu_ay,":",color="0.65",label="raw IMU ay (sensor frame)")
     axes[3,0].plot(t,IMU_AY_SIGN*imu_ay,label=f"signed training IMU ay (raw x {IMU_AY_SIGN:+.0f})",alpha=.9)
     axes[3,0].set_title("IMU acceleration and configured ay sign")
-    axes[3,1].plot(t,steer,label="/drive steering command");axes[3,1].set_title("Steering command")
+    axes[3,1].plot(t,steer,label=f"{command_topic} steering command");axes[3,1].set_title("Steering command")
     speed=np.hypot(vx,odom_vy);beta=np.arctan2(odom_vy,np.maximum(np.abs(vx),1e-4))
     axes[4,0].plot(t,speed,label="odom speed");axes[4,0].plot(t,beta,label="raw-odom beta")
     axes[4,0].set_title("Derived speed and slip angle")
@@ -189,7 +189,7 @@ def plot_extracted(samples, columns, dt, title):
 
 
 def extract_one(storage, out, args):
-    pose,velocity,drive,imu=read_streams(storage,args.pose_topic,args.velocity_topic,args.drive_topic,args.imu_topic)
+    pose,velocity,drive,imu=read_streams(storage,args.pose_topic,args.velocity_topic,args.command_topic,args.imu_topic)
     streams={"pose":pose,"velocity":velocity,"drive":drive,"imu":imu}
     empty=[name for name,value in streams.items() if not len(value)]
     if empty: raise RuntimeError(f"{storage}: empty streams {empty}")
@@ -216,10 +216,10 @@ def extract_one(storage, out, args):
                       "split","bag_id","imu_wz","imu_ax","imu_ay"])
     out.parent.mkdir(parents=True,exist_ok=True)
     np.savez_compressed(out,samples=samples,dt=args.dt,columns=columns,pose_topic=np.array(args.pose_topic),
-                        velocity_topic=np.array(args.velocity_topic),drive_topic=np.array(args.drive_topic),
+                        velocity_topic=np.array(args.velocity_topic),command_topic=np.array(args.command_topic),
                         imu_topic=np.array(args.imu_topic))
     meta={"source":str(storage.resolve()),"pose_topic":args.pose_topic,"velocity_topic":args.velocity_topic,
-          "drive_topic":args.drive_topic,"imu_topic":args.imu_topic,"alignment":"causal_hold",
+          "command_topic":args.command_topic,"imu_topic":args.imu_topic,"alignment":"causal_hold",
           "raw_aligned_samples":len(base),"removed_collision_samples":int(bad.sum()),
           "output_samples":len(samples),"collision_episodes":episodes,"segments":segments,
           "split_policy":"single-bag-identical-train-test"}
@@ -234,7 +234,8 @@ def main():
     p.add_argument("-o", "--output", default=str(OUTPUT_PATH))
     p.add_argument("--pose-topic", default=POSE_TOPIC)
     p.add_argument("--velocity-topic", default=VELOCITY_TOPIC)
-    p.add_argument("--drive-topic", default=DRIVE_TOPIC)
+    p.add_argument("--command-topic", "--drive-topic", dest="command_topic", default=COMMAND_TOPIC,
+                   help="Ackermann command source; default is /ackermann_cmd")
     p.add_argument("--imu-topic", default=IMU_TOPIC)
     p.add_argument("--dt", type=float, default=DT)
     # The node retains the latest pose/velocity/command between callbacks.
@@ -257,7 +258,9 @@ def main():
         except RuntimeError as error:
             print(f"[{number}/{len(storages)}] SKIPPED: {error}",file=sys.stderr)
             continue
-        if USE_PLOT: plot_extracted(samples,columns,args.dt,f"Bag {number}/{len(storages)}: {storage.parent.name}")
+        if USE_PLOT: plot_extracted(samples,columns,args.dt,
+                                    f"Bag {number}/{len(storages)}: {storage.parent.name}",
+                                    args.command_topic)
 
 
 if __name__ == "__main__":

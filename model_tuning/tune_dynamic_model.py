@@ -2,7 +2,7 @@
 """Regress classic Pacejka bicycle parameters from an extracted NPZ dataset.
 
 Required sample columns are t,x,y,yaw,vx,vy,omega,steer,accel,speed_cmd.
-The lateral state is [speed, beta, yaw_rate].  `/drive.speed` is treated as a
+The lateral state is [speed, beta, yaw_rate].  `/ackermann_cmd.speed` is treated as a
 setpoint through a fitted proportional longitudinal loop; it is not divided by
 dt and misinterpreted as acceleration.
 """
@@ -22,6 +22,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DATASET_PATH = PROJECT_ROOT / "model_tuning/data/ifac0807_mppi_observation.npz"
 OUTPUT_PATH = PROJECT_ROOT / "model_tuning/results/suite_dynamic_regression_0807"
 MASS=3.74; I_Z=.04712; LF=.163; LR=.161; STEER_SCALE=.50927964; STEER_BIAS=.01015773
+DIRECT_PREVIOUS_STEER = True
 MIN_ACCEL=-8.; MAX_ACCEL=8.5; SMOOTH_WINDOW=21; MIN_SPEED=.7; MAX_SPEED=10.
 MAX_YAW_RATE=8.; MAX_FIT_SAMPLES=30000; MAX_NFEV=500; RANDOM_SEED=7
 PARAMETER_NAMES = (
@@ -150,7 +151,14 @@ def main():
 
 
 
-    command = raw[:, [7, 9]]  # steer, /drive.speed
+    command = raw[:, [7, 9]].copy()  # steer, /ackermann_cmd.speed
+    if DIRECT_PREVIOUS_STEER:
+        # Match MPPI dynamic_mlp_residual exactly: at time t the physical
+        # steering angle is the previous Ackermann command in this segment.
+        for bag_id in np.unique(bag_ids):
+            ii=np.flatnonzero(bag_ids==bag_id)
+            command[ii[1:],0]=raw[ii[:-1],7]
+            command[ii[0],0]=raw[ii[0],7]
     valid = (
         np.all(np.isfinite(np.c_[state, observed, command]), axis=1)
         & ((raw[:, 10] == 0) if raw.shape[1] > 10 else True)
@@ -169,8 +177,10 @@ def main():
             indices, args.max_fit_samples, replace=False
         )
     state, command, observed = state[indices], command[indices], observed[indices]
-    fixed = (args.mass, args.iz, args.lf, args.lr, 9.81, args.steer_scale,
-             args.steer_bias, args.min_accel, args.max_accel)
+    regression_steer_scale=1.0 if DIRECT_PREVIOUS_STEER else args.steer_scale
+    regression_steer_bias=0.0 if DIRECT_PREVIOUS_STEER else args.steer_bias
+    fixed = (args.mass, args.iz, args.lf, args.lr, 9.81, regression_steer_scale,
+             regression_steer_bias, args.min_accel, args.max_accel)
     initial = np.array([8., 6., 1.4, .8, .1, 6., 1.4, .8, .1])
     lower = np.array([.1, .1, .5, .05, -1., .1, .5, .05, -1.])
     upper = np.array([30., 30., 3., 2., 1., 30., 3., 2., 1.])
@@ -187,7 +197,9 @@ def main():
     result = {
         "parameters": fitted_parameters,
         "fixed": {"mass": args.mass, "I_z": args.iz, "l_f": args.lf, "l_r": args.lr,
-                  "steer_scale": args.steer_scale, "steer_bias": args.steer_bias},
+                  "steer_scale": regression_steer_scale, "steer_bias": regression_steer_bias,
+                  "steering_policy": ("previous_ackermann_command" if DIRECT_PREVIOUS_STEER
+                                      else "mapped_current_command")},
         "rmse": dict(zip(("v_dot", "beta_dot", "yaw_rate_dot"), map(float, rmse))),
         "samples": int(len(indices)), "dt": dt, "optimizer_cost": float(fit.cost),
         "success": bool(fit.success), "message": fit.message,

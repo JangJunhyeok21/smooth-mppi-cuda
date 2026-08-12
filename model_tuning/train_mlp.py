@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Train deployment-oriented dynamic+IMU and kinematic+no-slip+no-IMU MLP models.
 
-Both models consume /drive speed as a speed setpoint.  No
+Both models consume the selected Ackermann speed as a speed setpoint.  No
 (speed_command - measured_vx) / dt action reconstruction is used.
 """
 import argparse, csv, json, time, sys
@@ -42,6 +42,7 @@ DEFAULTS = dict(
     imu_wz_sign=-1.0, imu_ax_sign=1.0, imu_ay_sign=-1.0,
     kf_cf=12.7222491, kf_cr=75.0944752, history=6,
     steer_time_constant=.18397091, max_steer_rate=.8791163,
+    direct_steer=False,
     yaw_rate_time_constant=.10, max_yaw_accel=15.0,
     steer_scale=.50927964, steer_bias=.01015773,
     balanced_sampling=True, curriculum=True,
@@ -119,6 +120,8 @@ def main():
     p.add_argument('--history',type=int,default=6,help='contiguous samples required before rollout')
     p.add_argument('--steer-time-constant',type=float,default=.08)
     p.add_argument('--max-steer-rate',type=float,default=6.0)
+    p.add_argument('--direct-steer',action=argparse.BooleanOptionalAction,default=False,
+                   help='causal one-step hold: steer[t]=/ackermann_cmd.steering_angle[t-1], without scale/bias or servo dynamics')
     p.add_argument('--yaw-rate-time-constant',type=float,default=.10,
                    help='first-order response time [s] toward the kinematic yaw-rate target')
     p.add_argument('--max-yaw-accel',type=float,default=15.0,
@@ -156,12 +159,16 @@ def main():
     command_delta=np.r_[0.,np.diff(command[:,0])].astype(np.float32)
     effective_steer=np.empty(len(raw),np.float32)
     for bid in np.unique(bag):
-        ii=np.flatnonzero(bag==bid);effective_steer[ii[0]]=a.steer_scale*command[ii[0],0]+a.steer_bias
+        ii=np.flatnonzero(bag==bid)
+        effective_steer[ii[0]]=(command[ii[0],0] if a.direct_steer else
+                                a.steer_scale*command[ii[0],0]+a.steer_bias)
         for k in range(1,len(ii)):
             target=np.clip(a.steer_scale*command[ii[k],0]+a.steer_bias,-.55,.55)
-            rate=np.clip((target-effective_steer[ii[k-1]])/a.steer_time_constant,
-                         -a.max_steer_rate,a.max_steer_rate)
-            effective_steer[ii[k]]=effective_steer[ii[k-1]]+rate*dt
+            if a.direct_steer:effective_steer[ii[k]]=np.clip(command[ii[k-1],0],-.55,.55)
+            else:
+                rate=np.clip((target-effective_steer[ii[k-1]])/a.steer_time_constant,
+                             -a.max_steer_rate,a.max_steer_rate)
+                effective_steer[ii[k]]=effective_steer[ii[k-1]]+rate*dt
     if raw.shape[1]>=15:
         imu_raw=raw[:,12:15].astype(np.float32).copy()
     elif is_noslip and a.yaw_target=='odom':
@@ -296,8 +303,9 @@ def main():
         losses=[];traj=[torch.cat((q,s,axay),1)] if collect else None
         for k in range(steps):
             ix=j0+k;u=cmd_t[ix];steer_target=torch.clamp(a.steer_scale*u[:,0]+a.steer_bias,-.55,.55)
-            delta=delta+torch.clamp((steer_target-delta)/a.steer_time_constant,
-                                    -a.max_steer_rate,a.max_steer_rate)*dt
+            delta=(torch.clamp(hist[:,-1,0],-.55,.55) if a.direct_steer else
+                   delta+torch.clamp((steer_target-delta)/a.steer_time_constant,
+                                     -a.max_steer_rate,a.max_steer_rate)*dt)
             steer=delta
             base_ax=torch.clamp(a.kp_speed*(u[:,1]-s[:,0]),-8.,8.5)
             base_r=s[:,0]*torch.tan(steer)/(LF+LR)
@@ -438,7 +446,7 @@ def main():
     vxe=np.abs(traj[:,:,3]-gtstate[:,:,0])
     se=np.abs(np.hypot(traj[:,:,3],traj[:,:,4])-np.hypot(gtstate[:,:,0],gtstate[:,:,1]))
     we=np.abs(traj[:,:,5]-gtstate[:,:,2])
-    metrics={'model':a.model,'action':'[steer_cmd, /drive.speed setpoint]','test_windows':len(test_starts),
+    metrics={'model':a.model,'action':'[steer_cmd, Ackermann speed setpoint]','test_windows':len(test_starts),
       'split_policy':split_policy,'test_is_unseen_data':not split_policy.startswith('single-bag'),
       'yaw_rate_target':(a.slip_yaw_source if is_slip else
                          (a.yaw_target if is_noslip else 'recursive_imu')),
@@ -450,7 +458,10 @@ def main():
       'slip_kinematic_with_imu_input_vy_max_abs':(float(np.max(np.abs(body[:,1]))) if is_slip else None),
       'input_normalization':a.normalization,
       'mlp_input_dim':nbase+10,
-      'actuator_model':{'servo_time_constant_s':a.steer_time_constant,'max_steering_rate_rad_s':a.max_steer_rate},
+      'actuator_model':{'direct_steer':a.direct_steer,
+                        'steering_policy':'previous_ackermann_command' if a.direct_steer else 'mapped_first_order_rate_limited',
+                        'servo_time_constant_s':0.0 if a.direct_steer else a.steer_time_constant,
+                        'max_steering_rate_rad_s':None if a.direct_steer else a.max_steer_rate},
       'yaw_rate_actuator_model':{'time_constant_s':a.yaw_rate_time_constant,
                                  'max_yaw_accel_radps2':a.max_yaw_accel},
       'steering_command_mapping':{'scale':a.steer_scale,'bias_rad':a.steer_bias},

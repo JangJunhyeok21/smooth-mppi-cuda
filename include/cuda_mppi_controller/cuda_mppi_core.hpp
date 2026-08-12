@@ -39,6 +39,7 @@ enum DynamicsModel : int {
     DYNAMIC_IMU_RECURSIVE = 6,
     SLIP_KINEMATIC_WITH_IMU_DIRECT_SPEED = 7,
     DYNAMIC_MLP_RESIDUAL = 8,
+    DYNAMIC_MLP_RESIDUAL_SERVO_LAG = 9,
 };
 
 struct alignas(16) ButterworthCoeffs {

@@ -71,13 +71,13 @@ def main():
   ii=np.flatnonzero(bag==bid)
   for kk in range(1,len(ii)):imu[ii[kk]]=.25*imu[ii[kk]]+.75*imu[ii[kk-1]]
  mean=torch.tensor(packed_mean);std=torch.tensor(packed_std);scale=torch.tensor([8.,8.,30.])
- command=raw[:,[7,9]].astype(np.float32);limits=meta.get('runtime_speed_limits_mps',[cfg['min_speed'],cfg['max_speed']]);minv,maxv=map(float,limits);steer_meta=meta.get('steering_command_mapping',{});sa=float(steer_meta.get('scale',cfg['kinematic_steer_scale']));sb=float(steer_meta.get('bias_rad',cfg['kinematic_steer_bias']));act=meta.get('actuator_model',{});tau=float(act.get('servo_time_constant_s',0.));maxrate=float(act.get('max_steering_rate_rad_s',float('inf')));mina,maxa=float(cfg['min_accel']),float(cfg['max_accel']);kp=float(meta.get('kp_speed',cfg['speed_servo_kp']));wb=float(cfg['l_f'])+float(cfg['l_r']);pscale=(a.position_speed_scale if a.position_speed_scale is not None else float(meta.get('position_speed_scale',cfg.get('kinematic_position_speed_scale',1.0))))
+ command=raw[:,[7,9]].astype(np.float32);limits=meta.get('runtime_speed_limits_mps',[cfg['min_speed'],cfg['max_speed']]);minv,maxv=map(float,limits);steer_meta=meta.get('steering_command_mapping',{});sa=float(steer_meta.get('scale',cfg['kinematic_steer_scale']));sb=float(steer_meta.get('bias_rad',cfg['kinematic_steer_bias']));act=meta.get('actuator_model',{});direct_steer=bool(act.get('direct_steer',False));tau=float(act.get('servo_time_constant_s',0.));maxrate=float(act.get('max_steering_rate_rad_s') if act.get('max_steering_rate_rad_s') is not None else float('inf'));mina,maxa=float(cfg['min_accel']),float(cfg['max_accel']);kp=float(meta.get('kp_speed',cfg['speed_servo_kp']));wb=float(cfg['l_f'])+float(cfg['l_r']);pscale=(a.position_speed_scale if a.position_speed_scale is not None else float(meta.get('position_speed_scale',cfg.get('kinematic_position_speed_scale',1.0))))
  yawact=meta.get('yaw_rate_actuator_model',{});yawtau=float(yawact.get('time_constant_s',cfg.get('kinematic_yaw_rate_time_constant',.1)));maxyawacc=float(yawact.get('max_yaw_accel_radps2',cfg.get('kinematic_max_yaw_accel',15.)))
  effective=np.empty(len(raw),np.float32);bag=raw[:,11].astype(int)
  for bid in np.unique(bag):
-  ii=np.flatnonzero(bag==bid);effective[ii[0]]=np.clip(sa*command[ii[0],0]+sb,-.55,.55)
+  ii=np.flatnonzero(bag==bid);effective[ii[0]]=np.clip(command[ii[0],0] if direct_steer else sa*command[ii[0],0]+sb,-.55,.55)
   for kk in range(1,len(ii)):
-   target=np.clip(sa*command[ii[kk],0]+sb,-.55,.55);rate=np.clip((target-effective[ii[kk-1]])/max(tau,1e-6),-maxrate,maxrate) if tau>0 else 0.;effective[ii[kk]]=effective[ii[kk-1]]+rate*dt if tau>0 else target
+   target=np.clip(sa*command[ii[kk],0]+sb,-.55,.55);rate=np.clip((target-effective[ii[kk-1]])/max(tau,1e-6),-maxrate,maxrate) if tau>0 and not direct_steer else 0.;effective[ii[kk]]=effective[ii[kk-1]]+rate*dt if tau>0 and not direct_steer else np.clip(command[ii[kk-1],0],-.55,.55)
  all_pred=[];batch=512
  with torch.no_grad():
   for q in range(0,len(starts),batch):
@@ -86,7 +86,7 @@ def main():
     s=torch.tensor(body[j0]);xyq=torch.tensor(pose[j0],dtype=torch.float32);tr=[torch.cat((xyq,s),1)]
     h=hist.clone();delta=torch.tensor(effective[j0]);axay=torch.tensor(imu[j0,1:3])
     for k in range(horizon):
-     u=uall[j0+k].clone();u[:,0].clamp_(-float(cfg['max_steer']),float(cfg['max_steer']));u[:,1].clamp_(minv,maxv);target=torch.clamp(sa*u[:,0]+sb,-.55,.55);delta=(delta+torch.clamp((target-delta)/tau,-maxrate,maxrate)*dt) if tau>0 else target;steer=delta
+     u=uall[j0+k].clone();u[:,0].clamp_(-float(cfg['max_steer']),float(cfg['max_steer']));u[:,1].clamp_(minv,maxv);target=torch.clamp(sa*u[:,0]+sb,-.55,.55);delta=(delta+torch.clamp((target-delta)/tau,-maxrate,maxrate)*dt) if tau>0 and not direct_steer else torch.clamp(h[:,-1,0],-.55,.55);steer=delta
      speed=torch.hypot(s[:,0],s[:,1]);beta=torch.atan2(s[:,1],s[:,0]);baseax=torch.clamp(kp*(u[:,1]-speed),mina,maxa)
      # Runtime min/max constrain the command above, not the predicted state.
      basespeed=speed+baseax*dt

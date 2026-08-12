@@ -12,7 +12,8 @@
     kinematic_noslip_noimu_weights_path: config/ifac0807_strict_noslip_noimu_16d.bin
     slip_kinematic_with_imu_weights_path: config/slip_kinmatic_MLP.bin
     dynamic_imu_weights_path: config/ifac2026_dynamic_imu_recursive.bin
-    dynamic_mlp_weights_path: /home/a/smooth-mppi-cuda/config/dynamic_MLP_all_drive_fixed_iz.bin
+    dynamic_mlp_weights_path: /home/a/smooth-mppi-cuda/config/dynamic_MLP_ackermann_previous_steer.bin
+    dynamic_mlp_servo_lag_weights_path: /home/a/smooth-mppi-cuda/config/dynamic_MLP_all_drive_fixed_iz.bin
     e2e_weights_path: config/E2E.bin
     # IMU is causally aligned to odometry and is also used by the 2-state vy KF.
     imu_topic: /imu/data
@@ -87,12 +88,12 @@
     l_f: 0.163
     l_r: 0.161
     # tiv_imu_bagdisjoint_kinematic_classic 식별 결과. l_f/l_r/mass는 학습 시 고정값.
-    kinematic_steer_scale: 1.1330467889433047
-    kinematic_steer_bias: 0.009501962085415086
+    kinematic_steer_scale: 0.50927964
+    kinematic_steer_bias: 0.01015773
     # Robust 1.6 s fit: /odom speed units -> /newmcl_pose map displacement.
     kinematic_position_speed_scale: 0.8633491306389823
     kinematic_no_slip: true               # residual checkpoint 학습 조건(beta=0)
-    speed_servo_kp: 7.360818522274486
+    speed_servo_kp: 0.7616888694734905
     # r_kin=vx*tan(delta)/L is a target, not an instantaneous yaw-rate assignment.
     kinematic_yaw_rate_time_constant: 0.1
     kinematic_max_yaw_accel: 15.0
@@ -125,14 +126,14 @@
     E_r: 0.0597
 
     # 0807 dynamic regression; used only by dynamic_mlp_residual.
-    dynamic_mlp_B_f: 2.046134538755946
-    dynamic_mlp_C_f: 2.3269535456162314
-    dynamic_mlp_D_f: 0.07780187058396759
-    dynamic_mlp_E_f: 0.9999999841747856
-    dynamic_mlp_B_r: 1.921957391698233
-    dynamic_mlp_C_r: 1.730957097201443
-    dynamic_mlp_D_r: 0.06617241635354548
-    dynamic_mlp_E_r: -0.999999818200288
+    dynamic_mlp_B_f: 3.879070152566808
+    dynamic_mlp_C_f: 1.6471076687680233
+    dynamic_mlp_D_f: 0.0710062229162444
+    dynamic_mlp_E_f: -0.9999999999999989
+    dynamic_mlp_B_r: 2.321287285513187
+    dynamic_mlp_C_r: 1.9234527357451916
+    dynamic_mlp_D_r: 0.05906540313616536
+    dynamic_mlp_E_r: -0.9999999996403817
     dynamic_mlp_I_z: 0.04712
 
     # --- Topics (공통 키) ---

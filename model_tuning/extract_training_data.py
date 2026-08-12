@@ -36,7 +36,8 @@ OUTPUT_PATH = PROJECT_ROOT / "model_tuning/data/extracted_bags"
 USE_PLOT = True
 # Must match the MPPI runtime observer/sign convention used for training.
 IMU_WZ_SIGN = -1.0; IMU_AY_SIGN = -1.0; IMU_EMA_ALPHA = .25
-KF_CF = 12.7222491; KF_CR = 75.0944752
+KF_CF = 12.917527023984482; KF_CR = 63.031306365657976
+KF_LOW_SPEED_THRESHOLD = 0.0
 KF_STEER_SCALE = 1.1058064699; KF_STEER_BIAS = -0.0300696939; KF_MAX_STEER = .4788
 POSE_TOPIC = "/newmcl_pose"; VELOCITY_TOPIC = "/odom"; COMMAND_TOPIC = "/ackermann_cmd"; IMU_TOPIC = "/imu/data"
 DT = .02; MAX_POSE_AGE = 1.0; MAX_VELOCITY_AGE = 1.0; MAX_COMMAND_AGE = 1.0; MAX_IMU_AGE = .05
@@ -139,7 +140,8 @@ def plot_extracted(samples, columns, dt, title, command_topic):
     pose_vx=wx*np.cos(heading)+wy*np.sin(heading)
     pose_vy=-wx*np.sin(heading)+wy*np.cos(heading)
     kf_params=LateralVelocityKFParams(cornering_stiffness_front=KF_CF,
-        cornering_stiffness_rear=KF_CR,dt=dt)
+        cornering_stiffness_rear=KF_CR,dt=dt,
+        low_speed_threshold=KF_LOW_SPEED_THRESHOLD)
     kf_vy,kf_w=estimate_dataset(samples,columns,dt,kf_params,
         steer_scale=KF_STEER_SCALE,steer_bias=KF_STEER_BIAS,max_steer=KF_MAX_STEER,
         imu_ema_alpha=IMU_EMA_ALPHA,imu_wz_sign=IMU_WZ_SIGN,imu_ay_sign=IMU_AY_SIGN)

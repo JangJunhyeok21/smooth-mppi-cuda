@@ -14,7 +14,7 @@ struct LateralVelocityKFParams {
     float l_r{0.161f};
     float dt{0.02f};
     float min_longitudinal_speed{0.5f};
-    float low_speed_threshold{1.5f};
+    float low_speed_threshold{0.0f};
     float max_abs_vy{2.0f};
     float process_var_vy{0.02f};
     float process_var_yaw_rate{0.02f};
@@ -40,8 +40,12 @@ public:
         params_.dt = std::max(params_.dt, 1.0e-4f);
         params_.min_longitudinal_speed =
             std::max(params_.min_longitudinal_speed, 0.05f);
+        // low_speed_threshold controls only the optional vy=0 prior.  It is
+        // intentionally independent of min_longitudinal_speed, which still
+        // protects the 1/vx terms in the bicycle matrices.  A threshold of
+        // zero therefore disables the hard vy reset without allowing 1/0.
         params_.low_speed_threshold = std::max(
-            params_.low_speed_threshold, params_.min_longitudinal_speed);
+            params_.low_speed_threshold, 0.0f);
         params_.max_abs_vy = std::max(params_.max_abs_vy, 0.05f);
         params_.cornering_stiffness_front =
             std::max(params_.cornering_stiffness_front, 0.0f);

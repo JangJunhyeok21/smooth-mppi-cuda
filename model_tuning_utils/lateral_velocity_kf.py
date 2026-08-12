@@ -16,7 +16,7 @@ class LateralVelocityKFParams:
     l_r: float = 0.161
     dt: float = 0.02
     min_longitudinal_speed: float = 0.5
-    low_speed_threshold: float = 1.5
+    low_speed_threshold: float = 0.0
     max_abs_vy: float = 2.0
     process_var_vy: float = 0.02
     process_var_yaw_rate: float = 0.02

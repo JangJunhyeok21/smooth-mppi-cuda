@@ -80,6 +80,9 @@ struct Params {
     float max_accel;
     float min_speed;
     float max_speed;
+    // CUDA rollout-only no-slip prior. The host KF keeps its own state; after
+    // each predicted step, |body vx| below this value forces predicted vy=0.
+    float kf_low_speed_threshold;
     
     // Cost Weights
     float q_dist;
@@ -91,6 +94,7 @@ struct Params {
     float q_collision;
     float q_lat_g;
     float lat_g_soft_limit;
+    float longitudinal_accel_soft_limit;
     float q_progress;
     float q_escape_vel;
     float collision_radius;

@@ -94,6 +94,19 @@ namespace mppi
         return angle;
     }
 
+    // Apply the requested no-slip prior only to predicted CUDA rollout state.
+    // With threshold=0 this is disabled.  Use longitudinal body speed rather
+    // than hypot(vx,vy), otherwise a large vy could prevent the low-vx prior.
+    __host__ __device__ inline void apply_rollout_low_speed_vy_prior(
+        State &state, const Params &params)
+    {
+        if (params.kf_low_speed_threshold > 0.0f &&
+            fabsf(state.v) < params.kf_low_speed_threshold) {
+            state.vy = 0.0f;
+            state.slip_angle = 0.0f;
+        }
+    }
+
     __host__ __device__ State update_kinematic(const State &s, const Control &u, const Params &p)
     {
         const float wheelbase = p.l_f + p.l_r;
@@ -585,10 +598,18 @@ namespace mppi
         float vel_cost = -(p.q_v * 0.2f) * forward_v
                        +  p.q_v * overspeed * overspeed;
 
-        // hard fault에 닿기 전에 부드럽게 감속 후보를 선택하게 한다.
-        // q_lat_g는 기존에는 파라미터만 있고 실제 rollout 비용에는 빠져 있었다.
-        float lat_g_excess = fmaxf(0.0f, fabsf(s.ay) - p.lat_g_soft_limit);
-        float lat_g_cost = p.q_lat_g * 0.02f * lat_g_excess * lat_g_excess;
+        // Combined longitudinal/lateral tire utilization.  Penalizing ay
+        // alone incorrectly treats simultaneous braking and cornering as
+        // independent.  The normalized ellipse is dimensionless and starts
+        // charging as soon as its boundary is exceeded.
+        const float ax_limit = fmaxf(p.longitudinal_accel_soft_limit, 1.0e-3f);
+        const float ay_limit = fmaxf(p.lat_g_soft_limit, 1.0e-3f);
+        const float normalized_ax = s.ax / ax_limit;
+        const float normalized_ay = s.ay / ay_limit;
+        const float tire_utilization = normalized_ax * normalized_ax
+                                     + normalized_ay * normalized_ay;
+        const float friction_excess = fmaxf(0.0f, tire_utilization - 1.0f);
+        const float friction_ellipse_cost = p.q_lat_g * friction_excess * friction_excess;
 
         // 4. Control Input Cost
         float d_steer = u.steer - u_prev.steer;
@@ -627,7 +648,7 @@ namespace mppi
             }
         }
 
-        return path_cost + vel_cost + lat_g_cost
+        return path_cost + vel_cost + friction_ellipse_cost
              + steer_cost + rate_cost + boundary_cost + obs_cost;
     }
 
@@ -841,6 +862,7 @@ namespace mppi
                 x=update_dynamic_mlp_residual(x,u_clamped,p,mlp_command_history,
                                               p.dynamics_model==DYNAMIC_MLP_RESIDUAL_SERVO_LAG);
             else x=update_dynamics(x,u_clamped,p);
+            apply_rollout_low_speed_vy_prior(x, p);
             states[idx] = x;
             controls[idx] = u_clamped; 
 
@@ -910,6 +932,7 @@ namespace mppi
                                               p.dynamics_model==DYNAMIC_MLP_RESIDUAL_SERVO_LAG);
             else
                 x=update_dynamics(x,u,p);
+            apply_rollout_low_speed_vy_prior(x, p);
             states[t]=x;
         }
     }

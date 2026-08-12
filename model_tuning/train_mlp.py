@@ -40,7 +40,7 @@ DEFAULTS = dict(
     dynamic_params_json=None,
     disable_velocity_residual=False, yaw_target="imu", slip_yaw_source="imu",
     imu_wz_sign=-1.0, imu_ax_sign=1.0, imu_ay_sign=-1.0,
-    kf_cf=12.7222491, kf_cr=75.0944752, history=6,
+    kf_cf=12.917527023984482, kf_cr=63.031306365657976, history=6,
     steer_time_constant=.18397091, max_steer_rate=.8791163,
     direct_steer=False,
     yaw_rate_time_constant=.10, max_yaw_accel=15.0,

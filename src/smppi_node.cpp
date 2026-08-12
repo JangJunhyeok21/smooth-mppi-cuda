@@ -418,6 +418,7 @@ private:
         this->declare_parameter("q_collision",          400.0);  mppi_params_.q_collision   = this->get_parameter("q_collision").as_double();
         this->declare_parameter("q_lat_g",              200.0);  mppi_params_.q_lat_g       = this->get_parameter("q_lat_g").as_double();
         this->declare_parameter("lat_g_soft_limit",     9.81);   mppi_params_.lat_g_soft_limit = this->get_parameter("lat_g_soft_limit").as_double();
+        this->declare_parameter("longitudinal_accel_soft_limit", 4.0); mppi_params_.longitudinal_accel_soft_limit = this->get_parameter("longitudinal_accel_soft_limit").as_double();
         this->declare_parameter("q_progress",           13.0);   mppi_params_.q_progress    = this->get_parameter("q_progress").as_double();
         this->declare_parameter("q_escape_vel",         6.5);    mppi_params_.q_escape_vel  = this->get_parameter("q_escape_vel").as_double();
         this->declare_parameter("collision_radius",     0.19);   mppi_params_.collision_radius = this->get_parameter("collision_radius").as_double();
@@ -518,7 +519,10 @@ private:
         this->declare_parameter("kf_cornering_stiffness_front",110.0);lateral_velocity_kf_params_.cornering_stiffness_front=this->get_parameter("kf_cornering_stiffness_front").as_double();
         this->declare_parameter("kf_cornering_stiffness_rear",199.0);lateral_velocity_kf_params_.cornering_stiffness_rear=this->get_parameter("kf_cornering_stiffness_rear").as_double();
         this->declare_parameter("kf_min_vx",0.5);lateral_velocity_kf_params_.min_longitudinal_speed=this->get_parameter("kf_min_vx").as_double();
-        this->declare_parameter("kf_low_speed_threshold",1.5);lateral_velocity_kf_params_.low_speed_threshold=this->get_parameter("kf_low_speed_threshold").as_double();
+        this->declare_parameter("kf_low_speed_threshold",0.0);
+        lateral_velocity_kf_params_.low_speed_threshold=this->get_parameter("kf_low_speed_threshold").as_double();
+        mppi_params_.kf_low_speed_threshold=std::max(
+            0.0, this->get_parameter("kf_low_speed_threshold").as_double());
         this->declare_parameter("kf_max_abs_vy",2.0);lateral_velocity_kf_params_.max_abs_vy=this->get_parameter("kf_max_abs_vy").as_double();
         this->declare_parameter("kf_q_vy",0.02);lateral_velocity_kf_params_.process_var_vy=this->get_parameter("kf_q_vy").as_double();
         this->declare_parameter("kf_q_yaw_rate",0.02);lateral_velocity_kf_params_.process_var_yaw_rate=this->get_parameter("kf_q_yaw_rate").as_double();

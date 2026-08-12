@@ -7,13 +7,13 @@
     # kinematic_residual은 아래 binary GRU checkpoint를 CUDA rollout 안에서 실행한다.
     # Keep the controller rollout identical to the simulator plant. The MLP
     # residual produced a persistent yaw-rate bias in closed-loop simulation.
-    dynamics_model: dynamic_mlp_residual
+    dynamics_model: dynamic_mlp_residual_servo_lag
     residual_weights_path: config/kinematic_residual_gru.bin
     kinematic_noslip_noimu_weights_path: config/ifac0807_strict_noslip_noimu_16d.bin
     slip_kinematic_with_imu_weights_path: config/slip_kinmatic_MLP.bin
     dynamic_imu_weights_path: config/ifac2026_dynamic_imu_recursive.bin
     dynamic_mlp_weights_path: /home/a/smooth-mppi-cuda/config/dynamic_MLP_ackermann_previous_steer.bin
-    dynamic_mlp_servo_lag_weights_path: /home/a/smooth-mppi-cuda/config/dynamic_MLP_all_drive_fixed_iz.bin
+    dynamic_mlp_servo_lag_weights_path: /home/a/smooth-mppi-cuda/config/dynamic_residual_v2.bin
     e2e_weights_path: config/E2E.bin
     # IMU is causally aligned to odometry and is also used by the 2-state vy KF.
     imu_topic: /imu/data
@@ -30,7 +30,7 @@
     kf_cornering_stiffness_front: 12.7222491
     kf_cornering_stiffness_rear: 75.0944752
     kf_min_vx: 0.5
-    kf_low_speed_threshold: 0.0  # 0 disables the hard vy=0 reset; 1/vx still uses kf_min_vx
+    kf_low_speed_threshold: 0.5  # CUDA rollout: below 0.5 m/s force vy=0
     kf_max_abs_vy: 2.0
     kf_q_vy: 0.02
     kf_q_yaw_rate: 0.02
@@ -51,7 +51,7 @@
     min_accel: -1.0          # m/s^2
     max_accel: 1.0           # m/s^2
     min_speed: 0.5
-    max_speed: 4.0
+    max_speed: 2.0  # first real-car shakedown; checkpoint was trained through 4 m/s
     # Racing-line 자유도를 위해 중앙선 오차 기반 publish 속도 제한은 사용하지 않는다.
     heading_speed_limit_gain: 0.0
     contour_speed_limit_gain: 0.0
@@ -111,6 +111,10 @@
     kinematic_max_yaw_accel: 15.0
     steer_servo_time_constant: 0.15514851356820727
     actuator_max_steer_rate: 0.8344090950084138
+    # all6_seed31 검증 조합: 1.2 s yaw-rate MAE/p95가 회귀 후보보다 우수함.
+    speed_reference_accel_time_constant: 0.04
+    speed_reference_brake_time_constant: 0.02
+    actuator_max_speed_reference_rate: 8.0
     I_z: 0.04712
     Cm0: 0.04                # 고속 감쇠용 모터 역기전력 계수
     
@@ -147,7 +151,7 @@
     dynamic_mlp_D_r: 0.05906540313616536
     dynamic_mlp_E_r: -0.9999999996403817
     dynamic_mlp_I_z: 0.04712
-    dynamic_mlp_min_speed: 0.8 # 이 속도 아래에서는 residual 외삽 대신 kinematic baseline 사용
+    dynamic_mlp_min_speed: 0.8 # residual sigmoid gate center; no hard model switch
 
     # --- Topics (공통 키) ---
     odom_topic: /ego_racecar/odom

@@ -487,6 +487,10 @@ private:
         this->declare_parameter("steer_servo_time_constant",0.08);mppi_params_.steer_servo_time_constant=this->get_parameter("steer_servo_time_constant").as_double();
         this->declare_parameter("actuator_max_steer_rate",6.0);mppi_params_.actuator_max_steer_rate=this->get_parameter("actuator_max_steer_rate").as_double();
         mppi_params_.actuator_steer_state=0.0f;
+        mppi_params_.actuator_speed_reference_state=0.0f;
+        this->declare_parameter("speed_reference_accel_time_constant",0.04);mppi_params_.speed_reference_accel_time_constant=this->get_parameter("speed_reference_accel_time_constant").as_double();
+        this->declare_parameter("speed_reference_brake_time_constant",0.02);mppi_params_.speed_reference_brake_time_constant=this->get_parameter("speed_reference_brake_time_constant").as_double();
+        this->declare_parameter("actuator_max_speed_reference_rate",8.0);mppi_params_.actuator_max_speed_reference_rate=this->get_parameter("actuator_max_speed_reference_rate").as_double();
         // Pacejka 4-파라미터 (ForzaETH On-Track-SysID 규약).
         // D 는 무차원 마찰계수이며 실제 힘은 아래에서 계산하는 정하중 F_z 가 만든다.
         // E=0 이면 예전 3-파라미터 수식과 완전히 동일하다 (mppi_core.cu 주석 참고).
@@ -682,6 +686,14 @@ private:
                 -mppi_params_.actuator_max_steer_rate,mppi_params_.actuator_max_steer_rate);
             mppi_params_.actuator_steer_state=std::clamp(
                 mppi_params_.actuator_steer_state+rate*mppi_params_.dt,-.55f,.55f);
+            const float speed_tau=last_speed_cmd_>=mppi_params_.actuator_speed_reference_state
+                ? mppi_params_.speed_reference_accel_time_constant
+                : mppi_params_.speed_reference_brake_time_constant;
+            const float speed_reference_rate=std::clamp(
+                (last_speed_cmd_-mppi_params_.actuator_speed_reference_state)/std::max(1e-3f,speed_tau),
+                -mppi_params_.actuator_max_speed_reference_rate,
+                mppi_params_.actuator_max_speed_reference_rate);
+            mppi_params_.actuator_speed_reference_state+=speed_reference_rate*mppi_params_.dt;
         }
         if (is_kinematic_residual_model_) {
             const float beta=std::atan((mppi_params_.l_r/wheelbase_)*std::tan(last_steer_cmd_));

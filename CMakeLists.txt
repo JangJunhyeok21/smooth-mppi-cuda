@@ -68,6 +68,11 @@ add_executable(smppi_node
   src/smppi_node.cpp
 )
 
+add_executable(mppi_step_parity model_tuning/real_car_v2/mppi_step_parity.cu)
+target_include_directories(mppi_step_parity PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
+target_link_libraries(mppi_step_parity smppi_lib ${CUDA_LIBRARIES})
+
 target_compile_options(smppi_node PRIVATE
   $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CXX_COMPILER_ID:Clang>>:-Xcompiler=-Wno-gnu-line-directive>
 )
@@ -118,7 +123,7 @@ ament_target_dependencies(path_publisher
   geometry_msgs
 )
 
-install(TARGETS smppi_node path_publisher
+install(TARGETS smppi_node path_publisher mppi_step_parity
   RUNTIME DESTINATION lib/${PROJECT_NAME})
 install(TARGETS smppi_lib
   ARCHIVE DESTINATION lib

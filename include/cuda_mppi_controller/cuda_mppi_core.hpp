@@ -7,6 +7,7 @@
 #include <iostream>
 #include <cstdio>
 #include <string>
+#include <array>
 
 #ifdef __CUDACC__
 #define HOST_DEVICE __host__ __device__
@@ -71,8 +72,12 @@ struct Params {
     float residual_imu[3];
     float residual_command_history[10];
     float actuator_steer_state;
+    float actuator_speed_reference_state;
     float steer_servo_time_constant;
     float actuator_max_steer_rate;
+    float speed_reference_accel_time_constant;
+    float speed_reference_brake_time_constant;
+    float actuator_max_speed_reference_rate;
     
     // Limits
     float max_steer;
@@ -171,6 +176,11 @@ public:
     void load_slip_kinematic_with_imu_direct_weights(const std::string& path);
     void load_dynamic_imu_recursive_weights(const std::string& path);
     void load_dynamic_mlp_residual_weights(const std::string& path);
+    // Validation-only entry point. It launches the exact CUDA rollout step,
+    // including actuator states, feature construction, MLP and integration.
+    State debug_dynamic_mlp_residual_step(
+        const State& state, const Control& control,
+        std::array<float, 12>& command_history, bool use_servo_lag);
     
     // 경로 및 바운더리 설정
     void set_reference_path(const std::vector<float>& xs, const std::vector<float>& ys,

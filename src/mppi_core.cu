@@ -222,6 +222,35 @@ namespace mppi
         for(int o=0;o<3;++o){float z=b3[o];for(int i=0;i<32;++i)z+=w3[o*32+i]*h2[i];out[o]=tanhf(z)*scale[o];}
     }
 
+    // Real-car v2 residual contract: 20 -> 64 -> 32 -> 3, ReLU hidden
+    // activations and an unbounded linear residual-derivative output. Keep the
+    // legacy split_mlp above for checkpoints trained with SiLU+tanh scaling.
+    template<int N>
+    __device__ void split_residual_mlp_v2(
+        const float *raw, const float *mean, const float *std,
+        const float *w1, const float *b1, const float *w2, const float *b2,
+        const float *w3, const float *b3, float *out)
+    {
+        float normalized[N], hidden1[64], hidden2[32];
+        for (int i = 0; i < N; ++i)
+            normalized[i] = (raw[i] - mean[i]) / std[i];
+        for (int o = 0; o < 64; ++o) {
+            float value = b1[o];
+            for (int i = 0; i < N; ++i) value += w1[o*N+i] * normalized[i];
+            hidden1[o] = fmaxf(value, 0.0f);
+        }
+        for (int o = 0; o < 32; ++o) {
+            float value = b2[o];
+            for (int i = 0; i < 64; ++i) value += w2[o*64+i] * hidden1[i];
+            hidden2[o] = fmaxf(value, 0.0f);
+        }
+        for (int o = 0; o < 3; ++o) {
+            float value = b3[o];
+            for (int i = 0; i < 32; ++i) value += w3[o*32+i] * hidden2[i];
+            out[o] = value;
+        }
+    }
+
     __device__ State update_kinematic_noslip_noimu_direct(const State &s,const Control &u,
                                                     const Params &p,float *history)
     {
@@ -314,51 +343,6 @@ namespace mppi
         const float previous_steering_command = command_history[8];
         const float previous_actuator_steering_angle = command_history[10];
 
-        // The residual checkpoint is not valid around standstill and can
-        // otherwise extrapolate to negative longitudinal velocity or reverse
-        // the steering response. Use a calibrated, causal kinematic baseline
-        // until the measured/predicted speed enters the training regime.
-        if (hypotf(current_state.v, current_state.vy) < params.dynamic_mlp_min_speed) {
-            const float steering_angle = fminf(
-                MAX_STEERING_ANGLE,
-                fmaxf(-MAX_STEERING_ANGLE,
-                      params.kinematic_steer_scale * control.steer
-                          + params.kinematic_steer_bias));
-            const float longitudinal_acceleration = fminf(
-                params.max_accel,
-                fmaxf(params.min_accel,
-                      params.speed_servo_kp * (speed_command - current_state.v)));
-            State next_state = current_state;
-            next_state.v = fmaxf(0.0f,
-                current_state.v + longitudinal_acceleration * params.dt);
-            next_state.vy = 0.0f;
-            const float target_yaw_rate = next_state.v * tanf(steering_angle)
-                / (params.l_f + params.l_r);
-            next_state.omega = current_state.omega + fminf(
-                params.kinematic_max_yaw_accel,
-                fmaxf(-params.kinematic_max_yaw_accel,
-                      (target_yaw_rate - current_state.omega)
-                          / fmaxf(params.kinematic_yaw_rate_time_constant, 1.0e-3f)))
-                * params.dt;
-            next_state.ax = longitudinal_acceleration;
-            next_state.ay = next_state.v * next_state.omega;
-            next_state.x = current_state.x
-                + params.kinematic_position_speed_scale * next_state.v
-                    * cosf(current_state.yaw) * params.dt;
-            next_state.y = current_state.y
-                + params.kinematic_position_speed_scale * next_state.v
-                    * sinf(current_state.yaw) * params.dt;
-            next_state.yaw = angle_normalize(
-                current_state.yaw + next_state.omega * params.dt);
-            next_state.slip_angle = 0.0f;
-            for (int i = 0; i < 8; ++i)
-                command_history[i] = command_history[i + 2];
-            command_history[8] = control.steer;
-            command_history[9] = speed_command;
-            command_history[10] = steering_angle;
-            return next_state;
-        }
-
         float steering_angle;
         if (use_servo_lag) {
             const float target_steering_angle = fminf(
@@ -376,18 +360,38 @@ namespace mppi
                 fmaxf(-MAX_STEERING_ANGLE,
                       previous_actuator_steering_angle + steering_rate * params.dt));
         } else {
-            // Causal direct command model used during training: delta[t] is
-            // exactly the previous Ackermann steering command, without scale/bias.
+            // Causal no-lag contract: the command available at prediction
+            // time t is the previous Ackermann steering command. Do not apply
+            // servo scale/bias/tau in this model.
             steering_angle = fminf(
                 MAX_STEERING_ANGLE,
                 fmaxf(-MAX_STEERING_ANGLE, previous_steering_command));
         }
 
+        float &actuator_speed_reference = command_history[11];
+        if (use_servo_lag) {
+            const float speed_reference_time_constant =
+                speed_command >= actuator_speed_reference
+                    ? params.speed_reference_accel_time_constant
+                    : params.speed_reference_brake_time_constant;
+            const float speed_reference_rate = fminf(
+                params.actuator_max_speed_reference_rate,
+                fmaxf(-params.actuator_max_speed_reference_rate,
+                      (speed_command - actuator_speed_reference)
+                        / fmaxf(speed_reference_time_constant, 1.0e-3f)));
+            actuator_speed_reference += speed_reference_rate * params.dt;
+        } else {
+            // Keep the auxiliary state coherent for diagnostics/model changes,
+            // while the no-lag acceleration uses speed_command directly.
+            actuator_speed_reference = speed_command;
+        }
+        const float longitudinal_speed_reference =
+            use_servo_lag ? actuator_speed_reference : speed_command;
         const float current_speed = hypotf(current_state.v, current_state.vy);
         const float classic_longitudinal_acceleration = fminf(
             params.max_accel,
             fmaxf(params.min_accel,
-                  params.speed_servo_kp * (speed_command - current_speed)));
+                  params.speed_servo_kp * (longitudinal_speed_reference - current_speed)));
         const float safe_longitudinal_velocity = fmaxf(
             fabsf(current_state.v), MIN_DYNAMIC_SPEED);
 
@@ -454,10 +458,20 @@ namespace mppi
 
         // MLP outputs residual derivatives [delta_ax, delta_ay, delta_yaw_accel].
         float residual_derivatives[3];
-        split_mlp<20>(
+        split_residual_mlp_v2<20>(
             mlp_features, dmr_mean, dmr_std,
             dmr_w1, dmr_b1, dmr_w2, dmr_b2, dmr_w3, dmr_b3,
             residual_derivatives);
+
+        residual_derivatives[0] = fminf(8.0f, fmaxf(-8.0f, residual_derivatives[0]));
+        residual_derivatives[1] = fminf(8.0f, fmaxf(-8.0f, residual_derivatives[1]));
+        residual_derivatives[2] = fminf(30.0f, fmaxf(-30.0f, residual_derivatives[2]));
+
+        // Smoothly suppress a poorly observable residual around standstill;
+        // this is identical to real_car_v2/contract.py::low_speed_gate.
+        const float low_speed_gate = 1.0f / (1.0f + expf(
+            -(fabsf(current_state.v) - params.dynamic_mlp_min_speed) / 0.2f));
+        for (int i = 0; i < 3; ++i) residual_derivatives[i] *= low_speed_gate;
 
         State next_state = current_state;
         next_state.v = classic_next_longitudinal_velocity
@@ -488,6 +502,19 @@ namespace mppi
         command_history[9] = speed_command;
         command_history[10] = steering_angle;
         return next_state;
+    }
+
+    __global__ void debug_dynamic_mlp_residual_step_kernel(
+        State state, Control control, Params params,
+        const float *history_input, State *state_output, float *history_output,
+        bool use_servo_lag)
+    {
+        if (blockIdx.x != 0 || threadIdx.x != 0) return;
+        float history[12];
+        for (int i = 0; i < 12; ++i) history[i] = history_input[i];
+        *state_output = update_dynamic_mlp_residual(
+            state, control, params, history, use_servo_lag);
+        for (int i = 0; i < 12; ++i) history_output[i] = history[i];
     }
 
     __host__ __device__ State update_legacy_hybrid(const State &s, const Control &u, const Params &p)
@@ -829,7 +856,7 @@ namespace mppi
         int local_path_idx = start_path_idx;
         int initial_path_idx = start_path_idx; 
         float gru_hidden[RESIDUAL_HIDDEN];
-        float mlp_command_history[11];
+        float mlp_command_history[12];
         if(p.dynamics_model==KINEMATIC_RESIDUAL)
             for(int i=0;i<RESIDUAL_HIDDEN;++i) gru_hidden[i]=residual_hidden[i];
         if(p.dynamics_model==KINEMATIC_MLP_RESIDUAL || p.dynamics_model==KINEMATIC_MLP_NO_IMU_RESIDUAL ||
@@ -838,6 +865,7 @@ namespace mppi
            p.dynamics_model==DYNAMIC_MLP_RESIDUAL || p.dynamics_model==DYNAMIC_MLP_RESIDUAL_SERVO_LAG)
         for(int i=0;i<10;++i) mlp_command_history[i]=p.residual_command_history[i];
         mlp_command_history[10]=p.actuator_steer_state;
+        mlp_command_history[11]=p.actuator_speed_reference_state;
         
         float x_steer_prev1 = 0.0f, x_steer_prev2 = 0.0f;
         float y_steer_prev1 = 0.0f, y_steer_prev2 = 0.0f;
@@ -963,11 +991,12 @@ namespace mppi
     {
         if (blockIdx.x != 0 || threadIdx.x != 0) return;
         float gru_hidden[RESIDUAL_HIDDEN];
-        float command_history[11];
+        float command_history[12];
         for (int i=0;i<RESIDUAL_HIDDEN;++i)
             gru_hidden[i]=encoded_residual_hidden ? encoded_residual_hidden[i] : 0.f;
         for (int i=0;i<10;++i) command_history[i]=p.residual_command_history[i];
         command_history[10]=p.actuator_steer_state;
+        command_history[11]=p.actuator_speed_reference_state;
         for (int t=0;t<T;++t) {
             const Control u=controls[t];
             if(p.dynamics_model==KINEMATIC_RESIDUAL)
@@ -1193,6 +1222,33 @@ namespace mppi
 #define LOAD_DMR(symbol,count) CUDA_CHECK(cudaMemcpyToSymbol(symbol,w.data()+o,(count)*sizeof(float)));o+=(count)
         LOAD_DMR(dmr_w1,64*20);LOAD_DMR(dmr_b1,64);LOAD_DMR(dmr_w2,32*64);LOAD_DMR(dmr_b2,32);LOAD_DMR(dmr_w3,3*32);LOAD_DMR(dmr_b3,3);LOAD_DMR(dmr_mean,20);LOAD_DMR(dmr_std,20);
 #undef LOAD_DMR
+    }
+
+    State MPPISolver::debug_dynamic_mlp_residual_step(
+        const State& state, const Control& control,
+        std::array<float, 12>& command_history, bool use_servo_lag)
+    {
+        float *device_history_input = nullptr;
+        float *device_history_output = nullptr;
+        State *device_state_output = nullptr;
+        CUDA_CHECK(cudaMalloc(&device_history_input, 12 * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&device_history_output, 12 * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&device_state_output, sizeof(State)));
+        CUDA_CHECK(cudaMemcpy(device_history_input, command_history.data(),
+                              12 * sizeof(float), cudaMemcpyHostToDevice));
+        debug_dynamic_mlp_residual_step_kernel<<<1, 1>>>(
+            state, control, params_, device_history_input,
+            device_state_output, device_history_output, use_servo_lag);
+        CUDA_CHECK(cudaDeviceSynchronize());
+        State output{};
+        CUDA_CHECK(cudaMemcpy(&output, device_state_output, sizeof(State),
+                              cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(command_history.data(), device_history_output,
+                              12 * sizeof(float), cudaMemcpyDeviceToHost));
+        cudaFree(device_history_input);
+        cudaFree(device_history_output);
+        cudaFree(device_state_output);
+        return output;
     }
 
     void MPPISolver::set_reference_path(const std::vector<float> &xs, const std::vector<float> &ys,

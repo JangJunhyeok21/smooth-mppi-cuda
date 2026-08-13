@@ -41,6 +41,7 @@ find_package(sensor_msgs REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 # [수정 3] fastrtps_cpp 종속성 제거 (기본 typesupport가 알아서 처리함)
 find_package(std_msgs REQUIRED)
+find_package(f1_msgs REQUIRED)
 
 # CUDA 라이브러리 찾기
 find_package(CUDAToolkit REQUIRED)
@@ -105,6 +106,7 @@ ament_target_dependencies(smppi_node
   visualization_msgs
   geometry_msgs
   sensor_msgs
+  f1_msgs
 )
 
 # 라이브러리 링크 (CUDA 링크)

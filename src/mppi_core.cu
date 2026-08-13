@@ -922,7 +922,8 @@ namespace mppi
         Control current_action = prev_controls[0]; 
         Control last_u = current_action;
         int local_path_idx = start_path_idx;
-        int initial_path_idx = start_path_idx; 
+        int initial_path_idx = start_path_idx;
+        bool is_fault = false;
         float gru_hidden[RESIDUAL_HIDDEN];
         float mlp_command_history[20];
         if(p.dynamics_model==KINEMATIC_RESIDUAL)

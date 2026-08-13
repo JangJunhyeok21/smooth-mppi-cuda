@@ -31,5 +31,5 @@ def main():
  out=Path(a.out);out.mkdir(parents=True,exist_ok=True);torch.save(net.state_dict(),out/'model.pt');layers=(net.net[0],net.net[2],net.net[4]);blob=np.concatenate([z.detach().numpy().ravel() for layer in layers for z in (layer.weight,layer.bias)]+[mean,std]).astype('<f4');assert len(blob)==3563;blob.tofile(out/'dynamic_40ms_residual.bin');metrics={'seed':a.seed,'best_epoch':best[2],'model_dt':.04,'control_dt':.02}
  for k,name in enumerate(('train','validation','test')):
   mask=v&(s==k);e=abs(pred[mask]-y[mask]);metrics[name]={'n':int(mask.sum()),'mae':e.mean(0).tolist(),'p95':np.quantile(e,.95,axis=0).tolist()}
- (out/'metrics.json').write_text(json.dumps(metrics,indent=2)+'\n');(out/'contract.json').write_text(json.dumps({'model':'dynamic_mlp_residual_servo_lag_40ms','control_dt':.02,'model_dt':.04,'features':list(FEATURES),'outputs':['delta_ax','delta_ay','delta_yaw_accel'],'substeps':2},indent=2)+'\n');print(json.dumps(metrics,indent=2))
+ (out/'metrics.json').write_text(json.dumps(metrics,indent=2)+'\n');(out/'contract.json').write_text(json.dumps({'model':'dynamic_mlp_residual_servo_lag_40ms','control_dt':.02,'model_dt':.04,'features':list(FEATURES),'outputs':['delta_ax','delta_ay','delta_yaw_accel'],'substeps':1,'integration':'single Euler step at 0.04 s'},indent=2)+'\n');print(json.dumps(metrics,indent=2))
 if __name__=='__main__':main()

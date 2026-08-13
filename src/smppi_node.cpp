@@ -617,6 +617,9 @@ private:
         if(mppi_params_.dynamics_model==mppi::EFFECTIVE_HISTORY_STATE_RESIDUAL &&
            (std::abs(mppi_params_.control_dt-.02f)>1e-6f || std::abs(mppi_params_.model_dt-.04f)>1e-6f))
             throw std::invalid_argument("effective_history_state_residual requires control_dt=0.02 and model_dt=0.04");
+        if(mppi_params_.dynamics_model==mppi::DYNAMIC_MLP_RESIDUAL_SERVO_LAG &&
+           (std::abs(mppi_params_.control_dt-.02f)>1e-6f || std::abs(mppi_params_.model_dt-.04f)>1e-6f))
+            throw std::invalid_argument("dynamic_mlp_residual_servo_lag requires control_dt=0.02 and model_dt=0.04");
         if(mppi_params_.dynamics_model==mppi::EFFECTIVE_HISTORY_STATE_RESIDUAL &&
            (mppi_params_.effective_yaw_response_tau<=0.f ||
             mppi_params_.effective_max_yaw_accel<=0.f ||

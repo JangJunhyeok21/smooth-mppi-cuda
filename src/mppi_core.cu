@@ -234,6 +234,11 @@ namespace mppi
         history[18]=steer;history[19]=speed;
     }
 
+    __host__ __device__ inline bool uses_40ms_rollout_knot(int dynamics_model) {
+        return dynamics_model == DYNAMIC_MLP_RESIDUAL_SERVO_LAG ||
+               dynamics_model == EFFECTIVE_HISTORY_STATE_RESIDUAL;
+    }
+
     // 34-feature command-history model. One state transition is exactly 40 ms;
     // the effective baseline consumes the held control in two 20 ms substeps.
     // State residuals are corrections to the resulting 40 ms body state.
@@ -390,12 +395,24 @@ namespace mppi
     {
         constexpr float MAX_STEERING_ANGLE = 0.55f;
         constexpr float MIN_DYNAMIC_SPEED = 0.5f;
+        // The servo-lag checkpoint is a single 40 ms transition model.  ROS
+        // still solves/publishes at 50 Hz; this dt only spaces rollout knots.
+        const float dynamics_dt = use_servo_lag ? params.model_dt : params.dt;
 
         const float speed_command = fminf(
             params.max_speed,
             fmaxf(params.min_speed, control.accel));
         const float previous_steering_command = command_history[8];
         const float previous_actuator_steering_angle = command_history[10];
+
+        // Training histories include the command represented by the current
+        // feature row. Make the future rollout use that same causal contract.
+        if (use_servo_lag) {
+            for (int history_index = 0; history_index < 8; ++history_index)
+                command_history[history_index] = command_history[history_index + 2];
+            command_history[8] = control.steer;
+            command_history[9] = speed_command;
+        }
 
         float steering_angle;
         if (use_servo_lag) {
@@ -412,7 +429,7 @@ namespace mppi
             steering_angle = fminf(
                 MAX_STEERING_ANGLE,
                 fmaxf(-MAX_STEERING_ANGLE,
-                      previous_actuator_steering_angle + steering_rate * params.dt));
+                      previous_actuator_steering_angle + steering_rate * dynamics_dt));
         } else {
             // Causal no-lag contract: the command available at prediction
             // time t is the previous Ackermann steering command. Do not apply
@@ -433,7 +450,7 @@ namespace mppi
                 fmaxf(-params.actuator_max_speed_reference_rate,
                       (speed_command - actuator_speed_reference)
                         / fmaxf(speed_reference_time_constant, 1.0e-3f)));
-            actuator_speed_reference += speed_reference_rate * params.dt;
+            actuator_speed_reference += speed_reference_rate * dynamics_dt;
         } else {
             // Keep the auxiliary state coherent for diagnostics/model changes,
             // while the no-lag acceleration uses speed_command directly.
@@ -480,15 +497,15 @@ namespace mppi
         // Body-frame equations: ax=d(vx)/dt-vy*r, ay=d(vy)/dt+vx*r.
         const float classic_next_longitudinal_velocity = current_state.v
             + (classic_longitudinal_acceleration
-               + current_state.vy * current_state.omega) * params.dt;
+               + current_state.vy * current_state.omega) * dynamics_dt;
         const float classic_next_lateral_velocity = current_state.vy
             + (classic_lateral_acceleration
-               - current_state.v * current_state.omega) * params.dt;
+               - current_state.v * current_state.omega) * dynamics_dt;
         const float classic_yaw_moment =
             params.l_f * front_lateral_tire_force * cosf(steering_angle)
             - params.l_r * rear_lateral_tire_force;
         const float classic_next_yaw_rate = current_state.omega
-            + classic_yaw_moment / params.dynamic_mlp_I_z * params.dt;
+            + classic_yaw_moment / params.dynamic_mlp_I_z * dynamics_dt;
 
         // Keep this exact 20-D order synchronized with train_mlp.py:
         // [vx, vy, yaw_rate, steer_cmd, speed_cmd, applied_steer,
@@ -529,11 +546,11 @@ namespace mppi
 
         State next_state = current_state;
         next_state.v = classic_next_longitudinal_velocity
-            + residual_derivatives[0] * params.dt;
+            + residual_derivatives[0] * dynamics_dt;
         next_state.vy = classic_next_lateral_velocity
-            + residual_derivatives[1] * params.dt;
+            + residual_derivatives[1] * dynamics_dt;
         next_state.omega = classic_next_yaw_rate
-            + residual_derivatives[2] * params.dt;
+            + residual_derivatives[2] * dynamics_dt;
         next_state.ax = classic_longitudinal_acceleration + residual_derivatives[0];
         next_state.ay = classic_lateral_acceleration + residual_derivatives[1];
 
@@ -541,19 +558,20 @@ namespace mppi
         const float next_body_slip_angle = atan2f(next_state.vy, next_state.v);
         next_state.x = current_state.x
             + params.kinematic_position_speed_scale * next_speed
-                * cosf(current_state.yaw + next_body_slip_angle) * params.dt;
+                * cosf(current_state.yaw + next_body_slip_angle) * dynamics_dt;
         next_state.y = current_state.y
             + params.kinematic_position_speed_scale * next_speed
-                * sinf(current_state.yaw + next_body_slip_angle) * params.dt;
+                * sinf(current_state.yaw + next_body_slip_angle) * dynamics_dt;
         next_state.yaw = angle_normalize(
-            current_state.yaw + next_state.omega * params.dt);
+            current_state.yaw + next_state.omega * dynamics_dt);
         next_state.slip_angle = next_body_slip_angle;
 
-        for (int history_index = 0; history_index < 8; ++history_index) {
-            command_history[history_index] = command_history[history_index + 2];
+        if (!use_servo_lag) {
+            for (int history_index = 0; history_index < 8; ++history_index)
+                command_history[history_index] = command_history[history_index + 2];
+            command_history[8] = control.steer;
+            command_history[9] = speed_command;
         }
-        command_history[8] = control.steer;
-        command_history[9] = speed_command;
         command_history[10] = steering_angle;
         return next_state;
     }
@@ -959,7 +977,7 @@ namespace mppi
             y_accel_prev2 = y_accel_prev1; y_accel_prev1 = filtered_accel;
 
             // 4. 부드러워진 노이즈에 dt를 곱해 최종 변화량 산출
-            const float knot_dt=p.dynamics_model==EFFECTIVE_HISTORY_STATE_RESIDUAL?p.model_dt:p.dt;
+            const float knot_dt=uses_40ms_rollout_knot(p.dynamics_model)?p.model_dt:p.dt;
             float noise_delta_steer = filtered_steer * knot_dt;
             float noise_delta_accel = filtered_accel * knot_dt;
 
@@ -1104,7 +1122,9 @@ namespace mppi
     }
 
     MPPISolver::MPPISolver(int K, int T, Params params) : K_(K), T_(T), params_(params) {
-        params_.filter_coeffs = compute_butterworth_coeffs(3.0f, params_.dt);
+        const float knot_dt = uses_40ms_rollout_knot(params_.dynamics_model)
+            ? params_.model_dt : params_.dt;
+        params_.filter_coeffs = compute_butterworth_coeffs(3.0f, knot_dt);
         h_states_.resize(K * T);
         h_controls_.resize(K * T);
         // A zero steering command is not physically neutral when the
@@ -1186,7 +1206,9 @@ namespace mppi
 
     void MPPISolver::update_params(Params p) { 
         params_ = p; 
-        params_.filter_coeffs = compute_butterworth_coeffs(3.0f, params_.dt);
+        const float knot_dt = uses_40ms_rollout_knot(params_.dynamics_model)
+            ? params_.model_dt : params_.dt;
+        params_.filter_coeffs = compute_butterworth_coeffs(3.0f, knot_dt);
     }   
 
     void MPPISolver::set_residual_history(const std::vector<float>& features) {
@@ -1387,7 +1409,8 @@ namespace mppi
                                  params_.dynamics_model==EFFECTIVE_HISTORY_STATE_RESIDUAL);
         if (direct_speed && !direct_speed_warm_start_initialized_) {
             float speed=fminf(params_.max_speed,fmaxf(0.0f,current_state.v));
-            const float speed_step=params_.max_accel_rate*(params_.dynamics_model==EFFECTIVE_HISTORY_STATE_RESIDUAL?params_.model_dt:params_.dt);
+            const float speed_step=params_.max_accel_rate*(
+                uses_40ms_rollout_knot(params_.dynamics_model)?params_.model_dt:params_.dt);
             for (int t=0;t<T_;++t) {
                 speed=fminf(params_.max_speed,speed+speed_step);
                 h_prev_controls_[t].accel=speed;
@@ -1432,8 +1455,9 @@ namespace mppi
     }
 
     Control MPPISolver::compute_optimal_control(const State &current_state) {
-        const bool advance_warm_start = params_.dynamics_model!=EFFECTIVE_HISTORY_STATE_RESIDUAL || model_knot_phase_==1;
-        if(params_.dynamics_model==EFFECTIVE_HISTORY_STATE_RESIDUAL)model_knot_phase_=(model_knot_phase_+1)&1;
+        const bool phase_aware = uses_40ms_rollout_knot(params_.dynamics_model);
+        const bool advance_warm_start = !phase_aware || model_knot_phase_==1;
+        if(phase_aware)model_knot_phase_=(model_knot_phase_+1)&1;
         auto min_it = std::min_element(h_costs_.begin(), h_costs_.end());
         float min_cost = *min_it;
         best_k_ = static_cast<int>(std::distance(h_costs_.begin(), min_it));

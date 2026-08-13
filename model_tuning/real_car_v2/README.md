@@ -25,7 +25,7 @@ dynamic + servo-lag residual pipeline in this order:
 1. `build_dataset.py`: combine the direct-bag 20 ms NPZ files and assign
    session-disjoint train/validation/test splits.
 2. `regress_dynamic_40ms.py`: fit the Pacejka classic model for one 40 ms MPPI
-   knot, internally using two causal 20 ms actuator/physics substeps.
+   knot using one explicit 40 ms actuator/physics update.
 3. `build_dynamic_40ms_dataset.py`: calculate classic predictions and the
    derivative residual targets `[delta_ax, delta_ay, delta_yaw_accel]`.
 4. `train_dynamic_40ms.py`: train the 20-64-32-3 MLP using one-step targets.
@@ -109,7 +109,9 @@ the test fails when the maximum full-state/history difference exceeds `2e-5`.
 The runtime names are intentionally distinct. `dynamic_mlp_residual` is the
 causal no-lag contract (`steer[t]=steer_cmd[t-1]`, direct speed command), while
 `dynamic_mlp_residual_servo_lag` recursively maintains applied steering and
-speed-reference actuator states. Their checkpoint paths must not be swapped.
+speed-reference actuator states. Each rollout knot is one 40 ms update, while
+ROS still resolves and publishes a new first control at 50 Hz. Its checkpoint
+path must not be swapped with the 20 ms no-lag model.
 
 Do not select the new binary on the car until: hold-out 1-step and 60-step
 replay beat physics-only, p95/max errors do not regress, Python/CUDA predictions

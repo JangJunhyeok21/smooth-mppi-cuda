@@ -93,7 +93,7 @@
     num_samples: 1600        # Orin NX 50 Hz 계산 예산 확보
     visualize_candidates: true
     control_rate_hz: 50.0    # 20 ms timer; MPPI 계산도 이 주기보다 짧아야 함
-    model_dt: 0.04  # rollout knot: one held u, two internal 20 ms substeps
+    model_dt: 0.04  # lag/effective rollout knot; ROS solve/publish remains 50 Hz
     # effective_history_state_residual training contract. These describe the
     # joint command-to-state response, not a measured physical servo.
     effective_steer_scale: 0.51

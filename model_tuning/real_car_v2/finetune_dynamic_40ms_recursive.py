@@ -27,12 +27,11 @@ def main():
  def rollout(ids):
   q=torch.as_tensor(ids,device=dev);state=X[q,:3];ap=X[q,5];sr=state[:,0];hist=X[q,10:20].reshape(-1,5,2);pose=torch.zeros((len(ids),3),device=dev);outs={};resall=[];state_trace=[];pose_trace=[]
   for k in range(30):
-   i=q+2*k;c0=X[i,3:5];c1=X[i+1,3:5]
+   i=q+2*k;c0=X[i,3:5]
    if k>0:hist=torch.cat((hist[:,1:],c0[:,None]),1)
    current=state;previous=hist[:,-2,0]
-   for cmd in (c0,c1):
-    target=torch.clamp(scale*cmd[:,0]+bias,-.55,.55);ap=torch.clamp(ap+torch.clamp((target-ap)/stau,-srate,srate)*.02,-.55,.55);tau=torch.where(cmd[:,1]>=sr,ata,atb);sr=sr+torch.clamp((cmd[:,1]-sr)/tau,-rrate,rrate)*.02;vx,vy,r=state.unbind(1);bax=torch.clamp(kp*(sr-torch.hypot(vx,vy)),amin,amax);safe=torch.clamp(torch.abs(vx),min=.5);af=ap-torch.atan2(vy+lf*r,safe);ar=-torch.atan2(vy-lr*r,safe);bf=fit['B_f']*af;br=fit['B_r']*ar;fyf=fzf*fit['D_f']*torch.sin(fit['C_f']*torch.atan(bf));fyr=fzr*fit['D_r']*torch.sin(fit['C_r']*torch.atan(br));ay=(fyf*torch.cos(ap)+fyr)/m;rd=(lf*fyf*torch.cos(ap)-lr*fyr)/iz;state=torch.stack((vx+(bax+vy*r)*.02,vy+(ay-vx*r)*.02,r+rd*.02),1)
-   feat=torch.cat((current,c0,ap[:,None],(c0[:,0]-previous)[:,None],state,hist.reshape(len(ids),-1)),1);res=torch.clamp(net((feat-mean)/std),torch.tensor((-8.,-8.,-30.),device=dev),torch.tensor((8.,8.,30.),device=dev));gate=torch.sigmoid((torch.abs(current[:,0])-low)/.2);state=state+res*gate[:,None]*.04;yaw=pose[:,2];pose=torch.stack((pose[:,0]+pscale*(state[:,0]*torch.cos(yaw)-state[:,1]*torch.sin(yaw))*.04,pose[:,1]+pscale*(state[:,0]*torch.sin(yaw)+state[:,1]*torch.cos(yaw))*.04,yaw+state[:,2]*.04),1);hist=torch.cat((hist[:,1:],c1[:,None]),1);resall.append(res)
+   cmd=c0;target=torch.clamp(scale*cmd[:,0]+bias,-.55,.55);ap=torch.clamp(ap+torch.clamp((target-ap)/stau,-srate,srate)*.04,-.55,.55);tau=torch.where(cmd[:,1]>=sr,ata,atb);sr=sr+torch.clamp((cmd[:,1]-sr)/tau,-rrate,rrate)*.04;vx,vy,r=state.unbind(1);bax=torch.clamp(kp*(sr-torch.hypot(vx,vy)),amin,amax);safe=torch.clamp(torch.abs(vx),min=.5);af=ap-torch.atan2(vy+lf*r,safe);ar=-torch.atan2(vy-lr*r,safe);bf=fit['B_f']*af;br=fit['B_r']*ar;fyf=fzf*fit['D_f']*torch.sin(fit['C_f']*torch.atan(bf));fyr=fzr*fit['D_r']*torch.sin(fit['C_r']*torch.atan(br));ay=(fyf*torch.cos(ap)+fyr)/m;rd=(lf*fyf*torch.cos(ap)-lr*fyr)/iz;state=torch.stack((vx+(bax+vy*r)*.04,vy+(ay-vx*r)*.04,r+rd*.04),1)
+   feat=torch.cat((current,c0,ap[:,None],(c0[:,0]-previous)[:,None],state,hist.reshape(len(ids),-1)),1);res=torch.clamp(net((feat-mean)/std),torch.tensor((-8.,-8.,-30.),device=dev),torch.tensor((8.,8.,30.),device=dev));gate=torch.sigmoid((torch.abs(current[:,0])-low)/.2);state=state+res*gate[:,None]*.04;yaw=pose[:,2];pose=torch.stack((pose[:,0]+pscale*(state[:,0]*torch.cos(yaw)-state[:,1]*torch.sin(yaw))*.04,pose[:,1]+pscale*(state[:,0]*torch.sin(yaw)+state[:,1]*torch.cos(yaw))*.04,yaw+state[:,2]*.04),1);resall.append(res)
    state_trace.append(state);pose_trace.append(pose)
    if k+1 in HORIZONS:outs[k+1]=(state,pose,X[q+2*(k+1),:3])
   return outs,torch.stack(resall,1),torch.stack(state_trace,1),torch.stack(pose_trace,1)

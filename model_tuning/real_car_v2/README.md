@@ -68,14 +68,14 @@ every CUDA rollout:
 ```math
 \begin{aligned}
 \delta_k^{target}
-&=\operatorname{clip}(S_\delta\delta_{cmd,k}+b_\delta,
+&=\mathrm{clip}(S_\delta\delta_{cmd,k}+b_\delta,
                       -\delta_{max},\delta_{max}),\\
 \dot\delta_k
-&=\operatorname{clip}\left(
+&=\mathrm{clip}\left(
   \frac{\delta_k^{target}-\delta_{k-1}}{\tau_\delta},
   -\dot\delta_{max},\dot\delta_{max}\right),\\
 \delta_k
-&=\operatorname{clip}(\delta_{k-1}+\dot\delta_k\Delta t,
+&=\mathrm{clip}(\delta_{k-1}+\dot\delta_k\Delta t,
                       -\delta_{max},\delta_{max}),\\
 \tau_v
 &=\begin{cases}
@@ -83,12 +83,12 @@ every CUDA rollout:
 \tau_{brake},&v_{cmd,k}<v_{ref,k-1},
 \end{cases}\\
 \dot v_{ref,k}
-&=\operatorname{clip}\left(
+&=\mathrm{clip}\left(
 \frac{v_{cmd,k}-v_{ref,k-1}}{\tau_v},
 -\dot v_{ref,max},\dot v_{ref,max}\right),\\
 v_{ref,k}&=v_{ref,k-1}+\dot v_{ref,k}\Delta t,\\
 a_{x,k}^{base}
-&=\operatorname{clip}\left(
+&=\mathrm{clip}\left(
 K_v\left(v_{ref,k}-\sqrt{v_{x,k}^2+v_{y,k}^2}\right),
 a_{min},a_{max}\right).
 \end{aligned}
@@ -100,8 +100,8 @@ With `v_safe=max(abs(vx),0.5)`, the front/rear slip angles are
 
 ```math
 \alpha_{f,k}=\delta_k-
-\operatorname{atan2}(v_{y,k}+l_f r_k,v_{safe,k}),\qquad
-\alpha_{r,k}=-\operatorname{atan2}(v_{y,k}-l_r r_k,v_{safe,k}).
+\mathrm{atan2}(v_{y,k}+l_f r_k,v_{safe,k}),\qquad
+\alpha_{r,k}=-\mathrm{atan2}(v_{y,k}-l_r r_k,v_{safe,k}).
 ```
 
 Static normal loads and Pacejka lateral forces are
@@ -169,8 +169,8 @@ Feature normalization is stored in the binary:
 \bar{\mathbf z}_k=\frac{\mathbf z_k-\boldsymbol\mu}{\boldsymbol\sigma},
 \qquad
 \begin{aligned}
-\mathbf h_1&=\operatorname{ReLU}(W_1\bar{\mathbf z}_k+b_1),\\
-\mathbf h_2&=\operatorname{ReLU}(W_2\mathbf h_1+b_2),\\
+\mathbf h_1&=\mathrm{ReLU}(W_1\bar{\mathbf z}_k+b_1),\\
+\mathbf h_2&=\mathrm{ReLU}(W_2\mathbf h_1+b_2),\\
 \begin{bmatrix}\Delta a_x&\Delta a_y&\Delta\dot r\end{bmatrix}^{\mathsf T}
 &=W_3\mathbf h_2+b_3.
 \end{aligned}
@@ -212,7 +212,7 @@ Finally MPPI advances the map pose with the corrected next body state:
 \begin{aligned}
 x_{k+1}&=x_k+S_p(v_{x,k+1}\cos\psi_k-v_{y,k+1}\sin\psi_k)\Delta t,\\
 y_{k+1}&=y_k+S_p(v_{x,k+1}\sin\psi_k+v_{y,k+1}\cos\psi_k)\Delta t,\\
-\psi_{k+1}&=\operatorname{wrap}(\psi_k+r_{k+1}\Delta t).
+\psi_{k+1}&=\mathrm{wrap}(\psi_k+r_{k+1}\Delta t).
 \end{aligned}
 ```
 

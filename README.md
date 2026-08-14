@@ -178,7 +178,7 @@ MPPI 한 step의 상태와 action은 다음과 같다.
 학습된 조향 scale/bias를 먼저 적용한다.
 
 ```math
-\delta_t=\operatorname{clip}(S_a\delta_{cmd,t}+S_b,-0.55,0.55).
+\delta_t=\mathrm{clip}(S_a\delta_{cmd,t}+S_b,-0.55,0.55).
 ```
 
 현재 residual checkpoint는 `kinematic_no_slip=true`, 즉 `beta=0` 조건으로
@@ -186,11 +186,11 @@ MPPI 한 step의 상태와 action은 다음과 같다.
 
 ```math
 \begin{aligned}
-v^+ &= \operatorname{clip}(v_x+a\Delta t,v_{min},v_{max}),\\
+v^+ &= \mathrm{clip}(v_x+a\Delta t,v_{min},v_{max}),\\
 r_c^+ &= \frac{v_x\tan\delta}{l_f+l_r},\\
 x_c^+ &= x+v_x\cos\psi\,\Delta t,\\
 y_c^+ &= y+v_x\sin\psi\,\Delta t,\\
-\psi_c^+ &= \operatorname{wrap}(\psi+r_c^+\Delta t),\\
+\psi_c^+ &= \mathrm{wrap}(\psi+r_c^+\Delta t),\\
 v_{x,c}^+ &= v^+,\qquad v_{y,c}^+=0.
 \end{aligned}
 ```
@@ -216,7 +216,7 @@ v_{x,c}^+,v_{y,c}^+,r_c^+,
 여기서 각 과거 입력은 `u=[delta_cmd, v_cmd]`이고,
 
 ```math
-v_{cmd}=\operatorname{clip}(v_x+a\Delta t,v_{min},v_{max})
+v_{cmd}=\mathrm{clip}(v_x+a\Delta t,v_{min},v_{max})
 ```
 
 이다. 따라서 현재 command 2차원, 과거 5개 command 10차원을 사용한다. IMU는 pose
@@ -228,8 +228,8 @@ v_{cmd}=\operatorname{clip}(v_x+a\Delta t,v_{min},v_{max})
 ```math
 \begin{aligned}
 \tilde{\mathbf z}_t&=(\mathbf z_t-\boldsymbol\mu)/\boldsymbol\sigma,\\
-\mathbf h_1&=\operatorname{SiLU}(W_1\tilde{\mathbf z}_t+b_1), &&21\rightarrow64,\\
-\mathbf h_2&=\operatorname{SiLU}(W_2\mathbf h_1+b_2), &&64\rightarrow32,\\
+\mathbf h_1&=\mathrm{SiLU}(W_1\tilde{\mathbf z}_t+b_1), &&21\rightarrow64,\\
+\mathbf h_2&=\mathrm{SiLU}(W_2\mathbf h_1+b_2), &&64\rightarrow32,\\
 \Delta\mathbf a&=[8,8,30]\odot\tanh(W_3\mathbf h_2+b_3), &&32\rightarrow3.
 \end{aligned}
 ```

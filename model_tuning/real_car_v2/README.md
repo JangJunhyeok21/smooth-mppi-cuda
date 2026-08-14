@@ -83,29 +83,43 @@ The model recursively carries applied steering `delta_k` and speed reference
 every CUDA rollout:
 
 ```math
-\begin{aligned}
-\delta_k^{target}
-&=\mathrm{clip}(S_\delta\delta_{cmd,k}+b_\delta,
-                      -\delta_{max},\delta_{max}),\\
-\dot\delta_k
-&=\mathrm{clip}\left(
-  \frac{\delta_k^{target}-\delta_{k-1}}{\tau_\delta},
-  -\dot\delta_{max},\dot\delta_{max}\right),\\
-\delta_k
-&=\mathrm{clip}(\delta_{k-1}+\dot\delta_k\Delta t,
-                      -\delta_{max},\delta_{max}),\\
-\tau_v&=\tau_{accel}\quad(v_{cmd,k}\ge v_{ref,k-1}),\\
-\tau_v&=\tau_{brake}\quad(v_{cmd,k}<v_{ref,k-1}),\\
-\dot v_{ref,k}
-&=\mathrm{clip}\left(
+\delta_k^{target}=\mathrm{clip}(S_\delta\delta_{cmd,k}+b_\delta,
+-\delta_{max},\delta_{max})
+```
+
+```math
+\dot\delta_k=\mathrm{clip}\left(
+\frac{\delta_k^{target}-\delta_{k-1}}{\tau_\delta},
+-\dot\delta_{max},\dot\delta_{max}\right)
+```
+
+```math
+\delta_k=\mathrm{clip}(\delta_{k-1}+\dot\delta_k\Delta t,
+-\delta_{max},\delta_{max})
+```
+
+```math
+\tau_v=\tau_{accel}\quad(v_{cmd,k}\ge v_{ref,k-1})
+```
+
+```math
+\tau_v=\tau_{brake}\quad(v_{cmd,k}<v_{ref,k-1})
+```
+
+```math
+\dot v_{ref,k}=\mathrm{clip}\left(
 \frac{v_{cmd,k}-v_{ref,k-1}}{\tau_v},
--\dot v_{ref,max},\dot v_{ref,max}\right),\\
-v_{ref,k}&=v_{ref,k-1}+\dot v_{ref,k}\Delta t,\\
-a_{x,k}^{base}
-&=\mathrm{clip}\left(
+-\dot v_{ref,max},\dot v_{ref,max}\right)
+```
+
+```math
+v_{ref,k}=v_{ref,k-1}+\dot v_{ref,k}\Delta t
+```
+
+```math
+a_{x,k}^{base}=\mathrm{clip}\left(
 K_v\left(v_{ref,k}-\sqrt{v_{x,k}^2+v_{y,k}^2}\right),
-a_{min},a_{max}\right).
-\end{aligned}
+a_{min},a_{max}\right)
 ```
 
 #### Classic Pacejka dynamic model

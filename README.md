@@ -3,6 +3,10 @@
 F1TENTH 자율주행을 위한 CUDA 가속 MPPI(Model Predictive Path Integral) 컨트롤러.  
 NVIDIA GPU에서 대규모 병렬 샘플링으로 실시간 궤적을 최적화하고 조향/가속 명령을 출력한다.
 
+현재 실차용 `dynamic_40ms_yaw_preserved_stage2` 모델의 한 명령 학습·평가·배포 절차는
+[`model_tuning/real_car_v2/README.md`](model_tuning/real_car_v2/README.md)의
+"Recommended model" 절을 따른다.
+
 ---
 
 ## 알고리즘 개요

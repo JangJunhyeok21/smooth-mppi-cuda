@@ -3,7 +3,7 @@
 import argparse,json,sys
 from pathlib import Path
 import numpy as np,yaml
-ROOT=Path(__file__).resolve().parents[2];HERE=Path(__file__).resolve().parent;sys.path.insert(0,str(HERE));from contract import Contract,actuator_step,longitudinal_actuator_step,low_speed_gate
+ROOT=Path(__file__).resolve().parents[2];HERE=Path(__file__).resolve().parent;sys.path.insert(0,str(HERE));from contract import Contract,actuator_step,longitudinal_actuator_step,residual_gates
 DATA=ROOT/'model_tuning/data/dynamic_40ms_residual.npz';PARAMS=ROOT/'model_tuning/results/dynamic_40ms_regression/params.json'
 # User-editable defaults. Optional CLI arguments remain available for bag-by-bag diagnostics.
 RESULT_PATH=ROOT/'model_tuning/results/dynamic_40ms_recursive_stage2_seed31'
@@ -31,7 +31,7 @@ def main():
     if k>0:hist=np.vstack((hist[1:],c0))
     previous=hist[-2,0];current=state.copy()
     cmd=c0;ap,_=actuator_step(ap,cmd[0],cmd[1],state[0],c);sr,bax=longitudinal_actuator_step(sr,cmd[1],np.hypot(state[0],state[1]),c);vx,vy,r=state;safe=max(abs(vx),.5);af=ap-np.arctan2(vy+lf*r,safe);ar=-np.arctan2(vy-lr*r,safe);bf=fit['B_f']*af;br=fit['B_r']*ar;fyf=fzf*fit['D_f']*np.sin(fit['C_f']*np.arctan(bf));fyr=fzr*fit['D_r']*np.sin(fit['C_r']*np.arctan(br));ay=(fyf*np.cos(ap)+fyr)/m;rd=(lf*fyf*np.cos(ap)-lr*fyr)/iz;state=np.array((vx+(bax+vy*r)*.04,vy+(ay-vx*r)*.04,r+rd*.04))
-    feat=np.r_[current,c0,ap,c0[0]-previous,state,hist.ravel()];res=(np.zeros(3) if a.disable_mlp else net(feat,w)*low_speed_gate(current[0],c));state=state+res*.04;yaw=pose[2];pose=np.array((pose[0]+c.position_speed_scale*(state[0]*np.cos(yaw)-state[1]*np.sin(yaw))*.04,pose[1]+c.position_speed_scale*(state[0]*np.sin(yaw)+state[1]*np.cos(yaw))*.04,yaw+state[2]*.04));trace.append(np.r_[pose,state])
+    feat=np.r_[current,c0,ap,c0[0]-previous,state,hist.ravel()];res=(np.zeros(3) if a.disable_mlp else net(feat,w)*residual_gates(current[0],c));state=state+res*.04;yaw=pose[2];pose=np.array((pose[0]+c.position_speed_scale*(state[0]*np.cos(yaw)-state[1]*np.sin(yaw))*.04,pose[1]+c.position_speed_scale*(state[0]*np.sin(yaw)+state[1]*np.cos(yaw))*.04,yaw+state[2]*.04));trace.append(np.r_[pose,state])
    gt=x[start+2:start+2*H+1:2,:3];gp=np.zeros((H,3))
    for k,q in enumerate(gt):
     oldp=gp[k-1] if k else np.zeros(3);gp[k]=oldp+(c.position_speed_scale*np.array((q[0]*np.cos(oldp[2])-q[1]*np.sin(oldp[2]),q[0]*np.sin(oldp[2])+q[1]*np.cos(oldp[2]),0))*.04);gp[k,2]=oldp[2]+q[2]*.04

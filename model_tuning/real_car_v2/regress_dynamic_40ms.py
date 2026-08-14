@@ -4,7 +4,10 @@ from pathlib import Path
 import json,numpy as np,yaml
 from scipy.optimize import differential_evolution,least_squares
 ROOT=Path(__file__).resolve().parents[2];DATA=ROOT/'model_tuning/data/dynamic_40ms_all_drive_source_20ms.npz';OUT=ROOT/'model_tuning/results/dynamic_40ms_regression';SEED=31;H=25;MAX_PER_BAG=180
-BOUNDS=np.array(((.2,15.),(.15,2.8),(.2,15.),(.15,2.8)));C=1.3;E=0.
+# B is a shape/stiffness factor, so allow a wider search instead of accepting
+# an artificial B=15 boundary solution. D remains bounded because it scales
+# peak lateral force and must not grow merely to compensate for observability.
+BOUNDS=np.array(((.2,30.),(.15,2.8),(.2,30.),(.15,2.8)));C=1.3;E=0.
 def expand(p):return np.array((p[0],C,p[1],E,p[2],C,p[3],E))
 def starts(d,split):
  x,b,s,v=d['features'],d['bag_id'],d['split'],d['valid'];q=[]
@@ -31,5 +34,5 @@ def residual(p,d,st,cfg,reg=True):
 def metrics(p,d,st,cfg):
  pr,gt=rollout(p,d,st,cfg);e=abs(pr[:,-1]-gt[:,-1]);pe=np.linalg.norm(rel(pr,float(cfg['kinematic_position_speed_scale']))[:,-1,:2]-rel(gt,float(cfg['kinematic_position_speed_scale']))[:,-1,:2],axis=1);return {'windows':len(st),'state_mae':e.mean(0).tolist(),'state_p95':np.quantile(e,.95,axis=0).tolist(),'trajectory_mean_m':float(pe.mean()),'trajectory_p95_m':float(np.quantile(pe,.95))}
 def main():
- OUT.mkdir(parents=True,exist_ok=True);d=np.load(DATA);cfg=yaml.safe_load((ROOT/'config/params.yaml').read_text())['/**']['ros__parameters'];tr,va,te=(starts(d,i) for i in range(3));old=np.array((3.879070152566808,.0710062229162444,2.321287285513187,.05906540313616536));cost=lambda p:np.mean(np.minimum(abs(residual(p,d,tr,cfg)),.3)**2);de=differential_evolution(cost,BOUNDS,seed=SEED,popsize=8,maxiter=40,tol=8e-4,polish=False);ls=least_squares(lambda p:residual(p,d,tr,cfg),de.x,bounds=(BOUNDS[:,0],BOUNDS[:,1]),loss='soft_l1',f_scale=.3,max_nfev=220,verbose=1);fit=ls.x;report={'model_dt':.04,'control_substep_dt':.02,'parameter_names':['B_f','D_f','B_r','D_r'],'expanded_fitted':dict(zip(('B_f','C_f','D_f','E_f','B_r','C_r','D_r','E_r'),expand(fit).tolist())),'old':{n:metrics(old,d,q,cfg) for n,q in zip(('train','validation','test'),(tr,va,te))},'fitted':{n:metrics(fit,d,q,cfg) for n,q in zip(('train','validation','test'),(tr,va,te))}};(OUT/'params.json').write_text(json.dumps(report,indent=2)+'\n');print(json.dumps(report,indent=2))
+ OUT.mkdir(parents=True,exist_ok=True);d=np.load(DATA);cfg=yaml.safe_load((ROOT/'config/params.yaml').read_text())['/**']['ros__parameters'];tr,va,te=(starts(d,i) for i in range(3));old=np.array((3.879070152566808,.0710062229162444,2.321287285513187,.05906540313616536));cost=lambda p:np.mean(np.minimum(abs(residual(p,d,tr,cfg)),.3)**2);de=differential_evolution(cost,BOUNDS,seed=SEED,popsize=8,maxiter=40,tol=8e-4,polish=False);ls=least_squares(lambda p:residual(p,d,tr,cfg),de.x,bounds=(BOUNDS[:,0],BOUNDS[:,1]),loss='soft_l1',f_scale=.3,max_nfev=220,verbose=1);fit=ls.x;tol=.01*(BOUNDS[:,1]-BOUNDS[:,0]);boundary={n:bool(abs(v-lo)<=t or abs(hi-v)<=t) for n,v,(lo,hi),t in zip(('B_f','D_f','B_r','D_r'),fit,BOUNDS,tol)};report={'model_dt':.04,'integration':'single Euler step at 0.04 s','parameter_names':['B_f','D_f','B_r','D_r'],'expanded_fitted':dict(zip(('B_f','C_f','D_f','E_f','B_r','C_r','D_r','E_r'),expand(fit).tolist())),'boundary_solution':boundary,'deployment_gate_passed':not any(boundary.values()),'old':{n:metrics(old,d,q,cfg) for n,q in zip(('train','validation','test'),(tr,va,te))},'fitted':{n:metrics(fit,d,q,cfg) for n,q in zip(('train','validation','test'),(tr,va,te))}};(OUT/'params.json').write_text(json.dumps(report,indent=2)+'\n');print(json.dumps(report,indent=2))
 if __name__=='__main__':main()

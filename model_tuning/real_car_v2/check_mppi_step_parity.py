@@ -1,69 +1,37 @@
 #!/usr/bin/env python3
-"""Compare the training step with the exact CUDA MPPI device step.
-
-Run after colcon build on a CUDA-visible machine. The CUDA executable calls
-update_dynamic_mlp_residual itself; this script independently evaluates the
-training PyTorch model and compares the complete next state/history.
-"""
+"""Verify exact 1-step and 30-step Python/CUDA parity for the 40 ms lag model."""
 from pathlib import Path
-import json, subprocess, sys
-import numpy as np
-import torch
-
+import json,subprocess,sys
+import numpy as np,yaml
 HERE=Path(__file__).resolve().parent;ROOT=HERE.parents[1];sys.path.insert(0,str(HERE))
-from train import Net
-RESULT=ROOT/"model_tuning/results/real_car_v2_dynamic_residual_all6_seed31"
-CUDA_EXE=ROOT/"build/smppi_cuda_controller/mppi_step_parity"
+from contract import Contract,actuator_step,longitudinal_actuator_step,residual_gates
 
-def training_step():
-    dt=np.float64(.02);mass=3.74;lf=.163;lr=.161;wheelbase=lf+lr
-    state=np.array([1.,-.5,.3,2.2,.15,-.4,.2,-.1,np.arctan2(.15,2.2)])
-    steer_cmd,speed_cmd=.25,min(2.0,3.5)
-    history=np.array([-.10,2.,-.05,2.2,0.,2.5,.08,2.8,.12,3.,.07,2.])
-    target=np.clip(.50927964*steer_cmd+.01015773,-.55,.55)
-    steer_rate=np.clip((target-history[10])/.15514851356820727,-.8344090950084138,.8344090950084138)
-    steer=np.clip(history[10]+steer_rate*dt,-.55,.55)
-    tau=.04 if speed_cmd>=history[11] else .02
-    ref_rate=np.clip((speed_cmd-history[11])/tau,-8.,8.)
-    speed_ref=history[11]+ref_rate*dt
-    current_speed=np.hypot(state[3],state[4])
-    base_ax=np.clip(.7616888694734905*(speed_ref-current_speed),-1.,1.)
-    safe=max(abs(state[3]),.5)
-    af=steer-np.arctan2(state[4]+lf*state[5],safe);ar=-np.arctan2(state[4]-lr*state[5],safe)
-    fzf=mass*9.81*lr/wheelbase;fzr=mass*9.81*lf/wheelbase
-    def force(fz,B,C,D,E,a):
-        ba=B*a;return fz*D*np.sin(C*np.arctan(ba-E*(ba-np.arctan(ba))))
-    fyf=force(fzf,3.879070152566808,1.6471076687680233,.0710062229162444,-1.,af)
-    fyr=force(fzr,2.321287285513187,1.9234527357451916,.05906540313616536,-1.,ar)
-    base_ay=(fyf*np.cos(steer)+fyr)/mass
-    base_rdot=(lf*fyf*np.cos(steer)-lr*fyr)/.04712
-    base=np.array([state[3]+(base_ax+state[4]*state[5])*dt,
-                   state[4]+(base_ay-state[3]*state[5])*dt,
-                   state[5]+base_rdot*dt])
-    feature=np.r_[state[3:6],steer_cmd,speed_cmd,steer,steer_cmd-history[8],base,history[:10]].astype(np.float32)
-    blob=np.fromfile(RESULT/"dynamic_residual_v2.bin",dtype="<f4");mean,std=blob[-40:-20],blob[-20:]
-    model=Net();model.load_state_dict(torch.load(RESULT/"model.pt",map_location="cpu",weights_only=True));model.eval()
-    with torch.no_grad(): residual=model(torch.from_numpy((feature-mean)/std)).numpy().astype(float)
-    residual=np.clip(residual,[-8,-8,-30],[8,8,30])/(1+np.exp(-(abs(state[3])-.8)/.2))
-    next_body=base+residual*dt
-    next_speed=np.hypot(next_body[0],next_body[1]);beta=np.arctan2(next_body[1],next_body[0])
-    out=np.array([state[0]+.8633491306389823*next_speed*np.cos(state[2]+beta)*dt,
-      state[1]+.8633491306389823*next_speed*np.sin(state[2]+beta)*dt,
-      (state[2]+next_body[2]*dt+np.pi)%(2*np.pi)-np.pi,*next_body,
-      base_ax+residual[0],base_ay+residual[1],beta])
-    next_history=np.r_[history[2:10],steer_cmd,speed_cmd,steer,speed_ref]
-    return np.r_[out,next_history]
+RESULT=ROOT/'model_tuning/results/dynamic_40ms_recursive_stage2_seed31'
+PARAMS=ROOT/'model_tuning/results/dynamic_40ms_regression/params.json'
+CUDA_EXE=ROOT/'build/smppi_cuda_controller/mppi_step_parity'
+STEPS=30;TOLERANCE=2e-5
 
+def load_weights(path):
+ z=np.fromfile(path,dtype='<f4');assert z.size==3563;o=0
+ def take(n):
+  nonlocal o;q=z[o:o+n];o+=n;return q
+ return take(1280).reshape(64,20),take(64),take(2048).reshape(32,64),take(32),take(96).reshape(3,32),take(3),take(20),take(20)
+def infer(feature,w):
+ w1,b1,w2,b2,w3,b3,mean,std=w;h=np.maximum(((feature-mean)/std)@w1.T+b1,0);h=np.maximum(h@w2.T+b2,0);return np.clip(h@w3.T+b3,(-8,-8,-30),(8,8,30))
+def python_rollout(cfg,fit,w):
+ c=Contract(dt=.04,steer_scale=cfg['kinematic_steer_scale'],steer_bias=cfg['kinematic_steer_bias'],steer_tau=cfg['steer_servo_time_constant'],max_steer_rate=cfg['actuator_max_steer_rate'],speed_kp=cfg['speed_servo_kp'],speed_accel_tau=cfg['speed_reference_accel_time_constant'],speed_brake_tau=cfg['speed_reference_brake_time_constant'],max_speed_reference_rate=cfg['actuator_max_speed_reference_rate'],position_speed_scale=cfg['kinematic_position_speed_scale'],min_accel=cfg['min_accel'],max_accel=cfg['max_accel'],low_speed_center=cfg['dynamic_mlp_min_speed'])
+ lf,lr,m,iz=[cfg[q] for q in ('l_f','l_r','mass','dynamic_mlp_I_z')];fzf=m*9.81*lr/(lf+lr);fzr=m*9.81*lf/(lf+lr)
+ state=np.array([1.,-.5,.3,2.2,.15,-.4,.2,-.1,np.arctan2(.15,2.2)]);hist=np.array([-.10,2.,-.05,2.2,0.,2.5,.08,2.8,.12,3.,.07,2.]);rows=[]
+ for k in range(STEPS):
+  steer=.25-.012*k;speed=np.clip(3.5-.025*k,cfg['min_speed'],cfg['max_speed']);previous=hist[8];previous_applied=hist[10];hist[:8]=hist[2:10];hist[8:10]=(steer,speed)
+  applied,_=actuator_step(previous_applied,steer,speed,state[3],c);speed_ref,bax=longitudinal_actuator_step(hist[11],speed,np.hypot(state[3],state[4]),c);vx,vy,r=state[3:6];safe=max(abs(vx),.5);af=applied-np.arctan2(vy+lf*r,safe);ar=-np.arctan2(vy-lr*r,safe)
+  def force(fz,prefix,a):
+   B,C,D,E=(fit[f'{q}_{prefix}'] for q in 'BCDE');ba=B*a;return fz*D*np.sin(C*np.arctan(ba-E*(ba-np.arctan(ba))))
+  fyf=force(fzf,'f',af);fyr=force(fzr,'r',ar);ay=(fyf*np.cos(applied)+fyr)/m;rd=(lf*fyf*np.cos(applied)-lr*fyr)/iz;base=np.array([vx+(bax+vy*r)*.04,vy+(ay-vx*r)*.04,r+rd*.04]);feature=np.r_[state[3:6],steer,speed,applied,steer-previous,base,hist[:10]].astype(np.float32);res=infer(feature,w)*residual_gates(vx,c);body=base+res*.04
+  beta=np.arctan2(body[1],body[0]);ns=np.empty(9);ns[3:6]=body;ns[6:8]=(bax+res[0],ay+res[1]);ns[8]=beta;ns[0]=state[0]+c.position_speed_scale*np.hypot(*body[:2])*np.cos(state[2]+beta)*.04;ns[1]=state[1]+c.position_speed_scale*np.hypot(*body[:2])*np.sin(state[2]+beta)*.04;ns[2]=(state[2]+body[2]*.04+np.pi)%(2*np.pi)-np.pi;hist[10:12]=(applied,speed_ref);state=ns;rows.append(np.r_[state,hist])
+ return np.asarray(rows)
 def main():
-    expected=training_step()
-    run=subprocess.run([str(CUDA_EXE),str(RESULT/"dynamic_residual_v2.bin"),"lag"],text=True,capture_output=True)
-    if run.returncode:
-        print(json.dumps({"status":"CUDA_NOT_RUN","returncode":run.returncode,"stderr":run.stderr.strip(),
-                          "training_step":expected.tolist()},indent=2));raise SystemExit(run.returncode)
-    actual=np.fromstring(run.stdout,sep=" ")
-    error=np.abs(actual-expected)
-    report={"status":"PASS" if error.max()<2e-5 else "FAIL","values":int(len(actual)),
-            "max_abs_error":float(error.max()),"mean_abs_error":float(error.mean()),
-            "training_step":expected.tolist(),"mppi_cuda_step":actual.tolist()}
-    print(json.dumps(report,indent=2));raise SystemExit(0 if report["status"]=="PASS" else 1)
-if __name__=="__main__":main()
+ cfg=yaml.safe_load((ROOT/'config/params.yaml').read_text())['/**']['ros__parameters'];fit=json.loads(PARAMS.read_text())['expanded_fitted'];binary=RESULT/'dynamic_40ms_residual.bin';expected=python_rollout(cfg,fit,load_weights(binary));args=[str(CUDA_EXE),str(binary),str(STEPS),*[str(fit[f'{q}_{a}']) for a in ('f','r') for q in 'BCDE'],str(cfg['dynamic_mlp_I_z']),str(cfg['min_speed']),str(cfg['max_speed'])];run=subprocess.run(args,text=True,capture_output=True)
+ if run.returncode:print(json.dumps({'status':'CUDA_NOT_RUN','returncode':run.returncode,'stderr':run.stderr.strip(),'fixture_contract':'40ms_lag'},indent=2));raise SystemExit(run.returncode)
+ actual=np.loadtxt(run.stdout.splitlines());error=np.abs(actual-expected);report={'status':'PASS' if error.max()<TOLERANCE else 'FAIL','fixture_contract':'40ms_lag','steps':STEPS,'one_step_max_abs_error':float(error[0].max()),'thirty_step_max_abs_error':float(error.max()),'mean_abs_error':float(error.mean()),'tolerance':TOLERANCE};print(json.dumps(report,indent=2));raise SystemExit(0 if report['status']=='PASS' else 1)
+if __name__=='__main__':main()

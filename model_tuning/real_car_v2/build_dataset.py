@@ -48,7 +48,9 @@ def main():
     # The new 4 m/s aggressive runs are never shown to the optimizer.  The
     # speed30 session and an older independent bag form validation; all other
     # collision-cleaned /drive sessions are training data.
-    test_names={"aggressive_boundary_run1.npz","aggressive_boundary_run2.npz"}
+    # One aggressive run supplies the otherwise missing 3--4 m/s yaw-recovery
+    # excitation; the second run remains strictly unseen for honest testing.
+    test_names={"aggressive_boundary_run2.npz"}
     val_names={"effective_speed30_run1.npz","rosbag2_2026_08_08-16_54_33.npz"}
     for source_id,path in enumerate(files):
         z=np.load(path);a=z["samples"].astype(float);names={str(x):i for i,x in enumerate(z["columns"])};dt=float(z["dt"])
@@ -97,7 +99,10 @@ def main():
             feat=np.c_[vx,vy,r,steer_cmd,speed_cmd,applied,steer_cmd-np.r_[steer_cmd[0],steer_cmd[:-1]],base_next_vx,base_next_vy,base_next_r,history]
             ok=np.isfinite(feat).all(1)&np.isfinite(target).all(1)&(np.arange(n)>=5)&(abs(vx)<=6)&(abs(vy)<=2)&(abs(r)<=5)&(abs(imu_ax)<=15)&(abs(imu_ay)<=15)&(abs(gt_rdot)<=40)
             split=2 if path.name in test_names else 1 if path.name in val_names else 0
-            features.append(feat.astype(np.float32));targets.append(target.astype(np.float32));valids.append(ok);bag_ids.append(np.full(n,source_id));split_ids.append(np.full(n,split));manifest.append({"bag_id":source_id,"source":str(path),"segment":int(local),"split":("train","val","test")[split],"samples":n,"valid":int(ok.sum()),"imu_ax_stationary_bias_removed":ax_bias,"command_topic":str(z["command_topic"])});next_bag+=1
+            # Every discontinuous segment needs its own id. Reusing source_id
+            # made recursive windows cross localization/collision cuts.
+            bag_id=next_bag
+            features.append(feat.astype(np.float32));targets.append(target.astype(np.float32));valids.append(ok);bag_ids.append(np.full(n,bag_id));split_ids.append(np.full(n,split));manifest.append({"bag_id":bag_id,"source":str(path),"segment":int(local),"split":("train","val","test")[split],"samples":n,"valid":int(ok.sum()),"imu_ax_stationary_bias_removed":ax_bias,"command_topic":str(z["command_topic"])});next_bag+=1
     X=np.concatenate(features);Y=np.concatenate(targets);B=np.concatenate(bag_ids);S=np.concatenate(split_ids);V=np.concatenate(valids)
     assert X.shape[1]==20 and tuple(FEATURES)==("vx","vy","yaw_rate","steer_cmd","speed_cmd","applied_steer","steer_cmd_delta","base_next_vx","base_next_vy","base_next_yaw_rate","steer_t-4","speed_t-4","steer_t-3","speed_t-3","steer_t-2","speed_t-2","steer_t-1","speed_t-1","steer_t","speed_t")
     np.savez_compressed(OUTPUT,features=X,targets=Y,bag_id=B,split=S,valid=V,feature_names=np.array(FEATURES),target_names=np.array(OUTPUTS),dt=c.dt)

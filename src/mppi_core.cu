@@ -542,7 +542,12 @@ namespace mppi
         // this is identical to real_car_v2/contract.py::low_speed_gate.
         const float low_speed_gate = 1.0f / (1.0f + expf(
             -(fabsf(current_state.v) - params.dynamic_mlp_min_speed) / 0.2f));
-        for (int i = 0; i < 3; ++i) residual_derivatives[i] *= low_speed_gate;
+        // Longitudinal acceleration remains observable at standstill. Gating
+        // delta_ax made 0 -> 2.5 m/s launches structurally impossible because
+        // the classic acceleration is capped at 1 m/s^2. Only the poorly
+        // observable lateral and yaw residuals are suppressed at low speed.
+        residual_derivatives[1] *= low_speed_gate;
+        residual_derivatives[2] *= low_speed_gate;
 
         State next_state = current_state;
         next_state.v = classic_next_longitudinal_velocity

@@ -7,9 +7,9 @@ import matplotlib.pyplot as plt
 
 ROOT = Path(__file__).resolve().parents[2]
 RESULT = ROOT / "model_tuning/results/effective_vs_dynamic_0813"
-COMPARED_SUFFIX = "yawrate_dense"
-COMPARED_LABEL = "Dynamic 40 ms, dense yaw-rate"
-OUTPUT_PREFIX = "effective_vs_yawrate_dense"
+COMPARED_SUFFIX = "latest40"
+COMPARED_LABEL = "Latest 40 ms lag"
+OUTPUT_PREFIX = "effective_vs_latest40"
 RUNS = [
     ("effective_speed20_run2", "speed 2.0"),
     ("effective_speed25_run1", "speed 2.5"),

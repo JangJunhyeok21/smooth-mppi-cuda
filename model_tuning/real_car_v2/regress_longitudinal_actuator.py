@@ -23,9 +23,9 @@ ROLLOUT_STEPS = 50                 # 1.0 s at 50 Hz
 START_STRIDE = 5                   # overlapping causal rollouts
 MAX_ROLLOUTS_PER_SESSION = 800
 RANDOM_SEED = 31
-# Keep False until the fitted candidate also passes full residual-rollout
-# validation. Actuator-only vx improvement does not guarantee safer yaw tails.
-UPDATE_CONFIG = False
+# A fitted candidate is written only when it is interior to the bounds and
+# improves both validation and test MAE. Boundary solutions are non-identifiable.
+UPDATE_CONFIG = True
 SHOW_PLOTS = False
 
 # These are source-session splits, identical to build_dataset.py.
@@ -199,13 +199,21 @@ def main():
         "metrics_fitted": {s: metrics(fitted, sessions, s, cfg) for s in ("train", "validation", "test")},
         "sessions": [{"name": s["name"], "split": s["split"], "rollouts": int(len(s["starts"]))} for s in sessions],
     }
+    margin = 0.01 * (np.array(BOUNDS)[:, 1] - np.array(BOUNDS)[:, 0])
+    boundary = ((fitted-np.array(BOUNDS)[:, 0] <= margin) |
+                (np.array(BOUNDS)[:, 1]-fitted <= margin))
+    gate = (not boundary.any() and
+            report["metrics_fitted"]["validation"]["mae_mps"] < report["metrics_previous"]["validation"]["mae_mps"] and
+            report["metrics_fitted"]["test"]["mae_mps"] < report["metrics_previous"]["test"]["mae_mps"])
+    report["boundary_solution"] = dict(zip(report["parameter_order"], boundary.tolist()))
+    report["deployment_gate_passed"] = bool(gate)
     (OUTPUT_DIR / "regression.json").write_text(json.dumps(report, indent=2) + "\n")
     plot_examples(sessions, old, fitted, cfg)
-    if UPDATE_CONFIG:
+    if UPDATE_CONFIG and gate:
         update_yaml(fitted)
     print(json.dumps(report, indent=2))
     print(f"plot: {OUTPUT_DIR / 'rollout_comparison.png'}")
-    print(f"config updated: {UPDATE_CONFIG}")
+    print(f"config updated: {UPDATE_CONFIG and gate}")
 
 
 if __name__ == "__main__":

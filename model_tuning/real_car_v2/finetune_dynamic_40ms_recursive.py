@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Fully recursive multi-horizon fine-tuning for the 40 ms dynamic residual."""
-import argparse,json,sys
+import argparse,json,os,sys
 from pathlib import Path
 import numpy as np,torch,yaml
 from torch import nn
@@ -20,6 +20,13 @@ DENSE_YAW_RATE_LOSS_WEIGHT=4.0
 DENSE_YAW_LOSS_WEIGHT=0.0
 EARLY_YAW_EXTRA_WEIGHT=3.0
 EARLY_YAW_DECAY_SECONDS=0.20
+TAIL_CVAR_FRACTION=0.0
+TAIL_CVAR_WEIGHT=0.0
+HIGH_SPEED_SAMPLE_WEIGHT=1.0
+YAW_RECOVERY_SAMPLE_WEIGHT=1.0
+# Compatibility switch used to reconstruct the high-speed yaw checkpoint
+# before fitting a separate low-speed longitudinal head.
+GATE_AX_RESIDUAL=os.environ.get('GATE_AX_RESIDUAL','0')=='1'
 def load_norm(path):z=np.fromfile(path,dtype='<f4');return z[-40:-20].copy(),z[-20:].copy()
 def starts(x,b,s,v,split):return np.array([i for i in range(10,len(x)-60) if s[i]==split and s[i+60]==split and v[i:i+61].all() and np.all(b[i:i+61]==b[i]) and np.max(np.linalg.norm(x[i+1:i+61,:3]-x[i:i+60,:3],axis=1))<2])
 def main():
@@ -31,11 +38,11 @@ def main():
    if k>0:hist=torch.cat((hist[:,1:],c0[:,None]),1)
    current=state;previous=hist[:,-2,0]
    cmd=c0;target=torch.clamp(scale*cmd[:,0]+bias,-.55,.55);ap=torch.clamp(ap+torch.clamp((target-ap)/stau,-srate,srate)*.04,-.55,.55);tau=torch.where(cmd[:,1]>=sr,ata,atb);sr=sr+torch.clamp((cmd[:,1]-sr)/tau,-rrate,rrate)*.04;vx,vy,r=state.unbind(1);bax=torch.clamp(kp*(sr-torch.hypot(vx,vy)),amin,amax);safe=torch.clamp(torch.abs(vx),min=.5);af=ap-torch.atan2(vy+lf*r,safe);ar=-torch.atan2(vy-lr*r,safe);bf=fit['B_f']*af;br=fit['B_r']*ar;fyf=fzf*fit['D_f']*torch.sin(fit['C_f']*torch.atan(bf));fyr=fzr*fit['D_r']*torch.sin(fit['C_r']*torch.atan(br));ay=(fyf*torch.cos(ap)+fyr)/m;rd=(lf*fyf*torch.cos(ap)-lr*fyr)/iz;state=torch.stack((vx+(bax+vy*r)*.04,vy+(ay-vx*r)*.04,r+rd*.04),1)
-   feat=torch.cat((current,c0,ap[:,None],(c0[:,0]-previous)[:,None],state,hist.reshape(len(ids),-1)),1);res=torch.clamp(net((feat-mean)/std),torch.tensor((-8.,-8.,-30.),device=dev),torch.tensor((8.,8.,30.),device=dev));gate=torch.sigmoid((torch.abs(current[:,0])-low)/.2);state=state+res*gate[:,None]*.04;yaw=pose[:,2];pose=torch.stack((pose[:,0]+pscale*(state[:,0]*torch.cos(yaw)-state[:,1]*torch.sin(yaw))*.04,pose[:,1]+pscale*(state[:,0]*torch.sin(yaw)+state[:,1]*torch.cos(yaw))*.04,yaw+state[:,2]*.04),1);resall.append(res)
+   feat=torch.cat((current,c0,ap[:,None],(c0[:,0]-previous)[:,None],state,hist.reshape(len(ids),-1)),1);res=torch.clamp(net((feat-mean)/std),torch.tensor((-8.,-8.,-30.),device=dev),torch.tensor((8.,8.,30.),device=dev));lateral_gate=torch.sigmoid((torch.abs(current[:,0])-low)/.2);ax_gate=lateral_gate if GATE_AX_RESIDUAL else torch.ones_like(lateral_gate);gates=torch.stack((ax_gate,lateral_gate,lateral_gate),1);state=state+res*gates*.04;yaw=pose[:,2];pose=torch.stack((pose[:,0]+pscale*(state[:,0]*torch.cos(yaw)-state[:,1]*torch.sin(yaw))*.04,pose[:,1]+pscale*(state[:,0]*torch.sin(yaw)+state[:,1]*torch.cos(yaw))*.04,yaw+state[:,2]*.04),1);resall.append(res)
    state_trace.append(state);pose_trace.append(pose)
    if k+1 in HORIZONS:outs[k+1]=(state,pose,X[q+2*(k+1),:3])
   return outs,torch.stack(resall,1),torch.stack(state_trace,1),torch.stack(pose_trace,1)
- def loss(ids):
+ def loss(ids,return_per_window=False):
   out,res,predicted_states,predicted_poses=rollout(ids);total=0
   for h,w in zip(HORIZONS,(.5,.8,1.3,2.)):
    state,pose,gt=out[h];se=nn.functional.smooth_l1_loss(state,gt,reduction='none')*torch.tensor(STATE_WEIGHTS,device=dev);gp=torch.zeros_like(pose);gstate=X[torch.as_tensor(ids,device=dev)[:,None]+2*torch.arange(1,h+1,device=dev)[None],:3]
@@ -46,17 +53,32 @@ def main():
   gt_states=X[ids_tensor[:,None]+offsets[None],:3]
   times=.04*torch.arange(1,31,device=dev,dtype=predicted_states.dtype);early_weight=1.0+EARLY_YAW_EXTRA_WEIGHT*torch.exp(-times/EARLY_YAW_DECAY_SECONDS)
   yaw_rate_error=nn.functional.smooth_l1_loss(predicted_states[:,:,2],gt_states[:,:,2],reduction='none')
-  dense_yaw_rate=DENSE_YAW_RATE_LOSS_WEIGHT*(yaw_rate_error*early_weight).mean()
-  return total+dense_yaw_rate+1e-4*(res*res).mean()
+  per_window=(yaw_rate_error*early_weight).mean(1)
+  dense_yaw_rate=DENSE_YAW_RATE_LOSS_WEIGHT*per_window.mean()
+  if TAIL_CVAR_FRACTION>0:
+   count=max(1,int(np.ceil(len(ids)*TAIL_CVAR_FRACTION)))
+   dense_yaw_rate=dense_yaw_rate+TAIL_CVAR_WEIGHT*torch.topk(per_window,count).values.mean()
+  value=total+dense_yaw_rate+1e-4*(res*res).mean()
+  return (value,per_window) if return_per_window else value
  opt=torch.optim.AdamW(net.parameters(),1e-4,weight_decay=1e-5);best=(1e99,None,0);stale=0
+ # Oversample the exact operating regime that caused the Map1 tail failures:
+ # high speed with yaw-rate decay/sign reversal during the following 1.2 s.
+ future_r=x[tr[:,None]+2*np.arange(1,31)[None],2]
+ initial_r=x[tr,2]
+ recovery=(np.abs(initial_r)>.45)&((np.sign(future_r[:,-1])!=np.sign(initial_r))|(np.abs(future_r[:,-1])<.35*np.abs(initial_r)))
+ sample_probability=np.ones(len(tr));sample_probability*=np.where(x[tr,0]>=3.0,HIGH_SPEED_SAMPLE_WEIGHT,1.0);sample_probability*=np.where(recovery,YAW_RECOVERY_SAMPLE_WEIGHT,1.0);sample_probability/=sample_probability.sum()
  for epoch in range(a.epochs):
   net.train();vals=[]
-  for _ in range(24):q=rng.choice(tr,min(48,len(tr)),replace=False);z=loss(q);opt.zero_grad();z.backward();torch.nn.utils.clip_grad_norm_(net.parameters(),1);opt.step();vals.append(float(z))
+  for _ in range(32):q=rng.choice(tr,min(64,len(tr)),replace=True,p=sample_probability);z=loss(q);opt.zero_grad();z.backward();torch.nn.utils.clip_grad_norm_(net.parameters(),1);opt.step();vals.append(float(z))
   net.eval()
-  with torch.no_grad():score=float(np.mean([float(loss(q)) for q in np.array_split(va,max(1,len(va)//64))]))
+  with torch.no_grad():
+   validation_window=[]
+   for q in np.array_split(va,max(1,len(va)//64)):
+    _,per_window=loss(q,True);validation_window.extend(per_window.cpu().numpy())
+   validation_window=np.asarray(validation_window);score=float(validation_window.mean()+2*np.quantile(validation_window,.95))
   print(f'epoch={epoch+1} train={np.mean(vals):.6f} val={score:.6f}',flush=True)
   if score<best[0]-1e-5:best=(score,{k:z.detach().cpu().clone() for k,z in net.state_dict().items()},epoch+1);stale=0
   else:stale+=1
   if stale>=18:break
- net.load_state_dict(best[1]);net.cpu();out=Path(a.out);out.mkdir(parents=True,exist_ok=True);torch.save(net.state_dict(),out/'model.pt');layers=(net.net[0],net.net[2],net.net[4]);blob=np.concatenate([z.detach().numpy().ravel() for layer in layers for z in (layer.weight,layer.bias)]+[mean.cpu().numpy(),std.cpu().numpy()]).astype('<f4');blob.tofile(out/'dynamic_40ms_residual.bin');(out/'metrics.json').write_text(json.dumps({'seed':a.seed,'best_epoch':best[2],'best_recursive_validation_loss':best[0],'train_starts':len(tr),'validation_starts':len(va)},indent=2)+'\n')
+ net.load_state_dict(best[1]);net.cpu();out=Path(a.out);out.mkdir(parents=True,exist_ok=True);torch.save(net.state_dict(),out/'model.pt');layers=(net.net[0],net.net[2],net.net[4]);blob=np.concatenate([z.detach().numpy().ravel() for layer in layers for z in (layer.weight,layer.bias)]+[mean.cpu().numpy(),std.cpu().numpy()]).astype('<f4');blob.tofile(out/'dynamic_40ms_residual.bin');(out/'metrics.json').write_text(json.dumps({'seed':a.seed,'best_epoch':best[2],'best_recursive_validation_tail_score':best[0],'train_starts':len(tr),'validation_starts':len(va),'high_speed_train_windows':int(np.sum(x[tr,0]>=3.0)),'yaw_recovery_train_windows':int(recovery.sum()),'tail_cvar_fraction':TAIL_CVAR_FRACTION,'tail_cvar_weight':TAIL_CVAR_WEIGHT},indent=2)+'\n')
 if __name__=='__main__':main()

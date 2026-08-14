@@ -11,6 +11,7 @@ HERE = Path(__file__).resolve().parent
 PYTHON = sys.executable
 
 RUN_BUILD_COMBINED_DATASET = True
+RUN_ACTUATOR_REGRESSION = True
 RUN_CLASSIC_REGRESSION = True
 RUN_BUILD_RESIDUAL_DATASET = True
 RUN_ONE_STEP_TRAINING = True
@@ -33,6 +34,8 @@ def run(*args):
 def main():
     if RUN_BUILD_COMBINED_DATASET:
         run(HERE / "build_dataset.py")
+    if RUN_ACTUATOR_REGRESSION:
+        run(HERE / "regress_longitudinal_actuator.py")
     if RUN_CLASSIC_REGRESSION:
         run(HERE / "regress_dynamic_40ms.py")
     if RUN_BUILD_RESIDUAL_DATASET:

@@ -9,11 +9,12 @@ import shutil
 ROOT = Path(__file__).resolve().parents[2]
 
 # User-editable deployment settings. No command-line arguments are required.
-RESULT_PATH = ROOT / "model_tuning/results/dynamic_40ms_recursive_stage2_seed31"
+RESULT_PATH = ROOT / "model_tuning/results/dynamic_40ms_yaw_preserved_stage2"
 REGRESSION_PATH = ROOT / "model_tuning/results/dynamic_40ms_regression/params.json"
 YAML_PATH = ROOT / "config/params.yaml"
 RUNTIME_BINARY_PATH = ROOT / "config/dynamic_40ms_residual_servo_lag.bin"
 ACTIVATE_MODEL = True
+ALLOW_BOUNDARY_REGRESSION = True  # explicit real-car deployment selection
 EXPECTED_BINARY_BYTES = 14252
 
 
@@ -35,7 +36,11 @@ def main():
         raise RuntimeError(
             f"invalid CUDA binary size: {source.stat().st_size}, "
             f"expected {EXPECTED_BINARY_BYTES}")
-    regression = json.loads(REGRESSION_PATH.read_text())["expanded_fitted"]
+    regression_report = json.loads(REGRESSION_PATH.read_text())
+    boundary_override = not regression_report.get("deployment_gate_passed", False)
+    if boundary_override and not ALLOW_BOUNDARY_REGRESSION:
+        raise RuntimeError("deployment blocked: classic regression has a boundary solution")
+    regression = regression_report["expanded_fitted"]
     required = ("B_f", "C_f", "D_f", "E_f", "B_r", "C_r", "D_r", "E_r")
     if not all(k in regression for k in required):
         raise RuntimeError("classic regression JSON is incomplete")
@@ -70,6 +75,7 @@ def main():
         "sha256": digest,
         "yaml": str(YAML_PATH),
         "activated": ACTIVATE_MODEL,
+        "boundary_regression_override": boundary_override,
         "updates": updates,
         "rebuild_required": False,
         "restart_node_required": True,

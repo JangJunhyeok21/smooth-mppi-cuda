@@ -49,11 +49,16 @@ def longitudinal_actuator_step(speed_reference, speed_cmd, vx, c=Contract()):
 def low_speed_gate(vx, c=Contract()):
     return 1/(1+np.exp(-(np.abs(vx)-c.low_speed_center)/max(c.low_speed_width,1e-3)))
 
+def residual_gates(vx, c=Contract()):
+    """Ax stays observable at standstill; gate only lateral/yaw residuals."""
+    lateral=low_speed_gate(vx,c)
+    return np.stack((np.ones_like(lateral),lateral,lateral),axis=-1) if np.ndim(lateral) else np.array((1.,lateral,lateral))
+
 def integrate(state, base_accel, residual, c=Contract()):
     """state=[x,y,yaw,vx,vy,r], accelerations use ISO body axes."""
     x,y,yaw,vx,vy,r=np.asarray(state,float)
     bounded=np.clip(np.asarray(residual),[-8.,-8.,-30.],[8.,8.,30.])
-    ax,ay,rdot=np.asarray(base_accel)+low_speed_gate(vx,c)*bounded
+    ax,ay,rdot=np.asarray(base_accel)+residual_gates(vx,c)*bounded
     nvx=vx+(ax+vy*r)*c.dt
     nvy=vy+(ay-vx*r)*c.dt
     nr=r+rdot*c.dt

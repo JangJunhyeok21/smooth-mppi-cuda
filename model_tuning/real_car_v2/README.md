@@ -94,11 +94,8 @@ every CUDA rollout:
 \delta_k
 &=\mathrm{clip}(\delta_{k-1}+\dot\delta_k\Delta t,
                       -\delta_{max},\delta_{max}),\\
-\tau_v
-&=\begin{cases}
-\tau_{accel},&v_{cmd,k}\ge v_{ref,k-1},\\
-\tau_{brake},&v_{cmd,k}<v_{ref,k-1},
-\end{cases}\\
+\tau_v&=\tau_{accel}\quad(v_{cmd,k}\ge v_{ref,k-1}),\\
+\tau_v&=\tau_{brake}\quad(v_{cmd,k}<v_{ref,k-1}),\\
 \dot v_{ref,k}
 &=\mathrm{clip}\left(
 \frac{v_{cmd,k}-v_{ref,k-1}}{\tau_v},

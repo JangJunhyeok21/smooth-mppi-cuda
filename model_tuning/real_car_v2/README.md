@@ -27,6 +27,178 @@ relative trajectory by integrating measured `/odom` `vx`, KF `vy`, and IMU
 yaw-rate. Absolute `/newmcl_pose` remains the reference used to audit the
 extracted real trajectory and localization continuity.
 
+## Model identification before residual training
+
+Two different tire-related identification problems are used. The **linear
+2-state KF** estimates the currently unmeasured lateral velocity. The
+**nonlinear Pacejka dynamic model** predicts future states inside MPPI. KF
+cornering stiffnesses and Pacejka parameters are different quantities and are
+not interchangeable.
+
+### 2-state lateral-velocity Kalman filter
+
+The KF state, input, measurement, and output are
+
+```math
+\mathbf x_k^{KF}=\begin{bmatrix}v_{y,k}&r_k\end{bmatrix}^{T}
+```
+
+```math
+\mathbf u_k^{KF}=\begin{bmatrix}\delta_k&v_{x,k}\end{bmatrix}^{T}
+```
+
+```math
+\mathbf z_k^{KF}=\begin{bmatrix}a_{y,k}^{IMU}&r_k^{IMU}\end{bmatrix}^{T}
+```
+
+```math
+\mathrm{KF\ output}=\begin{bmatrix}\widehat v_{y,k}&\widehat r_k\end{bmatrix}^{T}
+```
+
+This observer uses a linear tire model, not Pacejka:
+
+```math
+F_{yf}=C_f^{KF}\left(\delta-\frac{v_y+l_f r}{v_x^{safe}}\right)
+```
+
+```math
+F_{yr}=C_r^{KF}\left(-\frac{v_y-l_r r}{v_x^{safe}}\right)
+```
+
+```math
+\dot v_y=\frac{F_{yf}+F_{yr}}{m}-v_xr
+```
+
+```math
+\dot r=\frac{l_fF_{yf}-l_rF_{yr}}{I_z}
+```
+
+Here `v_x_safe=max(abs(vx),kf_min_vx)`. The equations form
+`xdot=A(vx)x+B*delta`. Euler prediction and covariance propagation are
+
+```math
+\mathbf x_{k+1}^{-}=(I+A_k\Delta t)\mathbf x_k+B\Delta t\,\delta_k
+```
+
+```math
+P_{k+1}^{-}=A_{d,k}P_kA_{d,k}^{T}+Q
+```
+
+The lateral-acceleration measurement equation is
+
+```math
+a_y=-\frac{C_f^{KF}+C_r^{KF}}{mv_x^{safe}}v_y
++\frac{-l_fC_f^{KF}+l_rC_r^{KF}}{mv_x^{safe}}r
++\frac{C_f^{KF}}{m}\delta
+```
+
+and the second measurement is `r_IMU=r+noise`. The implementation then uses
+the ordinary Kalman innovation, gain, state correction, and covariance
+correction. The deployed scalar C++/Python implementation performs no heap
+allocation and directly inverts the 2-by-2 innovation covariance.
+
+`model_tuning/regress_kf_cornering_stiffness.py` estimates only
+
+```text
+C_f_KF = kf_cornering_stiffness_front [N/rad]
+C_r_KF = kf_cornering_stiffness_rear  [N/rad]
+```
+
+`mass`, `I_z`, `l_f`, `l_r`, steering scale/bias, `Q`, `R`, initial
+covariance, `kf_min_vx`, low-speed threshold, and the `vy` clamp remain fixed
+from `config/params.yaml`.
+
+Offline supervision is constructed as follows:
+
+- `/newmcl_pose` is differentiated per continuous segment and rotated into the
+  body frame to obtain `vy_MCL`;
+- `USE_MCL_YAW_RATE_TARGET=True` uses differentiated MCL yaw as yaw-rate
+  supervision, while `False` uses signed causal-EMA IMU yaw-rate;
+- signed causal-EMA `/imu/data.linear_acceleration.y` supplies `ay`.
+
+Fitting consists of two bounded robust least-squares stages:
+
+1. `equation_fitted` fits `Cf_KF,Cr_KF` to lateral-acceleration and
+   yaw-acceleration residuals of the continuous bicycle equations. This is an
+   initializer, not the deployed result.
+2. `fitted` replays the exact recursive KF predict/correct algorithm and
+   minimizes `vy_KF-vy_MCL` and `r_KF-r_target`. This is the deployable pair.
+
+Both stages use SciPy `least_squares` with `loss="soft_l1"`. Optional
+prediction-only open-loop replay is evaluation only; it does not fit a third
+set of parameters.
+
+Run the KF regression after editing the user settings at the top of the file:
+
+```bash
+python model_tuning/regress_kf_cornering_stiffness.py
+```
+
+The script writes `kf_cornering_stiffness.json`, a predictions NPZ, and a PNG
+under its configured `OUTPUT_PATH`; it does not update YAML automatically. The
+currently deployed values `12.7222491/75.0944752 N/rad` came from
+`model_tuning/results/ifac0807_kf_stiffness_regression`. The current script
+default points to a newer all-ackermann experiment, so its output is not the
+source of those deployed numbers. Select the intended dataset explicitly and
+copy only a validated `fitted` pair into YAML before rebuilding all downstream
+dynamic/residual data.
+
+### 40 ms nonlinear classic dynamic regression
+
+The classic baseline consumes the current body state and command and predicts
+one 40 ms base transition:
+
+```math
+\begin{bmatrix}v_{x,k}&v_{y,k}&r_k\end{bmatrix}^{T},
+\begin{bmatrix}\delta_{cmd,k}&v_{cmd,k}\end{bmatrix}^{T}
+\longrightarrow
+\begin{bmatrix}v_{x,k+1}^{base}&v_{y,k+1}^{base}&r_{k+1}^{base}\end{bmatrix}^{T}
+```
+
+`model_tuning/real_car_v2/regress_dynamic_40ms.py` estimates
+
+```text
+B_f, D_f, B_r, D_r
+```
+
+It fixes `C_f=C_r=1.3` and `E_f=E_r=0`. It also fixes `mass`,
+`dynamic_mlp_I_z`, `l_f`, `l_r`, position-speed scale, steering
+scale/bias/time constant/rate limit, and longitudinal actuator parameters from
+YAML. It therefore does not estimate mass, inertia, servo lag, speed-response
+lag, KF stiffness, or MLP weights.
+
+The objective performs a 1.0 s free rollout (`25 x 0.04 s`) over
+collision-clean train windows and contains:
+
+- time-weighted `vx`, `vy`, and yaw-rate residuals;
+- terminal relative-trajectory displacement residual;
+- weak parameter regularization;
+- yaw-rate second-difference regularization;
+- a penalty against an implausible front/rear stiffness ordering.
+
+Optimization first uses bounded `differential_evolution` to find a global
+candidate and then bounded robust `least_squares(..., loss="soft_l1")`.
+Current parameter bounds are
+
+```text
+0.2 <= B_f,B_r <= 30
+0.15 <= D_f,D_r <= 2.8
+```
+
+Run it with
+
+```bash
+python model_tuning/real_car_v2/regress_dynamic_40ms.py
+```
+
+The result is written to
+`model_tuning/results/dynamic_40ms_regression/params.json`. A parameter within
+1 percent of a bound sets `boundary_solution=true` and fails the automatic
+deployment gate. The current rear solution reaches this gate; deliberate
+deployment records an explicit override. Dynamic regression runs automatically
+before residual target construction in
+`run_yaw_preserved_40ms_pipeline.py`; KF regression currently does not.
+
 ## Recommended model: `dynamic_40ms_yaw_preserved_stage2`
 
 This is the currently selected real-car model. It keeps the high-speed
@@ -282,7 +454,258 @@ python model_tuning/real_car_v2/run_yaw_preserved_40ms_pipeline.py
 
 No CLI arguments are required. The switches at the top of
 `run_yaw_preserved_40ms_pipeline.py` allow completed stages to be skipped.
-With all switches enabled it performs:
+The following subsections describe what each enabled stage actually does. They
+also distinguish raw-bag extraction from `build_dataset.py`: the runner starts
+from previously extracted 20 ms NPZ files and does **not** read rosbag2 storage
+itself.
+
+#### 1. `build_dataset.py`: combine audited 20 ms bag extracts
+
+This stage reads every `*.npz` in these two directories:
+
+- `model_tuning/data/real_car_v2_drive/`
+- `model_tuning/results/effective_vs_dynamic_0813/data/`
+
+The input files must have been created directly from rosbag messages. The
+reconstructed diagnostic file
+`prediction_vs_actual_run12_reconstructed.csv` and anything derived from it are
+explicitly forbidden as training input.
+
+Raw rosbag extraction is performed beforehand by
+`model_tuning/extract_training_data.py`. Its current default observation
+contract is:
+
+| Quantity | Default topic | Extracted value |
+|---|---|---|
+| global pose | `/newmcl_pose` | global `x`, `y`, quaternion-derived yaw |
+| longitudinal observation | `/odom` | `twist.twist.linear.x` as `vx` |
+| command | `/ackermann_cmd` | steering angle, acceleration field, speed command |
+| inertial observation | `/imu/data` | yaw-rate, `ax`, `ay` |
+
+The topic names are configurable at the top of the extractor. In particular,
+`build_dataset.py` does not rename or silently convert `/drive` into
+`/ackermann_cmd`; it preserves each NPZ's `command_topic` in its manifest.
+Therefore all source NPZ files used in one identification run should be
+audited to ensure they contain the intended actuator-facing command. The
+current extractor default is `/ackermann_cmd`, even though some older comments
+and directory names contain the word `drive`.
+
+For each bag, the extractor prefers the message header timestamp and falls back
+to the rosbag record timestamp only when the header stamp is absent or zero. It
+creates a 50 Hz common grid (`dt=0.02 s`) over the interval shared by all four
+topics. Alignment is causal zero-order hold: at time `t`, only the newest
+sample whose timestamp is less than or equal to `t` may be used. No future
+pose, command, odometry, or IMU sample is interpolated into the present. The
+current stale limits are 1.0 s for pose, odometry and command, and 0.05 s for
+IMU.
+
+Collision/reverse recovery is handled before an NPZ reaches this stage. The
+filter uses measured `/odom` body `vx`, not `drive.acceleration`:
+
+1. A reverse-recovery seed is detected when `vx < -0.15 m/s` persists for at
+   least 0.06 s.
+2. The suspected collision interval starts just after the last healthy
+   `vx > 0.7 m/s` sample in the preceding 3 s. If none exists, a conservative
+   0.5 s look-back is used.
+3. Samples remain excluded through the reverse maneuver and are accepted again
+   only after `vx > 0.3 m/s` is sustained for 0.5 s.
+4. Every remaining continuous interval is assigned a separate segment ID, so
+   recursive windows cannot cross a collision cut, timestamp gap, or recovery
+   boundary. The later recursive-window selector also rejects an abnormally
+   large state jump, but the extractor does not currently implement a separate
+   localization-reset detector.
+
+`build_dataset.py` then performs the runtime-equivalent preprocessing. It runs
+the same 2-state lateral KF to obtain `vy` and filtered yaw-rate, applies the
+configured IMU signs and causal EMA, removes only the stationary median bias
+from IMU `ax`, recursively generates applied steering and speed reference, and
+constructs the exact 20 CUDA features. It rejects non-finite rows, the first
+five history rows, and samples outside the implemented sanity limits
+(`|vx|<=6`, `|vy|<=2`, `|r|<=5`, `|ax|,|ay|<=15`, and
+`|yaw_acceleration|<=40` in SI units).
+
+The split is source-session disjoint rather than a random row split:
+
+- `aggressive_boundary_run2.npz`: final test only
+- `effective_speed30_run1.npz` and `rosbag2_2026_08_08-16_54_33.npz`:
+  validation
+- all remaining collision-clean segments: training, including aggressive
+  run1 for otherwise sparse 3--4 m/s excitation
+
+Every continuous segment receives a globally unique `bag_id`. The output is
+`model_tuning/data/dynamic_40ms_all_drive_source_20ms.npz`, accompanied by a
+JSON manifest containing source path, segment, split, valid count, removed IMU
+bias and command topic. Its targets are diagnostic 20 ms derivative residuals;
+the next stage rebuilds the actual 40 ms supervised targets.
+
+#### 2. `regress_dynamic_40ms.py`: identify the classic Pacejka baseline
+
+This stage identifies the nonlinear classic model that the residual MLP will
+correct. Each optimization rollout starts from the observed state
+
+```math
+\boldsymbol{s}_k=
+\begin{bmatrix}v_{x,k}&v_{y,k}&r_k\end{bmatrix}^{\mathsf T}
+```
+
+and receives
+
+```math
+\boldsymbol{u}_k=
+\begin{bmatrix}\delta_{cmd,k}&v_{cmd,k}\end{bmatrix}^{\mathsf T}.
+```
+
+The output of one model knot is the predicted next body state
+`[base_next_vx, base_next_vy, base_next_yaw_rate]`. Although the source data is
+on a 20 ms grid, one MPPI knot is one explicit Euler actuator/physics update at
+`dt=0.04 s`; commands and ground truth are therefore indexed every two source
+rows. The classic regression does not train an MLP and does not use residual
+targets.
+
+The steering actuator first evolves the carried applied-steering state:
+
+```math
+\begin{aligned}
+\delta_k^{target}&=\mathrm{clip}(S_\delta\delta_{cmd,k}+b_\delta,
+                                 -0.55,0.55),\\
+\dot\delta_k&=\mathrm{clip}((\delta_k^{target}-\delta_{k-1})/\tau_\delta,
+                             -\dot\delta_{max},\dot\delta_{max}),\\
+\delta_k&=\mathrm{clip}(\delta_{k-1}+0.04\dot\delta_k,-0.55,0.55).
+\end{aligned}
+```
+
+The carried speed reference is updated using separate acceleration/braking
+time constants and a reference-rate limit. Longitudinal acceleration is
+`clip(K_p(v_ref-hypot(vx,vy)), min_accel, max_accel)`. The lateral forces use
+front and rear slip angles and normalized axle loads:
+
+```math
+\begin{aligned}
+\alpha_f&=\delta_k-\tan^{-1}((v_y+l_f r)/\max(|v_x|,0.5)),\\
+\alpha_r&=-\tan^{-1}((v_y-l_r r)/\max(|v_x|,0.5)),\\
+F_{y,i}&=F_{z,i}D_i\sin(C_i\tan^{-1}(B_i\alpha_i)),\qquad i\in\{f,r\}.
+\end{aligned}
+```
+
+The regression estimates only
+
+```math
+\boldsymbol{\theta}=\begin{bmatrix}B_f&D_f&B_r&D_r\end{bmatrix}^{\mathsf T}.
+```
+
+`C_f=C_r=1.3` and `E_f=E_r=0` are fixed. Mass, yaw inertia, axle distances,
+steering scale/bias/time constant/rate limit, speed-reference dynamics,
+longitudinal gain and acceleration limits are read from `config/params.yaml`
+and are not re-estimated here. The bounds are `0.2<=B_f,B_r<=30` and
+`0.15<=D_f,D_r<=2.8`.
+
+Identification uses collision-clean training segments only. A candidate is
+rolled out freely for 25 knots, or 1.0 s, instead of receiving the measured
+state again at every step. Per bag, at most 180 approximately distributed
+starts are retained, and windows with mean `|vx|<=0.5 m/s` are excluded. The
+objective contains:
+
+- time-increasing open-loop errors in `vx`, `vy`, and yaw-rate, weighted
+  respectively by 0.4, 2.0, and 1.5;
+- terminal relative-position error reconstructed from the predicted body
+  velocities and yaw-rate;
+- weak regularization toward a physically plausible reference parameter set;
+- a yaw-rate second-difference term to discourage oscillatory dynamics;
+- a penalty when the fitted front small-angle lateral gain exceeds the rear
+  gain.
+
+Optimization is performed in two passes. SciPy differential evolution first
+searches globally using a clipped robust cost (`seed=31`, population 8,
+40 iterations). Its solution initializes bounded nonlinear least squares with
+`soft_l1` loss and scale 0.3 for local refinement. The report evaluates the old
+and fitted parameters independently on train, validation and aggressive-test
+rollouts. If any parameter is within 1% of its lower or upper bound,
+`deployment_gate_passed` becomes false because that solution is weakly
+identified; deployment then requires the explicit override currently present
+in `deploy_dynamic_40ms_to_mppi.py`.
+
+The fitted eight-field runtime representation
+`[B_f,C_f,D_f,E_f,B_r,C_r,D_r,E_r]`, boundary status and rollout metrics are
+written to `model_tuning/results/dynamic_40ms_regression/params.json`.
+
+#### 3. `build_dynamic_40ms_dataset.py`: form residual derivative targets
+
+This stage loads the fitted classic parameters and converts consecutive 20 ms
+rows into one 40 ms transition. It reconstructs the applied steering, speed
+reference and classic prediction exactly as the runtime contract does. The
+feature vector contains the current state and command, applied steering,
+command delta, classic next state and five-command history. The target is not
+the full next state or the full acceleration; it is the derivative correction
+
+```math
+\boldsymbol{y}_k=
+(\boldsymbol{s}_{k+1}^{GT}-\boldsymbol{s}_{k+1}^{base})/0.04
+=\begin{bmatrix}\Delta a_x&\Delta a_y&\Delta\dot r\end{bmatrix}^{\mathsf T}.
+```
+
+All three involved 20 ms rows must be valid and belong to the same segment and
+split. The output is `model_tuning/data/dynamic_40ms_residual.npz`.
+
+#### 4. `train_dynamic_40ms.py`: one-step residual MLP training
+
+The network is `20 -> 64 -> 32 -> 3`, with ReLU after both hidden layers. Its
+input is normalized using training-only mean and standard deviation; its
+outputs are `[delta_ax, delta_ay, delta_yaw_accel]`. AdamW minimizes weighted
+Smooth-L1 loss with output weights `[1,2,2]`. Samples above 3 m/s receive four
+times the base probability, while inverse-square-root bag weighting prevents
+long bags from dominating. Validation rows select the checkpoint, with
+50-epoch early stopping. The final layer is converted back to physical output
+units before export, and the binary contains weights, biases, feature mean and
+feature standard deviation in the exact 14252-byte CUDA layout.
+
+#### 5. `finetune_dynamic_40ms_recursive.py`: two free-rollout stages
+
+Stage1 starts from the one-step checkpoint and stage2 starts from stage1. Each
+stage rolls the complete actuator, classic Pacejka and MLP model recursively
+for 30 knots (1.2 s); future predicted states, rather than measured feedback,
+become the next model inputs. Loss is applied at 0.2, 0.4, 0.8 and 1.2 s and
+contains weighted `[vx,vy,r]`, relative position and dense yaw-rate error.
+Yaw-angle loss is intentionally zero because this memoryless residual predicts
+derivatives, while early yaw-rate samples receive an exponentially decaying
+extra weight over approximately the first 0.2 s.
+
+The runner sets `GATE_AX_RESIDUAL=1` for both recursive passes. Consequently
+all three residual heads use the low-speed sigmoid gate during this particular
+fine-tuning reproduction; evaluation/runtime deliberately leave longitudinal
+`delta_ax` ungated while continuing to gate lateral/yaw residuals. Training
+windows are oversampled for high speed and yaw-rate decay/sign-recovery cases,
+and checkpoint selection minimizes validation mean yaw-rate loss plus twice
+its 95th percentile.
+
+#### 6. `evaluate_dynamic_40ms.py`: held-out open-loop evaluation
+
+The stage runs 30-step/1.2 s free-recursive rollouts with the deployed
+normalization, residual clamps and runtime residual gates. It evaluates the
+validation split and the completely unseen aggressive test split, taking
+candidate windows every five source rows. It saves mean, p95 and maximum
+trajectory, yaw, `vx`, `vy`, and yaw-rate errors to JSON, plus predicted and GT
+traces to a companion NPZ. Passing `--disable-mlp` is available for diagnostic
+classic-only evaluation but is not used by the canonical runner.
+
+#### 7. `deploy_dynamic_40ms_to_mppi.py`: validate and activate runtime files
+
+Deployment checks that the learned binary contains exactly 3563 little-endian
+float32 values (14252 bytes), reads the fitted Pacejka JSON and checks its
+boundary gate. It then copies the binary to
+`config/dynamic_40ms_residual_servo_lag.bin`, writes all eight Pacejka values,
+the weight path and `model_dt: 0.04` into `config/params.yaml`, and selects
+`dynamics_model: dynamic_mlp_residual_servo_lag`. These are runtime-loaded
+data, so rebuilding with `colcon build` is unnecessary; the ROS node must be
+restarted.
+
+#### 8. `plot_highspeed_tail_comparison.py`: compare tail behavior
+
+The final plotting stage reads prerecorded held-out aggressive run2 traces for
+the effective model, the older 40 ms lag model and the newly trained model. It
+saves a 1.2 s best/median/worst comparison. This is a visualization of fixed
+held-out traces, not another optimizer step and not a source of training data.
+
+With all switches enabled the runner executes this same sequence:
 
 1. `build_dataset.py`: combine all direct-bag 20 ms NPZ data. Every continuous
    segment receives a unique `bag_id`; aggressive run1 is high-speed training

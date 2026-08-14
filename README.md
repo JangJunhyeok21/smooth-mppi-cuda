@@ -130,9 +130,12 @@ CSV 파일에서 센터라인을 읽어 곡률 기반 속도 프로파일을 계
 
 | 파라미터 | 기본값 |
 |----------|--------|
-| `pose_topic` | `/newmcl_pose` |
-| `velocity_topic` | `/odom` |
-| `drive_topic` | `/drive` |
+| `is_simulation` | `true` |
+| `simulation_odom_topic` | `/ego_racecar/odom` |
+| `simulation_drive_topic` | `/drive` |
+| `real_pose_topic` | `/newmcl_pose` |
+| `real_odom_topic` | `/odom` |
+| `real_drive_topic` | `/drive` |
 | `imu_topic` | `/imu/data` |
 | `path_topic` | `/mppi_target_path` |
 

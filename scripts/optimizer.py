@@ -128,7 +128,7 @@ class MPPIOptimizer(Node):
             "-p", f"q_collision:={q_collision}",
             "-p", f"q_progress:={q_progress}",
             "-p", f"q_escape_vel:={q_escape_vel}",
-            "-p", "use_mcl_pose:=False"            # 시뮬레이터 모드 강제
+            "-p", "is_simulation:=True"            # 시뮬레이터 모드 강제
         ]
         
         self.get_logger().info(f"Run {self.current_run + 1}: q_v={q_v}, lat_g={q_lat_g}, col={q_collision}, progress={q_progress}, escape_vel={q_escape_vel}")

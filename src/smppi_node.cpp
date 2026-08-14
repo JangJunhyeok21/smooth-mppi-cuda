@@ -51,7 +51,10 @@ public:
         if (mppi_params_.dynamics_model == mppi::EFFECTIVE_HISTORY_STATE_RESIDUAL)
             solver_->load_effective_history_state_residual_weights(effective_history_weights_path_);
 
-        drive_pub_ = this->create_publisher<ackermann_msgs::msg::AckermannDriveStamped>(drive_topic_, 10);
+        selected_drive_topic_ = is_simulation_
+            ? simulation_drive_topic_ : real_drive_topic_;
+        drive_pub_ = this->create_publisher<ackermann_msgs::msg::AckermannDriveStamped>(
+            selected_drive_topic_, 10);
         vis_pub_   = this->create_publisher<visualization_msgs::msg::MarkerArray>("/mppi_viz", 50);
         traj_pub_  = this->create_publisher<smppi_cuda_controller::msg::MppiTrajectory>("/mppi_optimal_trajectory", 10);
 
@@ -68,19 +71,19 @@ public:
             "/mppi_right_boundary", qos,
             std::bind(&MPPINode::right_bnd_callback, this, std::placeholders::_1));
 
-        if (use_mcl_pose_) {
+        if (!is_simulation_) {
             // Real car: localization pose is in map frame, while wheel odom
             // supplies body-frame velocity only.
             mcl_pose_sub_ = this->create_subscription<geometry_msgs::msg::PoseStamped>(
-                pose_topic_, 10,
+                real_pose_topic_, 10,
                 std::bind(&MPPINode::mcl_pose_callback, this, std::placeholders::_1));
             velocity_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
-                velocity_topic_, 10,
+                real_odom_topic_, 10,
                 std::bind(&MPPINode::velocity_callback, this, std::placeholders::_1));
         } else {
             // Simulator: pose and twist already share one odometry frame.
             odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
-                odom_topic_, 10,
+                simulation_odom_topic_, 10,
                 std::bind(&MPPINode::odom_callback, this, std::placeholders::_1));
         }
         // The no-IMU rollout neither subscribes to nor waits for IMU.  Keep the
@@ -99,12 +102,12 @@ public:
         timer_ = this->create_wall_timer(
             control_period, std::bind(&MPPINode::timer_callback, this));
 
-        if (use_mcl_pose_) {
+        if (!is_simulation_) {
             RCLCPP_INFO(this->get_logger(), "MPPI Node Started — pose: %s | velocity: %s",
-                        pose_topic_.c_str(), velocity_topic_.c_str());
+                        real_pose_topic_.c_str(), real_odom_topic_.c_str());
         } else {
             RCLCPP_INFO(this->get_logger(), "MPPI Node Started — single odom topic: %s",
-                        odom_topic_.c_str());
+                        simulation_odom_topic_.c_str());
         }
     }
 
@@ -545,17 +548,20 @@ private:
         this->declare_parameter("control_rate_hz", 50.0);
         control_rate_hz_ = this->get_parameter("control_rate_hz").as_double();
 
-        // simulator 기본 토픽
-        this->declare_parameter("odom_topic",   "/ego_racecar/odom");
-        odom_topic_  = this->get_parameter("odom_topic").as_string();
-        this->declare_parameter("use_mcl_pose", false);
-        use_mcl_pose_ = this->get_parameter("use_mcl_pose").as_bool();
-        this->declare_parameter("pose_topic", "/newmcl_pose");
-        pose_topic_ = this->get_parameter("pose_topic").as_string();
-        this->declare_parameter("velocity_topic", "/odom");
-        velocity_topic_ = this->get_parameter("velocity_topic").as_string();
-        this->declare_parameter("drive_topic",  "/drive");
-        drive_topic_ = this->get_parameter("drive_topic").as_string();
+        this->declare_parameter("is_simulation", true);
+        is_simulation_ = this->get_parameter("is_simulation").as_bool();
+        this->declare_parameter("simulation_odom_topic", "/ego_racecar/odom");
+        simulation_odom_topic_ =
+            this->get_parameter("simulation_odom_topic").as_string();
+        this->declare_parameter("simulation_drive_topic", "/drive");
+        simulation_drive_topic_ =
+            this->get_parameter("simulation_drive_topic").as_string();
+        this->declare_parameter("real_pose_topic", "/newmcl_pose");
+        real_pose_topic_ = this->get_parameter("real_pose_topic").as_string();
+        this->declare_parameter("real_odom_topic", "/odom");
+        real_odom_topic_ = this->get_parameter("real_odom_topic").as_string();
+        this->declare_parameter("real_drive_topic", "/drive");
+        real_drive_topic_ = this->get_parameter("real_drive_topic").as_string();
         this->declare_parameter("imu_topic","/imu/data");imu_topic_=this->get_parameter("imu_topic").as_string();
         this->declare_parameter("imu_sync_max_age_s",0.05);
         imu_sync_max_age_s_=this->get_parameter("imu_sync_max_age_s").as_double();
@@ -672,16 +678,17 @@ private:
     }
 
     void timer_callback() {
-        if (use_mcl_pose_) {
+        if (!is_simulation_) {
             if (!pose_received_ || !velocity_received_) {
                 RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
                     "Waiting for pose/velocity (%s, %s)...",
-                    pose_topic_.c_str(), velocity_topic_.c_str());
+                    real_pose_topic_.c_str(), real_odom_topic_.c_str());
                 return;
             }
         } else if (!odom_received_) {
             RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
-                "Waiting for odom (%s)...", odom_topic_.c_str());
+                "Waiting for simulator odom (%s)...",
+                simulation_odom_topic_.c_str());
             return;
         }
         if (!path_received_ || !left_bnd_received_ || !right_bnd_received_) {
@@ -937,13 +944,15 @@ private:
 
     rclcpp::TimerBase::SharedPtr timer_;
 
-    std::string odom_topic_, pose_topic_, velocity_topic_, drive_topic_, path_topic_, imu_topic_, dynamics_model_name_, residual_weights_path_,mlp_weights_path_;
+    std::string simulation_odom_topic_, simulation_drive_topic_;
+    std::string real_pose_topic_, real_odom_topic_, real_drive_topic_;
+    std::string selected_drive_topic_, path_topic_, imu_topic_, dynamics_model_name_, residual_weights_path_,mlp_weights_path_;
     std::string kinematic_noslip_noimu_weights_path_,slip_kinematic_with_imu_weights_path_,dynamic_imu_weights_path_,dynamic_mlp_weights_path_,dynamic_mlp_servo_lag_weights_path_,e2e_weights_path_,effective_history_weights_path_;
     mppi::LateralVelocityKF lateral_velocity_kf_;
     mppi::LateralVelocityKFParams lateral_velocity_kf_params_;
     float kf_steer_scale_{1.1058064699f},kf_steer_bias_{-0.0300696939f},kf_max_steer_{0.4788f};
     bool odom_received_ = false;
-    bool use_mcl_pose_{false}, pose_received_{false}, velocity_received_{false};
+    bool is_simulation_{true}, pose_received_{false}, velocity_received_{false};
     bool has_prev_velocity_{false};
     rclcpp::Time last_velocity_stamp_{0, 0, RCL_ROS_TIME};
     bool has_prev_odom_{false};

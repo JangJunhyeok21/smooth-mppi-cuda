@@ -162,11 +162,13 @@
     dynamic_mlp_I_z: 0.04712
     dynamic_mlp_min_speed: 0.8 # residual sigmoid gate center; no hard model switch
 
-    # --- Topics (공통 키) ---
-    odom_topic: /ego_racecar/odom
-    pose_topic: /newmcl_pose
-    velocity_topic: /odom
-    drive_topic: /drive
+    # --- Runtime environment and topics ---
+    # true : simulator pose + twist come from simulation_odom_topic
+    # false: real_pose_topic supplies map pose and real_odom_topic supplies velocity
+    is_simulation: true
+    simulation_odom_topic: /ego_racecar/odom
+    simulation_drive_topic: /drive
+    real_pose_topic: /newmcl_pose
+    real_odom_topic: /odom
+    real_drive_topic: /drive
     path_topic: /mppi_target_path
-
-    use_mcl_pose: true       # 실차: map pose와 wheel odometry twist 분리

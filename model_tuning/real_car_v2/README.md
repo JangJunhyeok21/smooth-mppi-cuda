@@ -599,6 +599,230 @@ longitudinal gain and acceleration limits are read from `config/params.yaml`
 and are not re-estimated here. The bounds are `0.2<=B_f,B_r<=30` and
 `0.15<=D_f,D_r<=2.8`.
 
+This means `regress_dynamic_40ms.py` alone cannot determine whether those fixed
+actuator and position parameters are correct. They must either be measured,
+identified by a preceding regression, or retained as a separately validated
+configuration. The current YAML is a mixture of those sources:
+
+| YAML parameter | Current value | Provenance |
+|---|---:|---|
+| `kinematic_position_speed_scale` | 0.8633491306 | Fitted by `model_tuning/regress_kinematic_model.py` on `ifac_0808_0810_train_test.npz` using 1.0 s recursive pose/yaw/speed rollouts. The result is in `model_tuning/results/ifac_0808_0810_slip_regression/kinematic_model_regression.json`. |
+| `steer_servo_time_constant` | 0.1551485136 s | Fitted by the same joint kinematic rollout regression. |
+| `actuator_max_steer_rate` | 0.8344090950 rad/s | Fitted by the same joint kinematic rollout regression. |
+| `kinematic_steer_scale` | 0.50927964 | A historical no-servo-lag/effective-model configuration restored in commit `a85a9bc`; it is **not** the fitted scale from the above 0808/0810 regression, which was 1.1330467889. |
+| `kinematic_steer_bias` | 0.01015773 rad | Restored with the same historical configuration; the above regression produced 0.0095019621 rad. |
+| `speed_servo_kp` | 0.7616888695 1/s | Fitted in the older 20 ms dynamic regression stored at `model_tuning/results/ifac_all_ackermann_dynamic_regression_previous_steer/dynamic_params.json`; it was not jointly re-identified by the current 40 ms classic regression. |
+| `speed_reference_accel_time_constant` | 0.04 s | Retained held-out validation setting, not the accepted output of the current longitudinal regression. |
+| `speed_reference_brake_time_constant` | 0.02 s | Retained held-out validation setting. |
+| `actuator_max_speed_reference_rate` | 8.0 m/s² | Retained held-out validation setting. |
+
+There is a separate longitudinal identification script,
+`model_tuning/real_car_v2/regress_longitudinal_actuator.py`. It holds
+`speed_servo_kp` fixed and estimates acceleration time constant, braking time
+constant and reference slew-rate limit from 1.0 s recursive `/odom`-`vx`
+rollouts. Its latest candidate was approximately `[0.002 s, 0.01977 s,
+40.845 m/s²]`, but it reached the acceleration-time lower bound and made test
+MAE slightly worse. Consequently `deployment_gate_passed` was false and the
+YAML retained `[0.04 s, 0.02 s, 8.0 m/s²]`. See
+`model_tuning/results/longitudinal_actuator_regression/regression.json`.
+
+The joint `regress_kinematic_model.py` result also must not be copied only in
+parts without revalidation: steering scale, bias, lag, rate, speed gain and
+position scale are coupled when no physical steering-angle feedback is
+available. The current YAML mixes its fitted lag/rate/position scale with a
+different historical steering scale/bias and dynamic-regression speed gain.
+This combination is known by held-out rollout selection, not by one
+simultaneous identifiable regression.
+
+Therefore the one-command yaw-preserved pipeline currently has the following
+dependency:
+
+```text
+preselected/fixed actuator and position parameters in params.yaml
+    -> regress_dynamic_40ms.py fits only B_f, D_f, B_r, D_r
+    -> residual target generation and MLP training
+```
+
+It does **not** run `regress_kinematic_model.py` or
+`regress_longitudinal_actuator.py`. If the vehicle, steering linkage, VESC
+configuration, surface, command topic or localization scale changes, these
+fixed values must be identified and held-out validated again before running
+the 40 ms Pacejka/residual pipeline. Without steering feedback, steering
+actuator parameters and tire parameters are only jointly identifiable, so an
+independent validation bag is required even when the optimizer converges.
+
+##### How to obtain every fixed parameter when the vehicle changes
+
+Do not estimate every quantity in one unconstrained optimizer. Several terms
+produce nearly the same trajectory change and are not independently observable
+from pose, odometry and IMU alone. Use the following order, freeze each accepted
+group, and rebuild/evaluate every downstream artifact after an accepted change.
+
+###### A. Directly measure geometry, mass and hard limits
+
+| Parameter | Preferred determination method | Regression fallback |
+|---|---|---|
+| `mass` | Weigh the complete race-ready car including battery and sensors. | Do not freely fit it together with tire `D`: lateral force scale and mass strongly compensate. If necessary, search only a narrow measured interval and validate on a separate bag. |
+| `l_f`, `l_r` | Measure each axle to the loaded center of mass and verify that their sum equals wheelbase. | A narrow bounded yaw-response fit is possible, but is weak without steering-angle feedback. Keep wheelbase fixed. |
+| `dynamic_mlp_I_z` | Use CAD mass properties, a bifilar/trifilar pendulum, or a dedicated yaw-inertia experiment. | Fit only inside a narrow prior with tire parameters fixed; otherwise `I_z` and tire yaw moment compensate. |
+| `max_steer`, `min_accel`, `max_accel` | Use hardware travel limits and robust percentiles of collision-free measured response. | Treat these as safety limits, not unconstrained least-squares variables. |
+
+Changing one of these values changes the classic target, so rerun steps 2--8
+of the canonical pipeline. Changing a KF geometry parameter additionally
+requires rebuilding the combined dataset because estimated `vy` changes.
+
+###### B. Position/odometry scale
+
+`kinematic_position_speed_scale` maps integrated `/odom` body velocity to
+displacement in the `/newmcl_pose` map frame. Estimate it on long, mostly
+straight, collision-free intervals:
+
+```math
+S_p^*=\arg\min_{S_p}\sum_j
+\rho\left(S_p\sum_{k\in j}R(\psi_k)
+\begin{bmatrix}v_{x,k}&v_{y,k}\end{bmatrix}^{\mathsf T}\Delta t
+-\left(\boldsymbol p_{j,end}^{MCL}-\boldsymbol p_{j,start}^{MCL}\right)\right).
+```
+
+Set `DATASET_PATH` and `OUTPUT_PATH` at the top, then run:
+
+```bash
+python model_tuning/regress_position_speed_scale.py
+```
+
+The current implementation uses train rows only, 1.0 s windows, robust
+`soft_l1`, pose-jump rejection, and prefers `|steer_cmd|<=0.08 rad` and
+`|yaw_rate|<=0.3 rad/s`. Accept a value only when independent validation/test
+displacement mean and p95 improve. Pacejka or the MLP must not be used to hide
+an incorrect localization/odometry scale.
+
+###### C. Steering command map and actuator dynamics
+
+The preferred experiment uses measured wheel/rack angle or calibrated servo
+feedback. Apply safe step and chirp commands at several speeds, align feedback
+causally, and fit
+
+```math
+\delta^{target}=\mathrm{clip}(S_\delta\delta_{cmd}+b_\delta),
+\qquad
+\dot\delta=\mathrm{clip}((\delta^{target}-\delta)/\tau_\delta,
+                         -\dot\delta_{max},\dot\delta_{max}).
+```
+
+Settled samples identify `kinematic_steer_scale` and
+`kinematic_steer_bias`; transients identify `steer_servo_time_constant` and
+`actuator_max_steer_rate`. Use separate left/right sweeps to detect deadband,
+asymmetry and saturation.
+
+Without steering feedback, use the following only as a diagnostic effective
+command-to-yaw fit:
+
+```bash
+python model_tuning/real_car_v2/identify_steering_actuator_rollout.py \
+  <collision-clean-dataset.npz> \
+  --out model_tuning/results/steering_actuator_rollout.json
+```
+
+It jointly fits steering scale, bias, time constant, rate limit and front/rear
+Pacejka `B,D`. It intentionally does not edit YAML because actuator and tire
+parameters can compensate each other. Reject bound solutions and require
+improvement in both temporal validation and source-session-disjoint bags.
+After selecting a candidate, rerun `regress_dynamic_40ms.py` with its actuator
+values fixed and verify that the tire solution remains inside its bounds.
+
+`model_tuning/regress_kinematic_model.py` estimates the same actuator group
+together with speed gain and position scale, but uses the older slip-kinematic
+equations. Its output is suitable for initialization/comparison, not direct
+copying into the 40 ms dynamic model without held-out dynamic evaluation.
+
+###### D. Longitudinal actuator parameters
+
+Use collision-free sessions containing acceleration, steady-speed and braking
+transients. The fitted response model is
+
+```math
+\begin{aligned}
+\dot v_{ref}&=\mathrm{clip}((v_{cmd}-v_{ref})/\tau_{accel/brake},
+                            -\dot v_{ref,max},\dot v_{ref,max}),\\
+a_x&=\mathrm{clip}(K_p(v_{ref}-\sqrt{v_x^2+v_y^2}),a_{min},a_{max}).
+\end{aligned}
+```
+
+Run the current-contract tool with no arguments:
+
+```bash
+python model_tuning/real_car_v2/regress_longitudinal_actuator.py
+```
+
+It fits `speed_reference_accel_time_constant`,
+`speed_reference_brake_time_constant`, and
+`actuator_max_speed_reference_rate` using 1.0 s recursive `/odom vx` Huber
+loss, while `speed_servo_kp` and acceleration clamps remain fixed. It updates
+YAML only if the candidate is interior to its bounds and improves validation
+and test MAE. A boundary result means the excitation cannot separate time
+constant from rate saturation.
+
+To identify `speed_servo_kp`, first fit it from unsaturated
+speed-error/acceleration pairs with the time constants fixed, or extend the
+search to `[K_p,tau_accel,tau_brake,max_rate]`. The latter requires acceleration
+and braking steps of several amplitudes; otherwise these variables are not
+separately observable. Use `/odom vx` as the response ground truth, never
+command speed.
+
+###### E. KF parameters
+
+First fix IMU axes/signs and steering mapping. Then use
+`regress_kf_cornering_stiffness.py` to estimate the KF `C_f,C_r` as described
+above. Determine the remaining settings as follows:
+
+- `kf_min_vx` is a numerical denominator floor chosen from stability analysis,
+  not tire-regression output.
+- Select `kf_low_speed_threshold` by comparing KF `vy` with offline
+  pose-derived `vy`; use the lowest speed above which the observer is stable.
+  The extractor and node must use the same value.
+- Increase `kf_q_vy`/`kf_q_yaw_rate` if response is too slow; decrease them if
+  estimates follow noise excessively.
+- Estimate `kf_r_lateral_accel`/`kf_r_yaw_rate` from stationary and
+  constant-speed sensor variance after axis/sign and bias correction, then tune
+  on held-out recursive KF error.
+- Choose initial covariance and reset gap from convergence behavior after a
+  bag/node reset.
+
+Any accepted KF change requires rerunning `build_dataset.py`, because all
+later `vy`, slip angle, classic prediction and MLP targets depend on it.
+
+###### F. Pacejka choices and full acceptance order
+
+Without direct tire force, steering-angle or lateral-velocity sensing, fitting
+all `B,C,D,E,m,I_z` simultaneously is ill-conditioned. The recommended model
+fixes measured `m,I_z,l_f,l_r`, sets `C=1.3,E=0`, and fits only
+`B_f,D_f,B_r,D_r`. With richer excitation and steering feedback, release one
+additional parameter group at a time with regularization and physical bounds;
+lower training loss alone is not an acceptance criterion.
+
+```text
+sensor axes/time alignment
+  -> measured geometry/mass/limits
+  -> position-speed scale
+  -> steering map and actuator response
+  -> longitudinal actuator response
+  -> KF Cf/Cr and noise settings
+  -> rebuild 20 ms combined dataset
+  -> 40 ms Pacejka regression
+  -> rebuild residual targets
+  -> one-step MLP
+  -> recursive stage1/stage2
+  -> held-out evaluation, CUDA parity, deployment
+```
+
+The current bags have no steering-angle feedback, so the available code cannot
+justify automatically replacing the mixed actuator values in `params.yaml`.
+For that reason this documentation update does not change runtime parameters
+or retrain the MLP. Retraining an unchanged contract would reproduce the same
+targets, while changing a weakly identified actuator candidate first could
+degrade real-car tail behavior. Retrain only after a candidate passes the
+independent validation rules above.
+
 Identification uses collision-clean training segments only. A candidate is
 rolled out freely for 25 knots, or 1.0 s, instead of receiving the measured
 state again at every step. Per bag, at most 180 approximately distributed

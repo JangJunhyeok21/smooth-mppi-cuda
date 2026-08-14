@@ -25,7 +25,8 @@ u* = Σ w_k · ε_k      where   w_k ∝ exp(−J_k / λ)
 | `legacy_hybrid` | `v<0.5 m/s` kinematic, 그 이상 Pacejka dynamic |
 | `kinematic` | 전 속도 kinematic bicycle |
 | `kinematic_residual` | kinematic + CUDA GRU residual |
-| `kinematic_mlp_residual` | kinematic + CUDA MLP residual (현재 설정) |
+| `kinematic_mlp_residual` | 과거 kinematic + CUDA MLP residual |
+| `dynamic_mlp_residual_servo_lag` | 40 ms Pacejka dynamic + actuator lag + 20-D residual MLP (**현재 설정**) |
 
 **파세이카 타이어 모델 (Pacejka Magic Formula):**
 ```
@@ -59,7 +60,8 @@ F_y = D · sin(C · atan(B · α))
 
 | 토픽 | 타입 | 설명 |
 |------|------|------|
-| `/ego_racecar/odom` (현재 simulator 설정) | `nav_msgs/Odometry` | pose + body twist |
+| `/newmcl_pose` | pose message | 실차 map-frame `x,y,yaw` |
+| `/odom` | `nav_msgs/Odometry` | 실차 body `vx` |
 | `/imu/data` | `sensor_msgs/Imu` | residual의 causal IMU 입력 |
 | `/mppi_target_path` | `nav_msgs/Path` | 레퍼런스 경로 + 목표 속도 |
 | `/mppi_left_boundary` | `nav_msgs/Path` | 좌측 주행 경계 |
@@ -69,7 +71,7 @@ F_y = D · sin(C · atan(B · α))
 
 | 토픽 | 타입 | 설명 |
 |------|------|------|
-| `/ackermann_cmd` (`drive_topic`) | `ackermann_msgs/AckermannDriveStamped` | 조향 + 가속 명령 |
+| `/drive` (`drive_topic`) | `ackermann_msgs/AckermannDriveStamped` | 조향 + direct speed 명령 |
 | `/mppi_viz` | `visualization_msgs/MarkerArray` | 샘플 궤적 시각화 |
 | `/mppi_optimal_trajectory` | `smppi_cuda_controller/MppiTrajectory` | 최적 궤적 + 비용 분해 |
 
@@ -100,8 +102,8 @@ CSV 파일에서 센터라인을 읽어 곡률 기반 속도 프로파일을 계
 
 | 파라미터 | 기본값 | 설명 |
 |----------|--------|------|
-| `num_samples` | `8000` | 병렬 샘플 수 (시뮬: 10000) |
-| `lambda` | `15.0` | 온도 파라미터 (클수록 평균에 가까움) |
+| `num_samples` | `1600` | 현재 Orin NX 병렬 샘플 수 |
+| `lambda` | `30.0` | 온도 파라미터 (클수록 평균에 가까움) |
 | `noise_steer_std` | `0.4` | 조향 노이즈 표준편차 [rad/s] |
 | `noise_accel_std` | `2.0` | 가속 노이즈 표준편차 [m/s³] |
 
@@ -109,11 +111,10 @@ CSV 파일에서 센터라인을 읽어 곡률 기반 속도 프로파일을 계
 
 | 파라미터 | 기본값 | 설명 |
 |----------|--------|------|
-| `target_speed` | `5.5` | 목표 속도 [m/s] |
-| `max_speed` | `3.0` | 최대 허용 속도 [m/s] |
+| `max_speed` | `4.0` | 최대 허용 속도 [m/s] |
 | `min_speed` | `0.5` | 최소 속도 [m/s] |
-| `max_steer` | `0.38` | 최대 조향각 [rad] |
-| `max_accel` / `min_accel` | `±9.0` | 가속도 한계 [m/s²] |
+| `max_steer` | `0.4788` | 최대 조향각 [rad] |
+| `max_accel` / `min_accel` | `+1.0 / -1.0` | classic 종가속도 한계 [m/s²] |
 
 ### 차량 모델
 
@@ -121,16 +122,18 @@ CSV 파일에서 센터라인을 읽어 곡률 기반 속도 프로파일을 계
 |----------|--------|------|
 | `mass` | `3.74` | 차량 질량 [kg] |
 | `l_f` / `l_r` | `0.163` / `0.161` | 앞/뒤 축까지 거리 [m] |
-| `I_z` | `0.14` | 요 관성 모멘트 [kg·m²] |
-| `B_f, C_f, D_f` | `1.5, 1.5, 40.0` | 전륜 파세이카 계수 |
-| `B_r, C_r, D_r` | `1.5, 1.5, 35.5` | 후륜 파세이카 계수 |
+| `dynamic_mlp_I_z` | `0.04712` | recommended 모델 요 관성 모멘트 [kg·m²] |
+| `dynamic_mlp_B_f,C_f,D_f,E_f` | `2.8159,1.3,0.3794,0` | 학습에 사용한 전륜 Pacejka 계수 |
+| `dynamic_mlp_B_r,C_r,D_r,E_r` | `0.3216,1.3,2.8,0` | 학습에 사용한 후륜 Pacejka 계수 |
 
 ### 토픽
 
 | 파라미터 | 기본값 |
 |----------|--------|
-| `odom_topic` | `/ego_racecar/odom` (현재 시뮬레이터 설정) |
-| `drive_topic` | `/sim_drive` (현재 시뮬레이터 설정) |
+| `pose_topic` | `/newmcl_pose` |
+| `velocity_topic` | `/odom` |
+| `drive_topic` | `/drive` |
+| `imu_topic` | `/imu/data` |
 | `path_topic` | `/mppi_target_path` |
 
 ---
@@ -152,10 +155,12 @@ ros2 launch ekf_pose smppi_with_ekf.launch.py
 
 ---
 
-## Kinematic + MLP residual 모델 학습 및 배포
+## 과거 Kinematic + MLP residual 모델 학습 및 배포 (legacy reference)
 
-현재 `config/params.yaml`의 `dynamics_model: kinematic_mlp_residual`이 선택하는
-모델이다. CUDA 구현은 `src/mppi_core.cu`의 `update_kinematic()`과
+이 절은 과거 실험 재현용이며 현재 recommended 모델의 학습 방법이 아니다.
+현재 모델은 문서 상단 링크의 `dynamic_40ms_yaw_preserved_stage2` 절을 사용한다.
+과거 `dynamics_model: kinematic_mlp_residual`의 CUDA 구현은
+`src/mppi_core.cu`의 `update_kinematic()`과
 `update_kinematic_mlp_residual()`에 있으며, simulator는
 `f1tenth_gym/envs/dynamic_models/kinematic_mlp.py`에서 같은 계산을 수행한다.
 
@@ -251,16 +256,17 @@ layer의 weight/bias 총 3,587개이며, residual 학습 중 classic 파라미�
 
 | 용도 | 우선 토픽/타입 | 사용하는 field |
 |---|---|---|
-| GT pose 및 body state | `/mocap_odom` 우선, 없으면 `/odom` (`nav_msgs/Odometry`) | position, quaternion yaw, `twist.linear.x/y`, `twist.angular.z` |
+| GT pose | `/newmcl_pose` | map-frame position과 quaternion yaw |
+| 종방향 속도 | `/odom` (`nav_msgs/Odometry`) | `twist.twist.linear.x` |
 | 실제 차량 입력 | `/drive` (`ackermann_msgs/AckermannDriveStamped`) | `drive.steering_angle`, `drive.speed` |
 | 관성 입력 | `/imu/data` 또는 bag에 맞춘 `--imu-topic` (`sensor_msgs/Imu`) | `angular_velocity.z`, `linear_acceleration.x/y` |
 
-`/mpc_cmd`는 planner 출력이며 사용하지 않는다. 수동·자율 주행 모두 실제 차량으로 전달된
-`/drive`만 사용한다. `/mcl_pose`나 `/mocap_pose2`처럼 pose만 있는 토픽은 body-frame
-`vx, vy, r`가 없으므로 현재 수집기가 직접 사용하지 않는다. 필요하면 먼저 odometry 형태로
-변환해야 한다.
+`/mpc_cmd`는 사용하지 않는다. 현재 recommended dataset은 실제 적용 명령인 `/drive`만
+사용한다. `/newmcl_pose`에는 body velocity가 없으므로 `vx`는 `/odom`, `vy`는 KF 추정,
+yaw-rate는 부호를 맞춘 `/imu/data`를 사용한다.
 
-토픽 간 정렬은 기본적으로 rosbag record timestamp를 사용한다. IMU는 pose 시각 이하의
+토픽 간 정렬은 message header timestamp를 우선하고, header가 없거나 0일 때만 rosbag
+record timestamp로 fallback한다. IMU는 pose 시각 이하의
 가장 최신 값만 선택하며 최대 age는 `0.05 s`이다. 미래 IMU를 이용하는 linear interpolation은
 실제 MPPI에서 재현할 수 있으므로 배포 학습에 사용하지 않는다.
 

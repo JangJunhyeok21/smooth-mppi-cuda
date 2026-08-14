@@ -10,6 +10,23 @@ reset, collision, manual intervention, stale topic, or large timestamp gap must
 be false in `valid`. Keep complete bags/sessions in only one split. The exact
 feature order is in `contract.py` and matches `update_dynamic_mlp_residual`.
 
+The canonical rosbag sources are not mocap topics:
+
+| Quantity | Canonical topic | Use |
+|---|---|---|
+| GT map pose `(x,y,yaw)` | `/newmcl_pose` | trajectory audit/visualization and runtime pose initialization |
+| longitudinal velocity `vx` | `/odom` | dynamic state and supervised transition target |
+| applied steering/speed command | `/drive` | causal model input; `/ackermann_cmd` is not used by the recommended dataset |
+| yaw-rate and acceleration | `/imu/data` | signed/EMA yaw-rate and KF/diagnostic signals |
+
+`/newmcl_pose` is the authoritative GT pose source. It does not provide body
+velocity. The MLP itself is translation/yaw invariant and therefore does not
+receive absolute `x,y,yaw`; these values are advanced outside the MLP by the
+MPPI pose equations. The current recursive training pose loss constructs a
+relative trajectory by integrating measured `/odom` `vx`, KF `vy`, and IMU
+yaw-rate. Absolute `/newmcl_pose` remains the reference used to audit the
+extracted real trajectory and localization continuity.
+
 ## Recommended model: `dynamic_40ms_yaw_preserved_stage2`
 
 This is the currently selected real-car model. It keeps the high-speed

@@ -114,6 +114,7 @@ struct Params {
     float boundary_soft_margin;
     float q_boundary_soft;
     float all_rollouts_fault_cost_threshold;
+    bool weighted_trajectory_safety_enabled;
     
     // Obstacle Avoidance Params
     int num_obstacles;
@@ -226,6 +227,7 @@ private:
     void allocate_cuda_memory();
     void cleanup_cuda_memory();
     Control compute_optimal_control(const State &current_state);
+    float trajectory_min_boundary_clearance(const std::vector<State>& trajectory) const;
 
     int K_, T_;
     Params params_;
@@ -246,6 +248,11 @@ private:
     // Host Reference Path
     std::vector<float> h_ref_xs_;
     std::vector<float> h_ref_ys_;
+    std::vector<float> h_ref_yaws_;
+    std::vector<float> h_left_bnd_xs_;
+    std::vector<float> h_left_bnd_ys_;
+    std::vector<float> h_right_bnd_xs_;
+    std::vector<float> h_right_bnd_ys_;
 
     // --- Device Memory ---
     void* d_rng_states_;     

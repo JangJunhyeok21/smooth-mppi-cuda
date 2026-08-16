@@ -10,6 +10,7 @@
 #include <cmath>
 #include <iostream>
 #include <fstream>
+#include <limits>
 #include <stdexcept>
 
 namespace mppi
@@ -558,6 +559,23 @@ namespace mppi
             + residual_derivatives[2] * dynamics_dt;
         next_state.ax = classic_longitudinal_acceleration + residual_derivatives[0];
         next_state.ay = classic_lateral_acceleration + residual_derivatives[1];
+
+        // The dynamic bicycle equations are ill-conditioned near standstill:
+        // slip angles divide by vx while tire forces can still create a large
+        // yaw acceleration. Use a no-slip kinematic yaw response until the
+        // identified dynamic model becomes observable.
+        if (fabsf(current_state.v) < params.dynamic_mlp_min_speed) {
+            const float wheelbase=params.l_f+params.l_r;
+            const float kinematic_yaw_rate=next_state.v*tanf(steering_angle)/wheelbase;
+            const float yaw_time_constant=fmaxf(
+                params.kinematic_yaw_rate_time_constant,1.0e-3f);
+            const float yaw_acceleration=fminf(params.kinematic_max_yaw_accel,
+                fmaxf(-params.kinematic_max_yaw_accel,
+                    (kinematic_yaw_rate-current_state.omega)/yaw_time_constant));
+            next_state.omega=current_state.omega+yaw_acceleration*dynamics_dt;
+            next_state.vy=0.0f;
+            next_state.ay=next_state.v*next_state.omega;
+        }
 
         const float next_speed = hypotf(next_state.v, next_state.vy);
         const float next_body_slip_angle = atan2f(next_state.vy, next_state.v);
@@ -1383,7 +1401,7 @@ namespace mppi
 
     void MPPISolver::set_reference_path(const std::vector<float> &xs, const std::vector<float> &ys,
                                         const std::vector<float> &yaws) {
-        h_ref_xs_ = xs; h_ref_ys_ = ys;
+        h_ref_xs_ = xs; h_ref_ys_ = ys; h_ref_yaws_ = yaws;
         ref_path_len_ = xs.size();
         if (ref_path_len_ > 1000) ref_path_len_ = 1000;
         if (ref_path_len_ > 0) {
@@ -1395,6 +1413,10 @@ namespace mppi
 
     void MPPISolver::set_boundaries(const std::vector<float>& left_xs, const std::vector<float>& left_ys,
                                     const std::vector<float>& right_xs, const std::vector<float>& right_ys) {
+        h_left_bnd_xs_ = left_xs;
+        h_left_bnd_ys_ = left_ys;
+        h_right_bnd_xs_ = right_xs;
+        h_right_bnd_ys_ = right_ys;
         bnd_len_ = left_xs.size();
         if (bnd_len_ > 1000) bnd_len_ = 1000; 
         if (bnd_len_ > 0) {
@@ -1412,18 +1434,8 @@ namespace mppi
                                  params_.dynamics_model==DYNAMIC_MLP_RESIDUAL ||
                                  params_.dynamics_model==DYNAMIC_MLP_RESIDUAL_SERVO_LAG ||
                                  params_.dynamics_model==EFFECTIVE_HISTORY_STATE_RESIDUAL);
-        if (direct_speed && !direct_speed_warm_start_initialized_) {
-            float speed=fminf(params_.max_speed,fmaxf(0.0f,current_state.v));
-            const float speed_step=params_.max_accel_rate*(
-                uses_40ms_rollout_knot(params_.dynamics_model)?params_.model_dt:params_.dt);
-            for (int t=0;t<T_;++t) {
-                speed=fminf(params_.max_speed,speed+speed_step);
-                h_prev_controls_[t].accel=speed;
-            }
-            direct_speed_warm_start_initialized_=true;
-        }
-        CUDA_CHECK(cudaMemcpy(d_prev_controls_, h_prev_controls_.data(), T_ * sizeof(Control), cudaMemcpyHostToDevice));
-
+        const bool first_direct_speed_solve=direct_speed &&
+            !direct_speed_warm_start_initialized_;
         int start_path_idx = 0;
         if (!h_ref_xs_.empty()) {
             float min_dist_sq = 1e9f;
@@ -1434,6 +1446,68 @@ namespace mppi
                 if (d_sq < min_dist_sq) { min_dist_sq = d_sq; start_path_idx = i; }
             }
         }
+
+        if (first_direct_speed_solve) {
+            // The old first-solve nominal accelerated along zero steering. On a
+            // corner this makes most samples start from an off-track horizon.
+            // Seed the nominal with centerline curvature; MPPI remains free to
+            // move away from the centerline after the first optimization.
+            float speed=fminf(params_.max_speed,fmaxf(0.0f,current_state.v));
+            const float knot_dt=uses_40ms_rollout_knot(params_.dynamics_model)
+                ? params_.model_dt : params_.dt;
+            const float speed_step=params_.max_accel_rate*knot_dt;
+            int path_idx=start_path_idx;
+            float distance_to_next=0.0f;
+            for (int t=0;t<T_;++t) {
+                // Curvature seeds steering feasibility; keep the same speed
+                // envelope as subsequent solves so initialization has no
+                // artificial lap-time penalty.
+                speed=fminf(params_.max_speed,speed+speed_step);
+                h_prev_controls_[t].accel=speed;
+                if (ref_path_len_ > 2 && h_ref_yaws_.size() >= static_cast<size_t>(ref_path_len_)) {
+                    distance_to_next += fmaxf(speed, params_.min_speed)*knot_dt;
+                    while (distance_to_next > 0.0f) {
+                        const int next=(path_idx+1)%ref_path_len_;
+                        const float dx=h_ref_xs_[next]-h_ref_xs_[path_idx];
+                        const float dy=h_ref_ys_[next]-h_ref_ys_[path_idx];
+                        const float ds=fmaxf(1.0e-3f,sqrtf(dx*dx+dy*dy));
+                        if (distance_to_next < ds) break;
+                        distance_to_next -= ds;
+                        path_idx=next;
+                    }
+                    // Use a wide geometric stencil. Per-waypoint heading
+                    // differences in measured centerlines are too noisy for a
+                    // feed-forward steering seed and can alternate in sign.
+                    constexpr int curvature_window=8;
+                    const int before=(path_idx+ref_path_len_-curvature_window)%ref_path_len_;
+                    const int after=(path_idx+curvature_window)%ref_path_len_;
+                    const float before_dx=h_ref_xs_[path_idx]-h_ref_xs_[before];
+                    const float before_dy=h_ref_ys_[path_idx]-h_ref_ys_[before];
+                    const float after_dx=h_ref_xs_[after]-h_ref_xs_[path_idx];
+                    const float after_dy=h_ref_ys_[after]-h_ref_ys_[path_idx];
+                    const float before_heading=atan2f(before_dy,before_dx);
+                    const float after_heading=atan2f(after_dy,after_dx);
+                    const float stencil_length=fmaxf(1.0e-3f,0.5f*(
+                        hypotf(before_dx,before_dy)+hypotf(after_dx,after_dy)));
+                    const float curvature=angle_normalize(
+                        after_heading-before_heading)/stencil_length;
+                    const float effective_steer=atanf((params_.l_f+params_.l_r)*curvature);
+                    const float scale=fabsf(params_.kinematic_steer_scale)>1.0e-6f
+                        ? params_.kinematic_steer_scale : 1.0f;
+                    h_prev_controls_[t].steer=fminf(params_.max_steer,
+                        fmaxf(-params_.max_steer,
+                            (effective_steer-params_.kinematic_steer_bias)/scale));
+                }
+            }
+            direct_speed_warm_start_initialized_=true;
+        }
+        // One-cycle planning guard only. update_params() restores the fitted
+        // runtime threshold on the next 50 Hz callback, so simulator and MPPI
+        // use the same 0.8 m/s hybrid model after initialization.
+        if(first_direct_speed_solve)
+            params_.dynamic_mlp_min_speed=fmaxf(
+                params_.dynamic_mlp_min_speed,1.5f);
+        CUDA_CHECK(cudaMemcpy(d_prev_controls_, h_prev_controls_.data(), T_ * sizeof(Control), cudaMemcpyHostToDevice));
 
         int threadsPerBlock = 128;
         int blocksPerGrid = (K_ + threadsPerBlock - 1) / threadsPerBlock;
@@ -1457,6 +1531,38 @@ namespace mppi
         CUDA_CHECK(cudaMemcpy(h_controls_.data(), d_controls_, K_ * T_ * sizeof(Control), cudaMemcpyDeviceToHost));
 
         return compute_optimal_control(current_state);
+    }
+
+    float MPPISolver::trajectory_min_boundary_clearance(
+        const std::vector<State>& trajectory) const {
+        const size_t n=std::min({h_ref_xs_.size(),h_ref_ys_.size(),
+            h_left_bnd_xs_.size(),h_left_bnd_ys_.size(),
+            h_right_bnd_xs_.size(),h_right_bnd_ys_.size()});
+        if(n==0 || trajectory.empty()) return std::numeric_limits<float>::infinity();
+        float minimum=std::numeric_limits<float>::infinity();
+        for(const State& state:trajectory) {
+            size_t nearest=0;
+            float nearest_distance_sq=std::numeric_limits<float>::infinity();
+            for(size_t i=0;i<n;++i) {
+                const float dx=state.x-h_ref_xs_[i];
+                const float dy=state.y-h_ref_ys_[i];
+                const float distance_sq=dx*dx+dy*dy;
+                if(distance_sq<nearest_distance_sq) {
+                    nearest_distance_sq=distance_sq;
+                    nearest=i;
+                }
+            }
+            const float yaw=h_ref_yaws_.size()>nearest?h_ref_yaws_[nearest]:0.0f;
+            const float lateral_error=-(state.x-h_ref_xs_[nearest])*sinf(yaw)
+                                      +(state.y-h_ref_ys_[nearest])*cosf(yaw);
+            const float left_width=hypotf(h_left_bnd_xs_[nearest]-h_ref_xs_[nearest],
+                                          h_left_bnd_ys_[nearest]-h_ref_ys_[nearest]);
+            const float right_width=hypotf(h_right_bnd_xs_[nearest]-h_ref_xs_[nearest],
+                                           h_right_bnd_ys_[nearest]-h_ref_ys_[nearest]);
+            minimum=std::min(minimum,std::min(left_width-lateral_error,
+                                              right_width+lateral_error));
+        }
+        return minimum;
     }
 
     Control MPPISolver::compute_optimal_control(const State &current_state) {
@@ -1532,6 +1638,64 @@ namespace mppi
         CUDA_CHECK(cudaGetLastError());
         CUDA_CHECK(cudaMemcpy(weighted_control_trajectory_.data(), d_weighted_states_,
                               T_ * sizeof(State), cudaMemcpyDeviceToHost));
+
+        // A convex average of safe control sequences is not necessarily safe
+        // after nonlinear dynamics. Reject an off-track weighted rollout and
+        // execute the lowest-cost sampled sequence that stays inside the
+        // collision boundary instead.
+        if(params_.weighted_trajectory_safety_enabled &&
+           trajectory_min_boundary_clearance(weighted_control_trajectory_)
+                < params_.collision_radius) {
+            CUDA_CHECK(cudaMemcpy(h_states_.data(),d_states_,K_*T_*sizeof(State),
+                                  cudaMemcpyDeviceToHost));
+            std::vector<int> candidates(K_);
+            for(int k=0;k<K_;++k)candidates[k]=k;
+            std::sort(candidates.begin(),candidates.end(),[this](int lhs,int rhs) {
+                return h_costs_[lhs]<h_costs_[rhs];
+            });
+            std::vector<State> candidate_trajectory(T_);
+            int safe_candidate=-1;
+            for(int k:candidates) {
+                std::copy_n(h_states_.begin()+k*T_,T_,candidate_trajectory.begin());
+                if(trajectory_min_boundary_clearance(candidate_trajectory)
+                        >= params_.collision_radius) {
+                    safe_candidate=k;
+                    break;
+                }
+            }
+            if(safe_candidate>=0) {
+                best_k_=safe_candidate;
+                std::copy_n(h_controls_.begin()+safe_candidate*T_,T_,weighted_controls.begin());
+                optimal_controls_=weighted_controls;
+                output=weighted_controls[0];
+                CUDA_CHECK(cudaMemcpy(d_weighted_controls_,weighted_controls.data(),
+                                      T_*sizeof(Control),cudaMemcpyHostToDevice));
+                weighted_control_rollout_kernel<<<1,1>>>(
+                    d_weighted_states_,d_weighted_controls_,current_state,params_,
+                    d_residual_hidden_,T_);
+                CUDA_CHECK(cudaGetLastError());
+                CUDA_CHECK(cudaMemcpy(weighted_control_trajectory_.data(),d_weighted_states_,
+                                      T_*sizeof(State),cudaMemcpyDeviceToHost));
+            } else {
+                // Never publish a known off-track optimization result. Hold a
+                // low-speed version of the nominal sequence so the next 50 Hz
+                // solve can recover with a new sample population.
+                weighted_controls=h_prev_controls_;
+                for(Control& control:weighted_controls)
+                    control.accel=fminf(params_.min_speed,
+                                        fmaxf(0.0f,current_state.v));
+                optimal_controls_=weighted_controls;
+                output=weighted_controls[0];
+                CUDA_CHECK(cudaMemcpy(d_weighted_controls_,weighted_controls.data(),
+                                      T_*sizeof(Control),cudaMemcpyHostToDevice));
+                weighted_control_rollout_kernel<<<1,1>>>(
+                    d_weighted_states_,d_weighted_controls_,current_state,params_,
+                    d_residual_hidden_,T_);
+                CUDA_CHECK(cudaGetLastError());
+                CUDA_CHECK(cudaMemcpy(weighted_control_trajectory_.data(),d_weighted_states_,
+                                      T_*sizeof(State),cudaMemcpyDeviceToHost));
+            }
+        }
 
         if(advance_warm_start) {
             for (int t = 0; t < T_ - 1; ++t) h_prev_controls_[t] = weighted_controls[t + 1];

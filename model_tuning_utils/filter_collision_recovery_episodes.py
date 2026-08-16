@@ -5,6 +5,66 @@ from pathlib import Path
 import numpy as np
 
 
+def _expanded_intervals(mask, pre_samples, post_samples):
+    indices=np.flatnonzero(mask); expanded=np.zeros(len(mask),bool)
+    if not len(indices): return expanded,[]
+    for group in np.split(indices,np.flatnonzero(np.diff(indices)>1)+1):
+        start=max(0,int(group[0])-pre_samples)
+        end=min(len(mask),int(group[-1])+1+post_samples)
+        expanded[start:end]=True
+    expanded_indices=np.flatnonzero(expanded)
+    intervals=[(int(group[0]),int(group[-1])+1) for group in
+               np.split(expanded_indices,np.flatnonzero(np.diff(expanded_indices)>1)+1)]
+    return expanded,intervals
+
+
+def physical_inconsistency_mask(samples, dt, pre_margin_s=1.2, post_margin_s=.5,
+                                moving_vx=.7, frozen_pose_speed=.12,
+                                distance_window_s=.5, min_odom_distance=.35,
+                                min_pose_odom_ratio=.65, impact_decel=-8.,
+                                max_pose_step=.30, max_yaw_step=.45):
+    """Remove impact/wheel-spin/localization states that no vehicle model can fit.
+
+    ``samples`` follows the extractor base layout
+    [t,x,y,yaw,vx,vy,omega,steer,accel,speed_cmd].  This is an offline data
+    quality filter; centered windows are intentional and never used online.
+    """
+    count=len(samples)
+    if count<2:return np.zeros(count,bool),[]
+    x,y,yaw,vx=(samples[:,i] for i in (1,2,3,4))
+    position_step=np.hypot(np.diff(x,prepend=x[0]),np.diff(y,prepend=y[0]))
+    pose_speed=position_step/dt
+    absolute_vx=np.abs(vx)
+    # Causal-hold can repeat one MCL sample. Require a sustained frozen pose,
+    # rather than flagging an individual repeated localization message.
+    frozen_seed=(absolute_vx>moving_vx)&(pose_speed<frozen_pose_speed)
+    frozen_count=max(3,round(.16/dt))
+    frozen=np.convolve(frozen_seed.astype(np.int16),np.ones(frozen_count,np.int16),mode="same") \
+        >= int(np.ceil(.75*frozen_count))
+    window=max(3,round(distance_window_s/dt));kernel=np.ones(window)
+    pose_distance=np.convolve(position_step,kernel,mode="same")
+    odom_distance=np.convolve(absolute_vx*dt,kernel,mode="same")
+    ratio=pose_distance/np.maximum(odom_distance,1e-6)
+    wheel_spin_or_blocked=(odom_distance>min_odom_distance)&(ratio<min_pose_odom_ratio)
+    longitudinal_accel=np.r_[0.,np.diff(vx)/dt]
+    impact=longitudinal_accel<impact_decel
+    yaw_step=np.abs((np.diff(yaw,prepend=yaw[0])+np.pi)%(2*np.pi)-np.pi)
+    localization_jump=(position_step>max_pose_step)|(yaw_step>max_yaw_step)
+    causes={"frozen_pose_with_nonzero_vx":frozen,
+            "mcl_odom_distance_mismatch":wheel_spin_or_blocked,
+            "impact_like_vx_drop":impact,"localization_jump":localization_jump}
+    seed=np.logical_or.reduce(tuple(causes.values()))
+    expanded,intervals=_expanded_intervals(seed,round(pre_margin_s/dt),round(post_margin_s/dt))
+    events=[]
+    for start,end in intervals:
+        event_causes=[name for name,value in causes.items() if value[start:end].any()]
+        events.append({"start_index":start,"end_index_exclusive":end,
+                       "start_time_s":float(samples[start,0]),
+                       "end_time_s":float(samples[min(end,count-1),0]),
+                       "causes":event_causes})
+    return expanded,events
+
+
 def collision_recovery_mask(samples, dt, reverse_speed=-.15, min_reverse_s=.06,
                             merge_gap_s=.5, lookback_s=3., stable_forward_s=.5):
     """Return removal mask and intervals using signed measured body vx."""
@@ -17,9 +77,11 @@ def collision_recovery_mask(samples, dt, reverse_speed=-.15, min_reverse_s=.06,
     mask=np.zeros(len(samples),bool); intervals=[]; stable=max(1,round(stable_forward_s/dt))
     for group in groups:
         reverse_start=max(0,int(group[0])-minimum//2); reverse_end=min(len(samples)-1,int(group[-1])+minimum//2)
-        # Collision onset: last healthy forward sample before the recovery reverse.
-        lo=max(0,reverse_start-round(lookback_s/dt)); healthy=np.flatnonzero(vx[lo:reverse_start]>.7)
-        start=(lo+int(healthy[-1])+1) if len(healthy) else max(lo,reverse_start-round(.5/dt))
+        # Wheel odometry can remain high after impact, so vx>0.7 is not proof
+        # of healthy forward motion. Conservatively remove the complete
+        # pre-recovery lookback interval; otherwise the collision approach can
+        # survive as a seemingly valid high-speed training transition.
+        start=max(0,reverse_start-round(lookback_s/dt))
         # Retain data again only after stable forward motion has resumed.
         forward=(vx>.3).astype(np.int16)
         sums=np.convolve(forward,np.ones(stable,np.int16),mode="valid")
@@ -58,7 +120,9 @@ def main():
     clean=np.concatenate(pieces); out=Path(a.output); out.parent.mkdir(parents=True,exist_ok=True)
     payload={k:z[k] for k in z.files if k!="samples"}; payload["samples"]=clean; np.savez_compressed(out,**payload)
     old=src.with_suffix(".manifest.json"); manifest=json.loads(old.read_text()) if old.exists() else {}
-    rule={"reverse_anchor":"measured body vx < -0.15 m/s for >=0.06 s","collision_start":"after last vx > 0.7 m/s within 3 s before reverse","recovery_end":"first vx > 0.3 m/s sustained for 0.5 s"}
+    rule={"reverse_anchor":"measured body vx < -0.15 m/s for >=0.06 s",
+          "collision_start":"full 3 s lookback before reverse; wheel odometry is not trusted after impact",
+          "recovery_end":"first vx > 0.3 m/s sustained for 0.5 s"}
     manifest.update({"collision_recovery_filter":rule,"collision_recovery_episodes":episodes,"segments":segments,
                      "removed_samples":removed,"retained_samples":len(clean)})
     out.with_suffix(".manifest.json").write_text(json.dumps(manifest,indent=2)+"\n")

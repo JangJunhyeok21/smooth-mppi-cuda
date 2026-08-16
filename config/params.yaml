@@ -13,7 +13,7 @@
     slip_kinematic_with_imu_weights_path: config/slip_kinmatic_MLP.bin
     dynamic_imu_weights_path: config/ifac2026_dynamic_imu_recursive.bin
     dynamic_mlp_weights_path: config/dynamic_MLP_ackermann_previous_steer.bin
-    dynamic_mlp_servo_lag_weights_path: config/dynamic_40ms_residual_servo_lag.bin
+    dynamic_mlp_servo_lag_weights_path: /home/a/smooth-mppi-cuda/config/dynamic_40ms_residual_servo_lag.bin
     effective_history_weights_path: config/effective_history_state_residual.bin
     e2e_weights_path: config/E2E.bin
     # IMU is causally aligned to odometry and is also used by the 2-state vy KF.
@@ -21,9 +21,9 @@
     imu_sync_max_age_s: 0.05
     imu_ema_alpha: 0.25
     # 0807 raw IMU is FRD; convert at the subscriber boundary to MPPI FLU.
-    imu_wz_sign: -1.0
+    imu_wz_sign: 1.0
     imu_ax_sign: 1.0
-    imu_ay_sign: -1.0
+    imu_ay_sign: 1.0
     require_imu_for_mlp: true  # do not run an IMU-trained MLP with fallback placeholders
     lateral_velocity_kf_enabled: false  # dynamic_imu_recursive selects the KF automatically
     # Linear-tire cornering stiffness [N/rad]. These are NOT the Pacejka C shape factors.
@@ -52,31 +52,35 @@
     min_accel: -1.0          # m/s^2
     max_accel: 1.0           # m/s^2
     min_speed: 0.5
-    max_speed: 4.0  # fastest validated lap-time setting
+    max_speed: 4.0  # fastest validated Map1 setting
     # Racing-line 자유도를 위해 중앙선 오차 기반 publish 속도 제한은 사용하지 않는다.
     heading_speed_limit_gain: 0.0
     contour_speed_limit_gain: 0.0
 
     # --- Costs (최적화 결과 반영) ---
-    q_v: 6.0
+    q_v: 12.0
     q_dist: 0.0             # legacy Euclidean path cost (MPCC에서는 0 유지)
     q_contour: 0.0          # 중앙선 고정 대신 track boundary 안에서 racing line 허용
     q_lag: 0.0              # 중앙선 접선방향 위치 오차는 랩타임 목적에 사용하지 않음
     q_heading: 1.0          # 역주행/불안정 억제를 위한 약한 방향 regularization만 유지
     q_error_speed: 0.0      # 중앙선 오차에 따른 속도 억제 비활성화
-    q_du: 0.2
-    q_steer: 0.5
-    q_collision: 500.0
-    q_lat_g: 200.0
-    lat_g_soft_limit: 7.5                 # validated real-car cornering envelope
+    q_du: 0.12
+    q_steer: 0.30
+    q_collision: 700.0
+    q_lat_g: 60.0
+    lat_g_soft_limit: 9.5                 # soft combined-grip ceiling
     longitudinal_accel_soft_limit: 4.0    # friction ellipse ax axis [m/s^2]
     collision_radius: 0.15     # aggressive racing-line clearance
     boundary_soft_margin: 0.15 # start soft cost at 0.30 m clearance
-    q_boundary_soft: 100.0
+    q_boundary_soft: 150.0
     # Minimum rollout cost interpreted as "all candidates faulted".
     all_rollouts_fault_cost_threshold: 5000.0
-    q_progress: 40.0        # 실제 track 진행 거리[m]를 적극 보상
-    q_escape_vel: 15.0      # horizon 말단의 전진속도 보상
+    # true: reject an off-track weighted-control rollout and use the
+    # lowest-cost safe sampled sequence. false: publish standard MPPI weighted
+    # controls without this post-optimization replacement.
+    weighted_trajectory_safety_enabled: true
+    q_progress: 85.0        # simulation lap-time tuning
+    q_escape_vel: 28.0      # horizon 말단의 전진속도 보상
     horizon_steps: 60       # model_dt=0.04 s 기준 2.4 s prediction horizon
     
     # --- Obstacle Avoidance Params ---
@@ -84,13 +88,13 @@
     q_obs: 150.0
     
     # --- Noise & Tuning ---
-    noise_steer_std: 0.4     # rad/s
+    noise_steer_std: 0.35    # rad/s
     noise_accel_std: 2.0     # m/s^3
     max_steer_rate: 50.0    # rad/s
     # Input slew rate: m/s^2 for direct-speed models, m/s^3 for acceleration-command models.
     max_accel_rate: 4.0
-    lambda: 30.0
-    num_samples: 1600        # Orin NX 50 Hz 계산 예산 확보
+    lambda: 20.0
+    num_samples: 3200        # desktop simulation: ~4 ms measured
     visualize_candidates: true
     control_rate_hz: 50.0    # 20 ms timer; MPPI 계산도 이 주기보다 짧아야 함
     model_dt: 0.04  # lag/effective rollout knot; ROS solve/publish remains 50 Hz
@@ -151,23 +155,23 @@
     E_r: 0.0597
 
     # 0807 dynamic regression; used only by dynamic_mlp_residual.
-    dynamic_mlp_B_f: 2.815932661385218
+    dynamic_mlp_B_f: 2.9844349007584565
     dynamic_mlp_C_f: 1.3
-    dynamic_mlp_D_f: 0.37939550896899304
+    dynamic_mlp_D_f: 0.362611229414815
     dynamic_mlp_E_f: 0.0
-    dynamic_mlp_B_r: 0.3215940126165719
+    dynamic_mlp_B_r: 0.3173165891873783
     dynamic_mlp_C_r: 1.3
-    dynamic_mlp_D_r: 2.799999998765151
+    dynamic_mlp_D_r: 2.799999941680244
     dynamic_mlp_E_r: 0.0
     dynamic_mlp_I_z: 0.04712
-    dynamic_mlp_min_speed: 0.8 # residual sigmoid gate center; no hard model switch
+    dynamic_mlp_min_speed: 0.8 # runtime low-speed kinematic yaw fallback / residual gate
 
     # --- Runtime environment and topics ---
     # true : simulator pose + twist come from simulation_odom_topic
     # false: real_pose_topic supplies map pose and real_odom_topic supplies velocity
     is_simulation: true
     simulation_odom_topic: /ego_racecar/odom
-    simulation_drive_topic: /drive
+    simulation_drive_topic: /drive  # must match f1tenth_gym_ros sim.yaml ego_drive_topic
     real_pose_topic: /newmcl_pose
     real_odom_topic: /odom
     real_drive_topic: /drive

@@ -13,34 +13,47 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from model_tuning_utils.filter_collision_recovery_episodes import collision_recovery_mask
+from model_tuning_utils.filter_collision_recovery_episodes import (
+    collision_recovery_mask, physical_inconsistency_mask)
 from model_tuning_utils.lateral_velocity_kf import LateralVelocityKFParams, estimate_dataset
 
 # USER SETTINGS. Add every bag storage file or rosbag2 directory here. Running
 # this script without arguments extracts them sequentially.
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 BAG_PATH = [
-    Path("/mnt/nas_custom/F1tenth/2026 IFAC/0807/rosbag2_2026_08_07-19_13_58/rosbag2_2026_08_07-19_13_58_0.db3"),
-    Path("/mnt/nas_custom/F1tenth/2026 IFAC/0808/rosbag2_2026_08_08-16_54_33/rosbag2_2026_08_08-16_54_33_0.db3"),
-    Path("/mnt/nas_custom/F1tenth/2026 IFAC/0808/rosbag2_2026_08_08-20_19_06/rosbag2_2026_08_08-20_19_06_0.db3"),
-    Path("/mnt/nas_custom/F1tenth/2026 IFAC/0808/rosbag2_2026_08_08-20_20_34/rosbag2_2026_08_08-20_20_34_0.db3"),
-    Path("/mnt/nas_custom/F1tenth/2026 IFAC/0808/rosbag2_2026_08_08-20_25_26/rosbag2_2026_08_08-20_25_26_0.db3"),
-    Path("/mnt/nas_custom/F1tenth/2026 IFAC/0808/rosbag2_2026_08_08-22_10_38/rosbag2_2026_08_08-22_10_38_0.db3"),
-    Path("/mnt/nas_custom/F1tenth/2026 IFAC/0808/rosbag2_2026_08_08-22_11_08/rosbag2_2026_08_08-22_11_08_0.db3"),
-    Path("/mnt/nas_custom/F1tenth/2026 IFAC/0810/rosbag2_2026_08_10-21_45_06/rosbag2_2026_08_10-21_45_06_0.db3"),
-    Path("/mnt/nas_custom/F1tenth/2026 IFAC/0810/rosbag2_2026_08_10-21_45_57/rosbag2_2026_08_10-21_45_57_0.db3"),
-    Path("/mnt/nas_custom/F1tenth/2026 IFAC/0810/rosbag2_2026_08_10-21_46_44/rosbag2_2026_08_10-21_46_44_0.db3"),
-    Path("/mnt/nas_custom/F1tenth/2026 IFAC/0810/rosbag2_2026_08_10-21_52_23/rosbag2_2026_08_10-21_52_23_0.db3"),
+    Path("/mnt/nas_custom/F1tenth/2026 IFAC/0815/codex_effective_aggressive_scale057_tau008_run1"),
+    Path("/mnt/nas_custom/F1tenth/2026 IFAC/0815/codex_effective_history_1200_run1"),
+    Path("/mnt/nas_custom/F1tenth/2026 IFAC/0815/codex_effective_history_1200_run2_60s"),
+    Path("/mnt/nas_custom/F1tenth/2026 IFAC/0815/codex_effective_history_run1"),
+    Path("/mnt/nas_custom/F1tenth/2026 IFAC/0815/codex_effective_tuned_scale045_tau014_run1"),
+    Path("/mnt/nas_custom/F1tenth/2026 IFAC/0815/codex_highspeed_run1"),
+    Path("/mnt/nas_custom/F1tenth/2026 IFAC/0815/codex_servo_lag_0815_sign_aligned_run1"),
+    Path("/mnt/nas_custom/F1tenth/2026 IFAC/0815/codex_servo_lag_augmented_5lap_run1"),
+    Path("/mnt/nas_custom/F1tenth/2026 IFAC/0815/codex_servo_lag_augmented_run1"),
+    # existing_run2 has zero /ackermann_cmd messages and is intentionally excluded.
+    Path("/mnt/nas_custom/F1tenth/2026 IFAC/0815/codex_servo_lag_existing_run3"),
 ]
-OUTPUT_PATH = PROJECT_ROOT / "model_tuning/data/extracted_bags"
-USE_PLOT = True
-# Must match the MPPI runtime observer/sign convention used for training.
-IMU_WZ_SIGN = -1.0; IMU_AY_SIGN = -1.0; IMU_EMA_ALPHA = .25
-KF_CF = 12.917527023984482; KF_CR = 63.031306365657976
-KF_LOW_SPEED_THRESHOLD = 0.0
+OUTPUT_PATH = PROJECT_ROOT / "model_tuning/data/ifac0815_autonomous_physics_clean"
+USE_PLOT = False
+# 0815 IMU is already expressed in the MPPI body convention (+x forward,
+# +y left, +z up), so no legacy 0807/0810 sign inversion is applied.
+IMU_WZ_SIGN = 1.0; IMU_AX_SIGN = 1.0; IMU_AY_SIGN = 1.0; IMU_EMA_ALPHA = .25
+# Match the current runtime observer in config/params.yaml.
+KF_CF = 12.7222491; KF_CR = 75.0944752
+KF_LOW_SPEED_THRESHOLD = 0.5
 KF_STEER_SCALE = 1.1058064699; KF_STEER_BIAS = -0.0300696939; KF_MAX_STEER = .4788
 POSE_TOPIC = "/newmcl_pose"; VELOCITY_TOPIC = "/odom"; COMMAND_TOPIC = "/ackermann_cmd"; IMU_TOPIC = "/imu/data"
-DT = .02; MAX_POSE_AGE = 1.0; MAX_VELOCITY_AGE = 1.0; MAX_COMMAND_AGE = 1.0; MAX_IMU_AGE = .05
+APPLIED_COMMAND_TOPIC = "/drive"
+COMMAND_STEER_MATCH_TOL = 1e-4; COMMAND_SPEED_MATCH_TOL = 1e-4
+# A rollout starting shortly before a manual takeover still contains a response
+# that the autonomous command cannot explain. Remove this causal context too.
+MANUAL_PRE_MARGIN_S = 1.2; MANUAL_POST_MARGIN_S = .5
+PHYSICS_PRE_MARGIN_S = 1.2; PHYSICS_POST_MARGIN_S = .5
+PHYSICS_MOVING_VX = .7; PHYSICS_FROZEN_POSE_SPEED = .12
+PHYSICS_DISTANCE_WINDOW_S = .5; PHYSICS_MIN_ODOM_DISTANCE = .35
+PHYSICS_MIN_POSE_ODOM_RATIO = .65; PHYSICS_IMPACT_DECEL = -8.0
+PHYSICS_MAX_POSE_STEP = .30; PHYSICS_MAX_YAW_STEP = .45
+DT = .02; MAX_POSE_AGE = .10; MAX_VELOCITY_AGE = .10; MAX_COMMAND_AGE = .10; MAX_IMU_AGE = .05
 
 
 def resolve_storage(path):
@@ -74,7 +87,8 @@ def yaw(q):
                       1-2*(q.y*q.y+q.z*q.z))
 
 
-def read_streams(storage, pose_topic, velocity_topic, drive_topic, imu_topic):
+def read_streams(storage, pose_topic, velocity_topic, drive_topic, imu_topic,
+                 applied_command_topic=None):
     import rosbag2_py
     from rclpy.serialization import deserialize_message
     from rosidl_runtime_py.utilities import get_message
@@ -86,11 +100,13 @@ def read_streams(storage, pose_topic, velocity_topic, drive_topic, imu_topic):
                 rosbag2_py.ConverterOptions("cdr", "cdr"))
     types = {x.name: x.type for x in reader.get_all_topics_and_types()}
     topics = (pose_topic, velocity_topic, drive_topic, imu_topic)
+    if applied_command_topic is not None:
+        topics += (applied_command_topic,)
     missing = [x for x in topics if x not in types]
     if missing:
         raise RuntimeError(f"missing topics {missing}; available={sorted(types)}")
     msg_types = {x: get_message(types[x]) for x in topics}
-    pose, velocity, drive, imu = [], [], [], []
+    pose, velocity, drive, imu, applied = [], [], [], [], []
     while reader.has_next():
         topic, raw, record_ns = reader.read_next()
         if topic not in msg_types:
@@ -106,10 +122,25 @@ def read_streams(storage, pose_topic, velocity_topic, drive_topic, imu_topic):
         elif topic == drive_topic:
             d = msg.drive
             drive.append((t, d.steering_angle, d.acceleration, d.speed))
+        elif topic == applied_command_topic:
+            d = msg.drive
+            applied.append((t, d.steering_angle, d.acceleration, d.speed))
         else:
             imu.append((t, msg.angular_velocity.z,
                         msg.linear_acceleration.x, msg.linear_acceleration.y))
-    return tuple(np.asarray(x, np.float64) for x in (pose, velocity, drive, imu))
+    result=tuple(np.asarray(x, np.float64) for x in (pose, velocity, drive, imu))
+    return result if applied_command_topic is None else result+(np.asarray(applied,np.float64),)
+
+
+def expand_boolean_intervals(mask, pre_samples, post_samples):
+    """Expand each true interval without joining unrelated distant intervals."""
+    indices=np.flatnonzero(mask)
+    if not len(indices): return mask.copy()
+    groups=np.split(indices,np.flatnonzero(np.diff(indices)>1)+1);expanded=np.zeros_like(mask)
+    for group in groups:
+        lo=max(0,int(group[0])-pre_samples);hi=min(len(mask),int(group[-1])+1+post_samples)
+        expanded[lo:hi]=True
+    return expanded
 
 
 def causal_hold(stream, times, max_age):
@@ -170,7 +201,8 @@ def plot_extracted(samples, columns, dt, title, command_topic):
     axes[2,1].plot(t,odom_vy,label="stored odom vy");axes[2,1].plot(t,pose_vy,label="pose-derived vy")
     axes[2,1].plot(t,kf_vy,label="training/runtime KF vy",lw=1.5)
     axes[2,1].set_title("Lateral velocity inputs/estimates")
-    axes[3,0].plot(t,imu_ax,label="raw IMU ax");axes[3,0].plot(t,imu_ay,":",color="0.65",label="raw IMU ay (sensor frame)")
+    axes[3,0].plot(t,IMU_AX_SIGN*imu_ax,label=f"signed training IMU ax (raw x {IMU_AX_SIGN:+.0f})")
+    axes[3,0].plot(t,imu_ay,":",color="0.65",label="raw IMU ay (sensor frame)")
     axes[3,0].plot(t,IMU_AY_SIGN*imu_ay,label=f"signed training IMU ay (raw x {IMU_AY_SIGN:+.0f})",alpha=.9)
     axes[3,0].set_title("IMU acceleration and configured ay sign")
     axes[3,1].plot(t,steer,label=f"{command_topic} steering command");axes[3,1].set_title("Steering command")
@@ -191,8 +223,9 @@ def plot_extracted(samples, columns, dt, title, command_topic):
 
 
 def extract_one(storage, out, args):
-    pose,velocity,drive,imu=read_streams(storage,args.pose_topic,args.velocity_topic,args.command_topic,args.imu_topic)
-    streams={"pose":pose,"velocity":velocity,"drive":drive,"imu":imu}
+    pose,velocity,drive,imu,applied=read_streams(storage,args.pose_topic,args.velocity_topic,
+        args.command_topic,args.imu_topic,args.applied_command_topic)
+    streams={"pose":pose,"velocity":velocity,"command":drive,"imu":imu,"applied_command":applied}
     empty=[name for name,value in streams.items() if not len(value)]
     if empty: raise RuntimeError(f"{storage}: empty streams {empty}")
     start=max(x[0,0] for x in streams.values());end=min(x[-1,0] for x in streams.values())
@@ -200,10 +233,20 @@ def extract_one(storage, out, args):
     times=np.arange(start,end,args.dt)
     pp,pv=causal_hold(pose,times,args.max_pose_age);vv,vvalid=causal_hold(velocity,times,args.max_velocity_age)
     dd,dvalid=causal_hold(drive,times,args.max_command_age);ii,ivalid=causal_hold(imu,times,args.max_imu_age)
-    valid=pv&vvalid&dvalid&ivalid;times,pp,vv,dd,ii=(x[valid] for x in (times,pp,vv,dd,ii))
+    aa,avalid=causal_hold(applied,times,args.max_command_age)
+    valid=pv&vvalid&dvalid&ivalid&avalid;times,pp,vv,dd,ii,aa=(x[valid] for x in (times,pp,vv,dd,ii,aa))
     if not len(times): raise RuntimeError(f"{storage}: no samples survived causal alignment")
     base=np.c_[times-times[0],pp[:,1:4],vv[:,1:4],dd[:,1:4]]
-    bad,episodes=collision_recovery_mask(base,args.dt);kept=np.flatnonzero(~bad)
+    command_mismatch=(np.abs(dd[:,1]-aa[:,1])>args.command_steer_match_tol)|(np.abs(dd[:,3]-aa[:,3])>args.command_speed_match_tol)
+    manual=expand_boolean_intervals(command_mismatch,round(args.manual_pre_margin/args.dt),round(args.manual_post_margin/args.dt))
+    collision,episodes=collision_recovery_mask(base,args.dt)
+    physical_bad,physical_events=physical_inconsistency_mask(base,args.dt,
+        pre_margin_s=args.physics_pre_margin,post_margin_s=args.physics_post_margin,
+        moving_vx=args.physics_moving_vx,frozen_pose_speed=args.physics_frozen_pose_speed,
+        distance_window_s=args.physics_distance_window,min_odom_distance=args.physics_min_odom_distance,
+        min_pose_odom_ratio=args.physics_min_pose_odom_ratio,impact_decel=args.physics_impact_decel,
+        max_pose_step=args.physics_max_pose_step,max_yaw_step=args.physics_max_yaw_step)
+    bad=collision|manual|physical_bad;kept=np.flatnonzero(~bad)
     if not len(kept): raise RuntimeError(f"{storage}: collision filtering removed every sample")
     breaks=np.flatnonzero((np.diff(kept)>1)|(np.diff(base[kept,0])>1.5*args.dt))+1
     arrays=[];segments=[]
@@ -219,10 +262,31 @@ def extract_one(storage, out, args):
     out.parent.mkdir(parents=True,exist_ok=True)
     np.savez_compressed(out,samples=samples,dt=args.dt,columns=columns,pose_topic=np.array(args.pose_topic),
                         velocity_topic=np.array(args.velocity_topic),command_topic=np.array(args.command_topic),
-                        imu_topic=np.array(args.imu_topic))
+                        imu_topic=np.array(args.imu_topic),
+                        imu_axis_signs=np.array([IMU_WZ_SIGN,IMU_AX_SIGN,IMU_AY_SIGN],np.float32),
+                        imu_ema_alpha=np.array(IMU_EMA_ALPHA,np.float32),
+                        kf_cornering_stiffness=np.array([KF_CF,KF_CR],np.float32),
+                        kf_low_speed_threshold=np.array(KF_LOW_SPEED_THRESHOLD,np.float32))
     meta={"source":str(storage.resolve()),"pose_topic":args.pose_topic,"velocity_topic":args.velocity_topic,
           "command_topic":args.command_topic,"imu_topic":args.imu_topic,"alignment":"causal_hold",
-          "raw_aligned_samples":len(base),"removed_collision_samples":int(bad.sum()),
+          "imu_axis_signs":{"wz":IMU_WZ_SIGN,"ax":IMU_AX_SIGN,"ay":IMU_AY_SIGN},
+          "imu_ema_alpha":IMU_EMA_ALPHA,
+          "kf_parameters":{"cornering_stiffness_front":KF_CF,"cornering_stiffness_rear":KF_CR,
+                           "low_speed_threshold":KF_LOW_SPEED_THRESHOLD,"steer_scale":KF_STEER_SCALE,
+                           "steer_bias":KF_STEER_BIAS,"max_steer":KF_MAX_STEER},
+          "applied_command_topic":args.applied_command_topic,"raw_aligned_samples":len(base),
+          "removed_collision_samples":int(collision.sum()),"raw_command_mismatch_samples":int(command_mismatch.sum()),
+          "removed_manual_with_margin_samples":int(manual.sum()),
+          "removed_physical_inconsistency_samples":int(physical_bad.sum()),
+          "physical_inconsistency_events":physical_events,
+          "physical_filter":{"pre_margin_s":args.physics_pre_margin,"post_margin_s":args.physics_post_margin,
+              "moving_vx_mps":args.physics_moving_vx,"frozen_pose_speed_mps":args.physics_frozen_pose_speed,
+              "distance_window_s":args.physics_distance_window,"min_odom_distance_m":args.physics_min_odom_distance,
+              "min_mcl_odom_distance_ratio":args.physics_min_pose_odom_ratio,
+              "impact_decel_mps2":args.physics_impact_decel,"max_pose_step_m":args.physics_max_pose_step,
+              "max_yaw_step_rad":args.physics_max_yaw_step},
+          "manual_filter":{"steer_tolerance":args.command_steer_match_tol,"speed_tolerance":args.command_speed_match_tol,
+                           "pre_margin_s":args.manual_pre_margin,"post_margin_s":args.manual_post_margin},
           "output_samples":len(samples),"collision_episodes":episodes,"segments":segments,
           "split_policy":"single-bag-identical-train-test"}
     out.with_suffix(".json").write_text(json.dumps(meta,indent=2)+"\n")
@@ -239,10 +303,24 @@ def main():
     p.add_argument("--command-topic", "--drive-topic", dest="command_topic", default=COMMAND_TOPIC,
                    help="Ackermann command source; default is /ackermann_cmd")
     p.add_argument("--imu-topic", default=IMU_TOPIC)
+    p.add_argument("--applied-command-topic",default=APPLIED_COMMAND_TOPIC)
+    p.add_argument("--command-steer-match-tol",type=float,default=COMMAND_STEER_MATCH_TOL)
+    p.add_argument("--command-speed-match-tol",type=float,default=COMMAND_SPEED_MATCH_TOL)
+    p.add_argument("--manual-pre-margin",type=float,default=MANUAL_PRE_MARGIN_S)
+    p.add_argument("--manual-post-margin",type=float,default=MANUAL_POST_MARGIN_S)
+    p.add_argument("--physics-pre-margin",type=float,default=PHYSICS_PRE_MARGIN_S)
+    p.add_argument("--physics-post-margin",type=float,default=PHYSICS_POST_MARGIN_S)
+    p.add_argument("--physics-moving-vx",type=float,default=PHYSICS_MOVING_VX)
+    p.add_argument("--physics-frozen-pose-speed",type=float,default=PHYSICS_FROZEN_POSE_SPEED)
+    p.add_argument("--physics-distance-window",type=float,default=PHYSICS_DISTANCE_WINDOW_S)
+    p.add_argument("--physics-min-odom-distance",type=float,default=PHYSICS_MIN_ODOM_DISTANCE)
+    p.add_argument("--physics-min-pose-odom-ratio",type=float,default=PHYSICS_MIN_POSE_ODOM_RATIO)
+    p.add_argument("--physics-impact-decel",type=float,default=PHYSICS_IMPACT_DECEL)
+    p.add_argument("--physics-max-pose-step",type=float,default=PHYSICS_MAX_POSE_STEP)
+    p.add_argument("--physics-max-yaw-step",type=float,default=PHYSICS_MAX_YAW_STEP)
     p.add_argument("--dt", type=float, default=DT)
-    # The node retains the latest pose/velocity/command between callbacks.
-    # A generous watchdog reproduces that behavior without fragmenting a bag
-    # for an occasional dropped 50 Hz message. IMU retains its strict 50 ms age.
+    # 0815 topics are near 50 Hz or faster. Reject stale held samples instead
+    # of silently turning a topic dropout into apparently valid dynamics data.
     p.add_argument("--max-pose-age", type=float, default=MAX_POSE_AGE)
     p.add_argument("--max-velocity-age", type=float, default=MAX_VELOCITY_AGE)
     p.add_argument("--max-command-age", type=float, default=MAX_COMMAND_AGE)

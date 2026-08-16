@@ -467,6 +467,9 @@ private:
         this->declare_parameter("all_rollouts_fault_cost_threshold", 5000.0);
         mppi_params_.all_rollouts_fault_cost_threshold =
             this->get_parameter("all_rollouts_fault_cost_threshold").as_double();
+        this->declare_parameter("weighted_trajectory_safety_enabled", true);
+        mppi_params_.weighted_trajectory_safety_enabled =
+            this->get_parameter("weighted_trajectory_safety_enabled").as_bool();
         this->declare_parameter("car_radius",           0.15);   mppi_params_.car_radius    = this->get_parameter("car_radius").as_double();
         this->declare_parameter("q_obs",                50.0);   mppi_params_.q_obs         = this->get_parameter("q_obs").as_double();
         this->declare_parameter("noise_steer_std",      0.4);    mppi_params_.noise_steer_std  = this->get_parameter("noise_steer_std").as_double();
@@ -568,11 +571,11 @@ private:
         this->declare_parameter("imu_ema_alpha",0.25);
         imu_ema_alpha_=static_cast<float>(std::clamp(
             this->get_parameter("imu_ema_alpha").as_double(),0.0,1.0));
-        this->declare_parameter("imu_wz_sign",-1.0);
+        this->declare_parameter("imu_wz_sign",1.0);
         imu_wz_sign_=static_cast<float>(this->get_parameter("imu_wz_sign").as_double());
         this->declare_parameter("imu_ax_sign",1.0);
         imu_ax_sign_=static_cast<float>(this->get_parameter("imu_ax_sign").as_double());
-        this->declare_parameter("imu_ay_sign",-1.0);
+        this->declare_parameter("imu_ay_sign",1.0);
         imu_ay_sign_=static_cast<float>(this->get_parameter("imu_ay_sign").as_double());
         this->declare_parameter("kf_cornering_stiffness_front",110.0);lateral_velocity_kf_params_.cornering_stiffness_front=this->get_parameter("kf_cornering_stiffness_front").as_double();
         this->declare_parameter("kf_cornering_stiffness_rear",199.0);lateral_velocity_kf_params_.cornering_stiffness_rear=this->get_parameter("kf_cornering_stiffness_rear").as_double();
@@ -982,7 +985,7 @@ private:
     std::array<float,3> aligned_imu_{0.f,0.f,0.f};
     double imu_sync_max_age_s_{0.05};
     float imu_ema_alpha_{0.25f};
-    float imu_wz_sign_{-1.f},imu_ax_sign_{1.f},imu_ay_sign_{-1.f};
+    float imu_wz_sign_{1.f},imu_ax_sign_{1.f},imu_ay_sign_{1.f};
     bool imu_received_{false},aligned_imu_valid_{false},imu_ema_initialized_{false};
 };
 

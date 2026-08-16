@@ -18,6 +18,7 @@ from model_tuning_utils.lateral_velocity_kf import LateralVelocityKFParams,estim
 SOURCE_DIRS=(
     ROOT/"model_tuning/data/real_car_v2_drive",
     ROOT/"model_tuning/results/effective_vs_dynamic_0813/data",
+    ROOT/"model_tuning/data/ifac0815_autonomous_physics_clean",
 )
 OUTPUT=ROOT/"model_tuning/data/dynamic_40ms_all_drive_source_20ms.npz"
 REPORT=OUTPUT.with_suffix(".json")
@@ -50,8 +51,9 @@ def main():
     # collision-cleaned /drive sessions are training data.
     # One aggressive run supplies the otherwise missing 3--4 m/s yaw-recovery
     # excitation; the second run remains strictly unseen for honest testing.
-    test_names={"aggressive_boundary_run2.npz"}
-    val_names={"effective_speed30_run1.npz","rosbag2_2026_08_08-16_54_33.npz"}
+    test_names={"aggressive_boundary_run2.npz","codex_highspeed_run1.npz"}
+    val_names={"effective_speed30_run1.npz","rosbag2_2026_08_08-16_54_33.npz",
+               "codex_effective_history_1200_run2_60s.npz"}
     for source_id,path in enumerate(files):
         z=np.load(path);a=z["samples"].astype(float);names={str(x):i for i,x in enumerate(z["columns"])};dt=float(z["dt"])
         if abs(dt-c.dt)>1e-9:raise RuntimeError(f"{path}: dt={dt}")
@@ -60,10 +62,18 @@ def main():
             ii=np.flatnonzero(local_ids==local);s=a[ii];n=len(s)
             if n<12:continue
             kfp=LateralVelocityKFParams(cornering_stiffness_front=float(cfg["kf_cornering_stiffness_front"]),cornering_stiffness_rear=float(cfg["kf_cornering_stiffness_rear"]),mass=float(cfg["mass"]),yaw_inertia=float(cfg["I_z"]),l_f=float(cfg["l_f"]),l_r=float(cfg["l_r"]),dt=dt,min_longitudinal_speed=float(cfg["kf_min_vx"]),low_speed_threshold=float(cfg["kf_low_speed_threshold"]))
-            vy,r=estimate_dataset(s,z["columns"],dt,kfp,steer_scale=float(cfg["kf_steer_scale"]),steer_bias=float(cfg["kf_steer_bias"]),max_steer=float(cfg["kf_max_steer"]),imu_ema_alpha=float(cfg["imu_ema_alpha"]),imu_wz_sign=float(cfg["imu_wz_sign"]),imu_ay_sign=float(cfg["imu_ay_sign"]))
+            # Pre-0815 bags used the legacy mounted-sensor convention. New
+            # extracts store their own body-frame sign contract in the NPZ.
+            # Never apply one global sign to a mixed-date training archive.
+            source_signs=(z["imu_axis_signs"].astype(float) if "imu_axis_signs" in z.files
+                          else np.array((cfg["imu_wz_sign"],cfg["imu_ax_sign"],cfg["imu_ay_sign"]),float))
+            imu_wz_sign,imu_ax_sign,imu_ay_sign=source_signs
+            source_ema_alpha=(float(z["imu_ema_alpha"]) if "imu_ema_alpha" in z.files
+                              else float(cfg["imu_ema_alpha"]))
+            vy,r=estimate_dataset(s,z["columns"],dt,kfp,steer_scale=float(cfg["kf_steer_scale"]),steer_bias=float(cfg["kf_steer_bias"]),max_steer=float(cfg["kf_max_steer"]),imu_ema_alpha=source_ema_alpha,imu_wz_sign=imu_wz_sign,imu_ay_sign=imu_ay_sign)
             vx=s[:,names["vx"]];steer_cmd=s[:,names["steer"]]
             speed_cmd=np.clip(s[:,names["speed_cmd"]],float(cfg["min_speed"]),TRAINING_MAX_SPEED)
-            imu_ax=ema(float(cfg["imu_ax_sign"])*s[:,names["imu_ax"]]);imu_ay=ema(float(cfg["imu_ay_sign"])*s[:,names["imu_ay"]])
+            imu_ax=ema(imu_ax_sign*s[:,names["imu_ax"]],source_ema_alpha);imu_ay=ema(imu_ay_sign*s[:,names["imu_ay"]],source_ema_alpha)
             # Remove per-session longitudinal bias/gravity projection using
             # stationary samples only. Never estimate this from cornering or
             # acceleration data, which would erase real dynamics.
@@ -102,7 +112,7 @@ def main():
             # Every discontinuous segment needs its own id. Reusing source_id
             # made recursive windows cross localization/collision cuts.
             bag_id=next_bag
-            features.append(feat.astype(np.float32));targets.append(target.astype(np.float32));valids.append(ok);bag_ids.append(np.full(n,bag_id));split_ids.append(np.full(n,split));manifest.append({"bag_id":bag_id,"source":str(path),"segment":int(local),"split":("train","val","test")[split],"samples":n,"valid":int(ok.sum()),"imu_ax_stationary_bias_removed":ax_bias,"command_topic":str(z["command_topic"])});next_bag+=1
+            features.append(feat.astype(np.float32));targets.append(target.astype(np.float32));valids.append(ok);bag_ids.append(np.full(n,bag_id));split_ids.append(np.full(n,split));manifest.append({"bag_id":bag_id,"source":str(path),"segment":int(local),"split":("train","val","test")[split],"samples":n,"valid":int(ok.sum()),"imu_ax_stationary_bias_removed":ax_bias,"imu_axis_signs":{"wz":imu_wz_sign,"ax":imu_ax_sign,"ay":imu_ay_sign},"imu_ema_alpha":source_ema_alpha,"command_topic":str(z["command_topic"])});next_bag+=1
     X=np.concatenate(features);Y=np.concatenate(targets);B=np.concatenate(bag_ids);S=np.concatenate(split_ids);V=np.concatenate(valids)
     assert X.shape[1]==20 and tuple(FEATURES)==("vx","vy","yaw_rate","steer_cmd","speed_cmd","applied_steer","steer_cmd_delta","base_next_vx","base_next_vy","base_next_yaw_rate","steer_t-4","speed_t-4","steer_t-3","speed_t-3","steer_t-2","speed_t-2","steer_t-1","speed_t-1","steer_t","speed_t")
     np.savez_compressed(OUTPUT,features=X,targets=Y,bag_id=B,split=S,valid=V,feature_names=np.array(FEATURES),target_names=np.array(OUTPUTS),dt=c.dt)

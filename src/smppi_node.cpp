@@ -1114,6 +1114,24 @@ private:
             obstacle.color.a = 0.35f;
             markers.markers.push_back(obstacle);
         }
+
+        // MarkerArray does not replace the previous marker set.  An ADD for
+        // the current obstacles therefore leaves a marker behind whenever a
+        // perception message contains fewer obstacles (including an empty
+        // array), or when the obstacle input times out.  Explicitly delete
+        // the IDs that were published in the previous cycle but are no
+        // longer active so RViz reflects the same obstacle set used by MPPI.
+        for (int i = mppi_params_.num_obstacles;
+             i < published_obstacle_marker_count_; ++i) {
+            visualization_msgs::msg::Marker deleted_obstacle;
+            deleted_obstacle.header.frame_id = "map";
+            deleted_obstacle.header.stamp = this->now();
+            deleted_obstacle.ns = "mppi_obstacles";
+            deleted_obstacle.id = 100 + i;
+            deleted_obstacle.action = visualization_msgs::msg::Marker::DELETE;
+            markers.markers.push_back(deleted_obstacle);
+        }
+        published_obstacle_marker_count_ = mppi_params_.num_obstacles;
         vis_pub_->publish(markers);
     }
 
@@ -1155,6 +1173,7 @@ private:
     bool obstacle_avoidance_enabled_{false};
     double obstacle_timeout_s_{0.5};
     rclcpp::Time obstacle_stamp_{0, 0, RCL_ROS_TIME};
+    int published_obstacle_marker_count_{0};
     bool sudden_obstacle_replan_enabled_{true};
     bool has_obstacle_measurement_{false};
     float last_obstacle_x_{0.0f},last_obstacle_y_{0.0f};

@@ -52,7 +52,7 @@
     min_accel: -1.0          # m/s^2
     max_accel: 1.0           # m/s^2
     min_speed: 0.5
-    max_speed: 4.0  # fastest validated Map1 setting
+    max_speed: 3.5  # fastest validated Map1 setting
     # Racing-line 자유도를 위해 중앙선 오차 기반 publish 속도 제한은 사용하지 않는다.
     heading_speed_limit_gain: 0.0
     contour_speed_limit_gain: 0.0
@@ -91,7 +91,7 @@
     real_perception_obstacles_topic: /f1/perception/object/obstacles/arr
     real_perception_obstacles_frame: map
     obstacle_timeout: 0.5
-    car_radius: 0.55             # conservative combined footprint radius
+    car_radius: 0.25             # conservative combined footprint radius
     obstacle_influence_distance: 0.9
     # Temporary emergency exploration only when a previously absent/moved
     # obstacle first appears near the vehicle. Normal obstacle planning keeps
@@ -189,7 +189,7 @@
     # --- Runtime environment and topics ---
     # true : simulator pose + twist come from simulation_odom_topic
     # false: real_pose_topic supplies map pose and real_odom_topic supplies velocity
-    is_simulation: true
+    is_simulation: false
     simulation_odom_topic: /ego_racecar/odom
     simulation_drive_topic: /drive  # must match f1tenth_gym_ros sim.yaml ego_drive_topic
     real_pose_topic: /newmcl_pose

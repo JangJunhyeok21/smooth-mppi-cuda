@@ -121,6 +121,7 @@ struct Params {
     float obs_x[MAX_OBS];
     float obs_y[MAX_OBS];
     float car_radius;
+    float obstacle_influence_distance;
     float q_obs;
 
     // Noise & Tuning
@@ -228,6 +229,7 @@ private:
     void cleanup_cuda_memory();
     Control compute_optimal_control(const State &current_state);
     float trajectory_min_boundary_clearance(const std::vector<State>& trajectory) const;
+    float trajectory_min_obstacle_clearance(const std::vector<State>& trajectory) const;
 
     int K_, T_;
     Params params_;

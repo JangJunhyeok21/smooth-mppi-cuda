@@ -34,8 +34,9 @@ class Recorder(Node):
         self.track_length = float(segment_length.sum())
         self.last_progress = None
         self.accumulated_progress = 0.0
-        self.odom=[]; self.drive=[]; self.pred=[]; self.status="timeout"
+        self.odom=[]; self.drive=[]; self.pred=[]; self.obstacle=[]; self.status="timeout"
         self.create_subscription(Odometry,"/ego_racecar/odom",self.odom_cb,50)
+        self.create_subscription(Odometry,"/opp_racecar/odom",self.obstacle_cb,20)
         self.create_subscription(AckermannDriveStamped,"/drive",self.drive_cb,50)
         self.create_subscription(MppiTrajectory,"/mppi_optimal_trajectory",self.pred_cb,20)
         self.create_subscription(Bool,"/collision0",self.collision_cb,10)
@@ -74,6 +75,9 @@ class Recorder(Node):
         if self.t0 is None and abs(m.drive.speed) > .05 and self.latest_pose is not None:
             self.t0=self.now_s(); self.start=self.latest_pose
         self.drive.append((self.rel(),m.drive.steering_angle,m.drive.speed,m.drive.acceleration))
+    def obstacle_cb(self,m):
+        p=m.pose.pose.position
+        self.obstacle.append((self.rel(),p.x,p.y))
     def pred_cb(self,m):
         self.pred.append((self.rel(),np.asarray(m.predicted_x),np.asarray(m.predicted_y),
                           np.asarray(m.steer),np.asarray(m.accel)))
@@ -83,21 +87,30 @@ class Recorder(Node):
         if not self.odom:return
         if abs(self.accumulated_progress) >= .98*self.track_length:
             self.finish("lap_complete")
-        elif self.rel()>90: self.finish("timeout")
+        elif self.rel()>30: self.finish("timeout")
     def finish(self,status):
         if not rclpy.ok():return
         self.status=status; self.save(); self.get_logger().info(f"END {status}, t={self.rel():.2f}s")
         rclpy.shutdown()
     def save(self):
         od=np.asarray(self.odom); dr=np.asarray(self.drive)
-        np.savez_compressed(self.out/"map1_lap_data.npz",odom=od,drive=dr,
+        obstacle=np.asarray(self.obstacle)
+        np.savez_compressed(self.out/"map1_lap_data.npz",odom=od,drive=dr,obstacle=obstacle,
             prediction_t=np.asarray([p[0] for p in self.pred]),
             prediction_x=np.asarray([p[1] for p in self.pred],dtype=object),
             prediction_y=np.asarray([p[2] for p in self.pred],dtype=object),status=self.status)
+        minimum_obstacle_distance=float("nan")
+        if len(od) and len(obstacle):
+            center=np.median(obstacle[:,1:3],axis=0)
+            minimum_obstacle_distance=float(np.min(np.hypot(od[:,1]-center[0],od[:,2]-center[1])))
         with open(self.out/"summary.txt","w") as f:
-            f.write(f"status={self.status}\nduration_s={self.rel():.6f}\nodom_samples={len(od)}\ndrive_samples={len(dr)}\nprediction_samples={len(self.pred)}\n")
+            f.write(f"status={self.status}\nduration_s={self.rel():.6f}\nodom_samples={len(od)}\ndrive_samples={len(dr)}\nprediction_samples={len(self.pred)}\nminimum_obstacle_center_distance_m={minimum_obstacle_distance:.6f}\n")
         fig,ax=plt.subplots(1,2,figsize=(15,6))
         if len(od): ax[0].plot(od[:,1],od[:,2],"k",lw=2,label="Simulator actual")
+        if len(obstacle):
+            center=np.median(obstacle[:,1:3],axis=0)
+            ax[0].scatter(center[0],center[1],s=100,color="red",marker="x",label="Static obstacle")
+            ax[0].add_patch(plt.Circle(center,0.65,color="red",alpha=.18,label="0.65 m exclusion radius"))
         stride=max(1,len(self.pred)//25)
         for j,p in enumerate(self.pred[::stride]):
             ax[0].plot(p[1],p[2],color="tab:blue",alpha=.18,lw=.8,label="MPPI prediction" if j==0 else None)

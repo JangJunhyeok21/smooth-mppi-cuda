@@ -817,8 +817,24 @@ namespace mppi
             float dx = s.x - p.obs_x[i];
             float dy = s.y - p.obs_y[i];
             float dist = sqrtf(dx * dx + dy * dy);
-            if (dist < 1.5f) {
-                obs_cost += p.q_obs / (dist - p.car_radius + 1e-3f);
+            if (dist < p.obstacle_influence_distance) {
+                const float penetration = p.obstacle_influence_distance - dist;
+                obs_cost += p.q_obs * penetration * penetration;
+                // Entering the avoidance corridor at racing speed leaves no
+                // steering authority for the next knot. Penalize kinetic
+                // energy progressively near the obstacle, but allow speed to
+                // recover immediately after passing it.
+                const float proximity = penetration /
+                    fmaxf(1.0e-3f, p.obstacle_influence_distance - p.car_radius);
+                const float bounded_proximity = fminf(1.0f, fmaxf(0.0f, proximity));
+                obs_cost += 0.35f * p.q_obs * bounded_proximity * bounded_proximity
+                          * (s.v * s.v + s.vy * s.vy);
+                if (dist < p.car_radius) {
+                    // The former reciprocal became negative after collision,
+                    // accidentally rewarding rollouts through an obstacle.
+                    const float overlap = p.car_radius - dist;
+                    obs_cost += p.q_collision * (1.0f + 20.0f * overlap * overlap);
+                }
             }
         }
 
@@ -948,6 +964,31 @@ namespace mppi
         float total_cost = 0.0f;
         Control current_action = prev_controls[0]; 
         Control last_u = current_action;
+
+        // White-noise exploration around one nominal can occasionally leave
+        // every rollout on the same side of a nearby obstacle. Keep 87.5% of
+        // the population completely standard and reserve only one lane per
+        // side (2/16 total) for coherent lateral exploration. Do not inject a
+        // forced speed reduction: speed remains an MPPI optimization result.
+        bool obstacle_ahead = false;
+        for (int obstacle_index = 0; obstacle_index < p.num_obstacles; ++obstacle_index) {
+            const float obstacle_dx = p.obs_x[obstacle_index] - start_state.x;
+            const float obstacle_dy = p.obs_y[obstacle_index] - start_state.y;
+            const float forward_distance = obstacle_dx * cosf(start_state.yaw)
+                                         + obstacle_dy * sinf(start_state.yaw);
+            const float distance_sq = obstacle_dx * obstacle_dx + obstacle_dy * obstacle_dy;
+            if (forward_distance > -0.25f && distance_sq < 36.0f) {
+                obstacle_ahead = true;
+                break;
+            }
+        }
+        if (obstacle_ahead) {
+            const int avoidance_lane = k & 15;
+            if (avoidance_lane == 14)
+                current_action.steer -= 0.24f;
+            else if (avoidance_lane == 15)
+                current_action.steer += 0.24f;
+        }
         int local_path_idx = start_path_idx;
         int initial_path_idx = start_path_idx; 
         float gru_hidden[RESIDUAL_HIDDEN];
@@ -1565,6 +1606,21 @@ namespace mppi
         return minimum;
     }
 
+    float MPPISolver::trajectory_min_obstacle_clearance(
+        const std::vector<State>& trajectory) const {
+        if(params_.num_obstacles<=0 || trajectory.empty())
+            return std::numeric_limits<float>::infinity();
+        float minimum=std::numeric_limits<float>::infinity();
+        for(const State& state:trajectory) {
+            for(int i=0;i<params_.num_obstacles;++i) {
+                const float dx=state.x-params_.obs_x[i];
+                const float dy=state.y-params_.obs_y[i];
+                minimum=std::min(minimum,std::sqrt(dx*dx+dy*dy));
+            }
+        }
+        return minimum;
+    }
+
     Control MPPISolver::compute_optimal_control(const State &current_state) {
         const bool phase_aware = uses_40ms_rollout_knot(params_.dynamics_model);
         const bool advance_warm_start = !phase_aware || model_knot_phase_==1;
@@ -1644,8 +1700,10 @@ namespace mppi
         // execute the lowest-cost sampled sequence that stays inside the
         // collision boundary instead.
         if(params_.weighted_trajectory_safety_enabled &&
-           trajectory_min_boundary_clearance(weighted_control_trajectory_)
-                < params_.collision_radius) {
+           (trajectory_min_boundary_clearance(weighted_control_trajectory_)
+                < params_.collision_radius ||
+            trajectory_min_obstacle_clearance(weighted_control_trajectory_)
+                < params_.car_radius)) {
             CUDA_CHECK(cudaMemcpy(h_states_.data(),d_states_,K_*T_*sizeof(State),
                                   cudaMemcpyDeviceToHost));
             std::vector<int> candidates(K_);
@@ -1658,7 +1716,9 @@ namespace mppi
             for(int k:candidates) {
                 std::copy_n(h_states_.begin()+k*T_,T_,candidate_trajectory.begin());
                 if(trajectory_min_boundary_clearance(candidate_trajectory)
-                        >= params_.collision_radius) {
+                        >= params_.collision_radius &&
+                   trajectory_min_obstacle_clearance(candidate_trajectory)
+                        >= params_.car_radius) {
                     safe_candidate=k;
                     break;
                 }
@@ -1677,13 +1737,40 @@ namespace mppi
                 CUDA_CHECK(cudaMemcpy(weighted_control_trajectory_.data(),d_weighted_states_,
                                       T_*sizeof(State),cudaMemcpyDeviceToHost));
             } else {
-                // Never publish a known off-track optimization result. Hold a
-                // low-speed version of the nominal sequence so the next 50 Hz
-                // solve can recover with a new sample population.
-                weighted_controls=h_prev_controls_;
-                for(Control& control:weighted_controls)
-                    control.accel=fminf(params_.min_speed,
-                                        fmaxf(0.0f,current_state.v));
+                // Replaying the previous steering when every candidate is
+                // unsafe can lock the vehicle into an off-track circle. Build
+                // a low-speed geometric recovery sequence toward a centerline
+                // look-ahead point so the next solve starts from a recoverable
+                // state instead.
+                size_t nearest_index=0;
+                float nearest_distance_sq=std::numeric_limits<float>::infinity();
+                for(size_t index=0;index<h_ref_xs_.size();++index) {
+                    const float dx=current_state.x-h_ref_xs_[index];
+                    const float dy=current_state.y-h_ref_ys_[index];
+                    const float distance_sq=dx*dx+dy*dy;
+                    if(distance_sq<nearest_distance_sq) {
+                        nearest_distance_sq=distance_sq;
+                        nearest_index=index;
+                    }
+                }
+                const size_t lookahead_index=h_ref_xs_.empty()?0:
+                    (nearest_index+8)%h_ref_xs_.size();
+                const float desired_heading=h_ref_xs_.empty()?current_state.yaw:
+                    std::atan2(h_ref_ys_[lookahead_index]-current_state.y,
+                               h_ref_xs_[lookahead_index]-current_state.x);
+                const float heading_error=std::atan2(
+                    std::sin(desired_heading-current_state.yaw),
+                    std::cos(desired_heading-current_state.yaw));
+                const float desired_applied_steer=std::min(params_.max_steer,
+                    std::max(-params_.max_steer,0.8f*heading_error));
+                const float steer_scale=std::fabs(params_.kinematic_steer_scale)>1.0e-6f
+                    ?params_.kinematic_steer_scale:1.0f;
+                const float recovery_steer=std::min(params_.max_steer,
+                    std::max(-params_.max_steer,
+                        (desired_applied_steer-params_.kinematic_steer_bias)/steer_scale));
+                weighted_controls.assign(T_,{
+                    recovery_steer,
+                    fminf(params_.min_speed,fmaxf(0.0f,current_state.v))});
                 optimal_controls_=weighted_controls;
                 output=weighted_controls[0];
                 CUDA_CHECK(cudaMemcpy(d_weighted_controls_,weighted_controls.data(),

@@ -66,13 +66,13 @@
     q_error_speed: 0.0      # 중앙선 오차에 따른 속도 억제 비활성화
     q_du: 0.12
     q_steer: 0.30
-    q_collision: 700.0
+    q_collision: 5000.0
     q_lat_g: 60.0
     lat_g_soft_limit: 9.5                 # soft combined-grip ceiling
     longitudinal_accel_soft_limit: 4.0    # friction ellipse ax axis [m/s^2]
     collision_radius: 0.15     # aggressive racing-line clearance
     boundary_soft_margin: 0.15 # start soft cost at 0.30 m clearance
-    q_boundary_soft: 150.0
+    q_boundary_soft: 500.0
     # Minimum rollout cost interpreted as "all candidates faulted".
     all_rollouts_fault_cost_threshold: 5000.0
     # true: reject an off-track weighted-control rollout and use the
@@ -84,11 +84,17 @@
     horizon_steps: 60       # model_dt=0.04 s 기준 2.4 s prediction horizon
     
     # --- Obstacle Avoidance Params ---
-    car_radius: 0.25
-    q_obs: 150.0
+    obstacle_avoidance_enabled: true
+    obstacle_odom_topic: /opp_racecar/odom
+    obstacle_timeout: 0.5
+    car_radius: 0.65             # measured collision at 0.619 m + 3 cm margin
+    # Keep the physical clearance compact, but start shaping the rollout
+    # before the car reaches a steering-infeasible near-field condition.
+    obstacle_influence_distance: 1.20
+    q_obs: 1000.0
     
     # --- Noise & Tuning ---
-    noise_steer_std: 0.35    # rad/s
+    noise_steer_std: 0.70    # rad/s; enough lateral exploration for overtaking
     noise_accel_std: 2.0     # m/s^3
     max_steer_rate: 50.0    # rad/s
     # Input slew rate: m/s^2 for direct-speed models, m/s^3 for acceleration-command models.

@@ -122,7 +122,12 @@ struct Params {
     float obs_y[MAX_OBS];
     float car_radius;
     float obstacle_influence_distance;
+    float sudden_obstacle_influence_distance;
+    float sudden_obstacle_min_clearance;
+    float sudden_obstacle_candidate_clearance;
+    float sudden_obstacle_cost_multiplier;
     float q_obs;
+    bool sudden_obstacle_replan;
 
     // Noise & Tuning
     float noise_steer_std;

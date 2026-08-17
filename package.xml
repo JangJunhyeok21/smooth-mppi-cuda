@@ -20,6 +20,7 @@
   <depend>sensor_msgs</depend>
   <depend>nav_msgs</depend>
   <depend>visualization_msgs</depend>
+  <depend>f1_msgs</depend>
   <buildtool_depend>rosidl_default_generators</buildtool_depend>
   <depend>rosidl_typesupport_fastrtps_cpp</depend>
   <exec_depend>rosidl_default_runtime</exec_depend>

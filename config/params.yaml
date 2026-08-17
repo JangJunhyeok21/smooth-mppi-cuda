@@ -85,16 +85,31 @@
     
     # --- Obstacle Avoidance Params ---
     obstacle_avoidance_enabled: true
-    obstacle_odom_topic: /opp_racecar/odom
+    # Simulation supplies one opponent as global odometry. Real-car perception
+    # supplies up to MAX_OBS global detections using f1_msgs/F1stateArr.
+    simulation_obstacle_odom_topic: /opp_racecar/odom
+    real_perception_obstacles_topic: /f1/perception/object/obstacles/arr
+    real_perception_obstacles_frame: map
     obstacle_timeout: 0.5
-    car_radius: 0.65             # measured collision at 0.619 m + 3 cm margin
-    # Keep the physical clearance compact, but start shaping the rollout
-    # before the car reaches a steering-infeasible near-field condition.
-    obstacle_influence_distance: 1.20
-    q_obs: 1000.0
+    car_radius: 0.55             # conservative combined footprint radius
+    obstacle_influence_distance: 0.9
+    # Temporary emergency exploration only when a previously absent/moved
+    # obstacle first appears near the vehicle. Normal obstacle planning keeps
+    # using obstacle_influence_distance and has no forced deceleration.
+    sudden_obstacle_replan_enabled: true
+    sudden_obstacle_jump_threshold: 0.75 # 새로 나타난 것으로 볼 위치 변화량
+    sudden_obstacle_replan_distance: 3.0 # 긴급 모드를 켤 최대 차량 거리
+    sudden_obstacle_replan_duration: 1.0 # 긴급 모드를 유지할 시간
+    sudden_obstacle_influence_distance: 2.0 # rollout cost에 장애물 비용을 적용하기 시작하는 거리 (기존 obstacle_influence_distance 대신)
+    # Cost target includes model/rectangular-footprint margin, while candidate
+    # acceptance remains at the actual measured clearance requirement.
+    sudden_obstacle_min_clearance: 0.70 # 긴급 모드의 비용상 목표 안전거리
+    sudden_obstacle_candidate_clearance: 0.68 # 실제 실행 candidate를 허용하는 최소 예측 거리
+    sudden_obstacle_cost_multiplier: 3.0
+    q_obs: 650.0
     
     # --- Noise & Tuning ---
-    noise_steer_std: 0.70    # rad/s; enough lateral exploration for overtaking
+    noise_steer_std: 0.35    # rad/s
     noise_accel_std: 2.0     # m/s^3
     max_steer_rate: 50.0    # rad/s
     # Input slew rate: m/s^2 for direct-speed models, m/s^3 for acceleration-command models.
@@ -154,7 +169,6 @@
     C_f: 1.2447
     D_f: 0.7955
     E_f: 0.7815
-
     B_r: 6.6457
     C_r: 2.2129
     D_r: 0.7317

@@ -7,6 +7,7 @@
 #include "visualization_msgs/msg/marker_array.hpp"
 #include "geometry_msgs/msg/point.hpp"
 #include "geometry_msgs/msg/pose_stamped.hpp"
+#include "f1_msgs/msg/f1state_arr.hpp"
 #include "cuda_mppi_controller/cuda_mppi_core.hpp"
 #include "cuda_mppi_controller/kinematic_residual_weights.hpp"
 #include "cuda_mppi_controller/lateral_velocity_kf.hpp"
@@ -15,6 +16,7 @@
 #include <cmath>
 #include <array>
 #include <deque>
+#include <limits>
 
 using namespace std::chrono_literals;
 
@@ -87,11 +89,24 @@ public:
                 std::bind(&MPPINode::odom_callback, this, std::placeholders::_1));
         }
         if (obstacle_avoidance_enabled_) {
-            obstacle_odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
-                obstacle_odom_topic_, 10,
-                std::bind(&MPPINode::obstacle_odom_callback, this, std::placeholders::_1));
-            RCLCPP_INFO(this->get_logger(), "Obstacle avoidance: %s (radius %.2f m)",
-                        obstacle_odom_topic_.c_str(), mppi_params_.car_radius);
+            if (is_simulation_) {
+                obstacle_odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
+                    simulation_obstacle_odom_topic_, 10,
+                    std::bind(&MPPINode::obstacle_odom_callback, this, std::placeholders::_1));
+                RCLCPP_INFO(this->get_logger(),
+                    "Simulation obstacle input: %s [nav_msgs/Odometry]",
+                    simulation_obstacle_odom_topic_.c_str());
+            } else {
+                perception_obstacles_sub_ =
+                    this->create_subscription<f1_msgs::msg::F1stateArr>(
+                        real_perception_obstacles_topic_, 10,
+                        std::bind(&MPPINode::perception_obstacles_callback,
+                                  this, std::placeholders::_1));
+                RCLCPP_INFO(this->get_logger(),
+                    "Real perception obstacle input: %s [f1_msgs/F1stateArr, frame=%s]",
+                    real_perception_obstacles_topic_.c_str(),
+                    real_perception_obstacles_frame_.c_str());
+            }
         }
         // The no-IMU rollout neither subscribes to nor waits for IMU.  Keep the
         // subscription only for the legacy 21-feature MLP checkpoint.
@@ -119,12 +134,89 @@ public:
     }
 
 private:
+    void activate_sudden_replan_if_needed(
+        float obstacle_x, float obstacle_y, bool newly_observed,
+        float obstacle_jump) {
+        const float ego_distance = std::hypot(
+            obstacle_x-current_state_.x, obstacle_y-current_state_.y);
+        if (sudden_obstacle_replan_enabled_ &&
+            (newly_observed || obstacle_jump >= sudden_obstacle_jump_threshold_) &&
+            ego_distance <= sudden_obstacle_replan_distance_) {
+            sudden_obstacle_replan_until_ = this->now() +
+                rclcpp::Duration::from_seconds(sudden_obstacle_replan_duration_s_);
+            RCLCPP_WARN(this->get_logger(),
+                "Sudden obstacle replan: jump=%.2f m, range=%.2f m, duration=%.2f s",
+                obstacle_jump, ego_distance, sudden_obstacle_replan_duration_s_);
+        }
+    }
+
     void obstacle_odom_callback(const nav_msgs::msg::Odometry::SharedPtr msg) {
         if (!std::isfinite(msg->pose.pose.position.x) ||
             !std::isfinite(msg->pose.pose.position.y)) return;
-        mppi_params_.obs_x[0] = static_cast<float>(msg->pose.pose.position.x);
-        mppi_params_.obs_y[0] = static_cast<float>(msg->pose.pose.position.y);
+        const float obstacle_x = static_cast<float>(msg->pose.pose.position.x);
+        const float obstacle_y = static_cast<float>(msg->pose.pose.position.y);
+        const bool was_active = mppi_params_.num_obstacles > 0;
+        const float obstacle_jump = has_obstacle_measurement_
+            ? std::hypot(obstacle_x-last_obstacle_x_,obstacle_y-last_obstacle_y_)
+            : 0.0f;
+        activate_sudden_replan_if_needed(
+            obstacle_x, obstacle_y, !was_active, obstacle_jump);
+        mppi_params_.obs_x[0] = obstacle_x;
+        mppi_params_.obs_y[0] = obstacle_y;
         mppi_params_.num_obstacles = 1;
+        last_obstacle_x_ = obstacle_x;
+        last_obstacle_y_ = obstacle_y;
+        has_obstacle_measurement_ = true;
+        obstacle_stamp_ = this->now();
+    }
+
+    void perception_obstacles_callback(
+        const f1_msgs::msg::F1stateArr::SharedPtr msg) {
+        // The perception contract from integration/full-driving-stack reports
+        // global x/y. Empty frame_id was used by the original publisher; a
+        // non-empty frame must match the configured MPPI map frame.
+        if (!msg->header.frame_id.empty() &&
+            msg->header.frame_id != real_perception_obstacles_frame_) {
+            RCLCPP_ERROR_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                "Ignoring perception obstacles in frame '%s'; expected '%s'",
+                msg->header.frame_id.c_str(),
+                real_perception_obstacles_frame_.c_str());
+            return;
+        }
+
+        std::array<float, MAX_OBS> previous_x{};
+        std::array<float, MAX_OBS> previous_y{};
+        const int previous_count = mppi_params_.num_obstacles;
+        for (int index=0; index<previous_count; ++index) {
+            previous_x[index] = mppi_params_.obs_x[index];
+            previous_y[index] = mppi_params_.obs_y[index];
+        }
+
+        int count = 0;
+        for (const auto &obstacle : msg->f1_state_arr) {
+            if (count >= MAX_OBS) break;
+            const float obstacle_x = static_cast<float>(obstacle.x);
+            const float obstacle_y = static_cast<float>(obstacle.y);
+            if (!std::isfinite(obstacle_x) || !std::isfinite(obstacle_y)) continue;
+
+            float nearest_previous_jump = std::numeric_limits<float>::infinity();
+            for (int previous=0; previous<previous_count; ++previous) {
+                nearest_previous_jump = std::min(nearest_previous_jump,
+                    std::hypot(obstacle_x-previous_x[previous],
+                               obstacle_y-previous_y[previous]));
+            }
+            const bool newly_observed = previous_count == 0 ||
+                !std::isfinite(nearest_previous_jump) ||
+                nearest_previous_jump >= sudden_obstacle_jump_threshold_;
+            activate_sudden_replan_if_needed(
+                obstacle_x, obstacle_y, newly_observed,
+                previous_count > 0 ? nearest_previous_jump : 0.0f);
+            mppi_params_.obs_x[count] = obstacle_x;
+            mppi_params_.obs_y[count] = obstacle_y;
+            ++count;
+        }
+        mppi_params_.num_obstacles = count;
+        has_obstacle_measurement_ = count > 0;
         obstacle_stamp_ = this->now();
     }
 
@@ -488,10 +580,20 @@ private:
             this->get_parameter("weighted_trajectory_safety_enabled").as_bool();
         this->declare_parameter("car_radius",           0.15);   mppi_params_.car_radius    = this->get_parameter("car_radius").as_double();
         this->declare_parameter("obstacle_influence_distance", 1.2); mppi_params_.obstacle_influence_distance=this->get_parameter("obstacle_influence_distance").as_double();
+        this->declare_parameter("sudden_obstacle_influence_distance", 2.0); mppi_params_.sudden_obstacle_influence_distance=this->get_parameter("sudden_obstacle_influence_distance").as_double();
+        this->declare_parameter("sudden_obstacle_min_clearance", 0.65); mppi_params_.sudden_obstacle_min_clearance=this->get_parameter("sudden_obstacle_min_clearance").as_double();
+        this->declare_parameter("sudden_obstacle_candidate_clearance", 0.65); mppi_params_.sudden_obstacle_candidate_clearance=this->get_parameter("sudden_obstacle_candidate_clearance").as_double();
+        this->declare_parameter("sudden_obstacle_cost_multiplier", 3.0); mppi_params_.sudden_obstacle_cost_multiplier=this->get_parameter("sudden_obstacle_cost_multiplier").as_double();
         this->declare_parameter("q_obs",                50.0);   mppi_params_.q_obs         = this->get_parameter("q_obs").as_double();
         this->declare_parameter("obstacle_avoidance_enabled", false); obstacle_avoidance_enabled_=this->get_parameter("obstacle_avoidance_enabled").as_bool();
-        this->declare_parameter("obstacle_odom_topic", "/opp_racecar/odom"); obstacle_odom_topic_=this->get_parameter("obstacle_odom_topic").as_string();
+        this->declare_parameter("simulation_obstacle_odom_topic", "/opp_racecar/odom"); simulation_obstacle_odom_topic_=this->get_parameter("simulation_obstacle_odom_topic").as_string();
+        this->declare_parameter("real_perception_obstacles_topic", "/f1/perception/object/obstacles/arr"); real_perception_obstacles_topic_=this->get_parameter("real_perception_obstacles_topic").as_string();
+        this->declare_parameter("real_perception_obstacles_frame", "map"); real_perception_obstacles_frame_=this->get_parameter("real_perception_obstacles_frame").as_string();
         this->declare_parameter("obstacle_timeout", 0.5); obstacle_timeout_s_=this->get_parameter("obstacle_timeout").as_double();
+        this->declare_parameter("sudden_obstacle_replan_enabled", true); sudden_obstacle_replan_enabled_=this->get_parameter("sudden_obstacle_replan_enabled").as_bool();
+        this->declare_parameter("sudden_obstacle_jump_threshold", 0.75); sudden_obstacle_jump_threshold_=this->get_parameter("sudden_obstacle_jump_threshold").as_double();
+        this->declare_parameter("sudden_obstacle_replan_distance", 3.0); sudden_obstacle_replan_distance_=this->get_parameter("sudden_obstacle_replan_distance").as_double();
+        this->declare_parameter("sudden_obstacle_replan_duration", 0.6); sudden_obstacle_replan_duration_s_=this->get_parameter("sudden_obstacle_replan_duration").as_double();
         this->declare_parameter("noise_steer_std",      0.4);    mppi_params_.noise_steer_std  = this->get_parameter("noise_steer_std").as_double();
         this->declare_parameter("noise_accel_std",      2.0);    mppi_params_.noise_accel_std  = this->get_parameter("noise_accel_std").as_double();
         this->declare_parameter("max_steer_rate",       0.5236); mppi_params_.max_steer_rate   = this->get_parameter("max_steer_rate").as_double();
@@ -701,12 +803,14 @@ private:
     }
 
     void timer_callback() {
+        mppi_params_.sudden_obstacle_replan = sudden_obstacle_replan_enabled_ &&
+            this->now() < sudden_obstacle_replan_until_;
         if (obstacle_avoidance_enabled_ && mppi_params_.num_obstacles > 0 &&
             obstacle_timeout_s_ > 0.0 &&
             (this->now() - obstacle_stamp_).seconds() > obstacle_timeout_s_) {
             mppi_params_.num_obstacles = 0;
             RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
-                "Obstacle odometry is stale; disabling obstacle cost until a new sample arrives");
+                "Obstacle input is stale; disabling obstacle cost until a new sample arrives");
         }
         if (!is_simulation_) {
             if (!pose_received_ || !velocity_received_) {
@@ -1027,6 +1131,7 @@ private:
     rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr     right_bnd_sub_;
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;  // 단일 구독
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr obstacle_odom_sub_;
+    rclcpp::Subscription<f1_msgs::msg::F1stateArr>::SharedPtr perception_obstacles_sub_;
     rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr mcl_pose_sub_;
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr velocity_sub_;
     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_sub_;
@@ -1040,7 +1145,8 @@ private:
     std::string simulation_odom_topic_, simulation_drive_topic_;
     std::string real_pose_topic_, real_odom_topic_, real_drive_topic_;
     std::string selected_drive_topic_, path_topic_, imu_topic_, dynamics_model_name_, residual_weights_path_,mlp_weights_path_;
-    std::string obstacle_odom_topic_;
+    std::string simulation_obstacle_odom_topic_;
+    std::string real_perception_obstacles_topic_, real_perception_obstacles_frame_;
     std::string kinematic_noslip_noimu_weights_path_,slip_kinematic_with_imu_weights_path_,dynamic_imu_weights_path_,dynamic_mlp_weights_path_,dynamic_mlp_servo_lag_weights_path_,e2e_weights_path_,effective_history_weights_path_;
     mppi::LateralVelocityKF lateral_velocity_kf_;
     mppi::LateralVelocityKFParams lateral_velocity_kf_params_;
@@ -1049,6 +1155,13 @@ private:
     bool obstacle_avoidance_enabled_{false};
     double obstacle_timeout_s_{0.5};
     rclcpp::Time obstacle_stamp_{0, 0, RCL_ROS_TIME};
+    bool sudden_obstacle_replan_enabled_{true};
+    bool has_obstacle_measurement_{false};
+    float last_obstacle_x_{0.0f},last_obstacle_y_{0.0f};
+    double sudden_obstacle_jump_threshold_{0.75};
+    double sudden_obstacle_replan_distance_{3.0};
+    double sudden_obstacle_replan_duration_s_{0.6};
+    rclcpp::Time sudden_obstacle_replan_until_{0, 0, RCL_ROS_TIME};
     bool is_simulation_{true}, pose_received_{false}, velocity_received_{false};
     bool has_prev_velocity_{false};
     rclcpp::Time last_velocity_stamp_{0, 0, RCL_ROS_TIME};

@@ -191,7 +191,7 @@ def main():
     prediction = dynamic_derivative(state, command, fit.x, fixed)
     rmse = np.sqrt(np.mean((prediction-observed)**2, axis=0))
     fitted_parameters = dict(zip(PARAMETER_NAMES, map(float, fit.x)))
-    # Keep I_z in parameters for compatibility with train_mlp.py and the MPPI
+    # Keep I_z in parameters for compatibility with archived checkpoints and MPPI
     # exporter, while explicitly recording that it was fixed during fitting.
     fitted_parameters["I_z"] = float(args.iz)
     result = {

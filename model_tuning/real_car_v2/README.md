@@ -934,8 +934,10 @@ With all switches enabled the runner executes this same sequence:
 1. `build_dataset.py`: combine all direct-bag 20 ms NPZ data. Every continuous
    segment receives a unique `bag_id`; aggressive run1 is high-speed training
    excitation and aggressive run2 remains an unseen test bag.
-2. `regress_dynamic_40ms.py`: fit the Pacejka classic model for one 40 ms MPPI
-   knot using one explicit 40 ms actuator/physics update.
+2. `regress_dynamic_40ms_advanced.py`: compare robust DE+LS, differentiable
+   multi-start Adam rollout learning and MLP-surrogate global search for all
+   eight front/rear Pacejka `B,C,D,E` parameters. Select only by held-out bag
+   validation open-loop score; mass, inertia and geometry remain fixed.
 3. `build_dynamic_40ms_dataset.py`: calculate classic predictions and the
    derivative residual targets `[delta_ax, delta_ay, delta_yaw_accel]`.
 4. `train_dynamic_40ms.py`: train the 20-64-32-3 MLP using one-step targets.

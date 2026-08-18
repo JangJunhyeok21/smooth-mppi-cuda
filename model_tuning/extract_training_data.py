@@ -20,20 +20,15 @@ from model_tuning_utils.lateral_velocity_kf import LateralVelocityKFParams, esti
 # USER SETTINGS. Add every bag storage file or rosbag2 directory here. Running
 # this script without arguments extracts them sequentially.
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-BAG_PATH = [
-    Path("/mnt/nas_custom/F1tenth/2026 IFAC/0815/codex_effective_aggressive_scale057_tau008_run1"),
-    Path("/mnt/nas_custom/F1tenth/2026 IFAC/0815/codex_effective_history_1200_run1"),
-    Path("/mnt/nas_custom/F1tenth/2026 IFAC/0815/codex_effective_history_1200_run2_60s"),
-    Path("/mnt/nas_custom/F1tenth/2026 IFAC/0815/codex_effective_history_run1"),
-    Path("/mnt/nas_custom/F1tenth/2026 IFAC/0815/codex_effective_tuned_scale045_tau014_run1"),
-    Path("/mnt/nas_custom/F1tenth/2026 IFAC/0815/codex_highspeed_run1"),
-    Path("/mnt/nas_custom/F1tenth/2026 IFAC/0815/codex_servo_lag_0815_sign_aligned_run1"),
-    Path("/mnt/nas_custom/F1tenth/2026 IFAC/0815/codex_servo_lag_augmented_5lap_run1"),
-    Path("/mnt/nas_custom/F1tenth/2026 IFAC/0815/codex_servo_lag_augmented_run1"),
-    # existing_run2 has zero /ackermann_cmd messages and is intentionally excluded.
-    Path("/mnt/nas_custom/F1tenth/2026 IFAC/0815/codex_servo_lag_existing_run3"),
-]
-OUTPUT_PATH = PROJECT_ROOT / "model_tuning/data/ifac0815_autonomous_physics_clean"
+NEW_DATA_ROOTS = (
+    Path("/mnt/nas_custom/F1tenth/2026 IFAC/0817 (1)"),
+    Path("/mnt/nas_custom/F1tenth/2026 IFAC/0818"),
+)
+# Discover rosbag directories recursively. Bags without the required topics are
+# reported as SKIPPED by read_streams instead of silently entering the archive.
+BAG_PATH = sorted({metadata.parent for root in NEW_DATA_ROOTS
+                   for metadata in root.rglob("metadata.yaml")})
+OUTPUT_PATH = PROJECT_ROOT / "model_tuning/data/ifac0817_0818_autonomous_physics_clean"
 USE_PLOT = False
 # 0815 IMU is already expressed in the MPPI body convention (+x forward,
 # +y left, +z up), so no legacy 0807/0810 sign inversion is applied.

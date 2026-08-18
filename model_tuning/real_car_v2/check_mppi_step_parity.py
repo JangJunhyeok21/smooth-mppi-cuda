@@ -6,9 +6,10 @@ import numpy as np,yaml
 HERE=Path(__file__).resolve().parent;ROOT=HERE.parents[1];sys.path.insert(0,str(HERE))
 from contract import Contract,actuator_step,longitudinal_actuator_step,residual_gates
 
-RESULT=ROOT/'model_tuning/results/dynamic_40ms_yaw_preserved_0815_stage2'
+# Current deployed adaptive-KF-compatible safety-recursive 20-D checkpoint.
+RESULT=ROOT/'model_tuning/results/adaptive_kf_physical_20d_safety_recursive'
 RUNTIME_BINARY=ROOT/'config/dynamic_40ms_residual_servo_lag.bin'
-PARAMS=ROOT/'model_tuning/results/dynamic_40ms_regression/params.json'
+PARAMS=ROOT/'model_tuning/results/dynamic_40ms_adaptive_kf_regression/params.json'
 CUDA_EXE=ROOT/'build/smppi_cuda_controller/mppi_step_parity'
 SIMULATOR_MODEL=Path('/home/a/f1tenth_gym_ros/src/f1tenth_gym/f1tenth_gym/envs/dynamic_models/dynamic_mlp_residual.py')
 STEPS=30;TOLERANCE=2e-5
@@ -41,13 +42,15 @@ def simulator_rollout(cfg,fit,binary):
  kwargs=dict(dt=.04,lf=cfg['l_f'],lr=cfg['l_r'],mass=cfg['mass'],min_speed=cfg['min_speed'],max_speed=cfg['max_speed'],min_accel=cfg['min_accel'],max_accel=cfg['max_accel'],speed_servo_kp=cfg['speed_servo_kp'],speed_accel_tau=cfg['speed_reference_accel_time_constant'],speed_brake_tau=cfg['speed_reference_brake_time_constant'],max_speed_reference_rate=cfg['actuator_max_speed_reference_rate'],steer_scale=cfg['kinematic_steer_scale'],steer_bias=cfg['kinematic_steer_bias'],steer_time_constant=cfg['steer_servo_time_constant'],max_steer_rate=cfg['actuator_max_steer_rate'],position_speed_scale=cfg['kinematic_position_speed_scale'],Bf=fit['B_f'],Cf=fit['C_f'],Df=fit['D_f'],Ef=fit['E_f'],Br=fit['B_r'],Cr=fit['C_r'],Dr=fit['D_r'],Er=fit['E_r'],Iz=cfg['dynamic_mlp_I_z'],low_speed_center=cfg['dynamic_mlp_min_speed'])
  for k in range(STEPS):
   steer=.25-.012*k;speed=np.clip(3.5-.025*k,cfg['min_speed'],cfg['max_speed'])
-  state,history,applied,speed_reference,imu=module.step(state,steer,speed,history,applied,speed_reference,weights,mean,std,**kwargs)
+  state,history,applied,speed_reference,imu,_=module.step(
+      state,steer,speed,history,applied,speed_reference,
+      weights,mean,std,**kwargs)
   canonical=np.array([state[0],state[1],state[4],state[3],state[7],state[5],imu[1],imu[2],state[6]])
   rows.append(np.r_[canonical,history,applied,speed_reference])
  return np.asarray(rows)
 def main():
  cfg=yaml.safe_load((ROOT/'config/params.yaml').read_text())['/**']['ros__parameters'];fit=json.loads(PARAMS.read_text())['expanded_fitted'];binary=RUNTIME_BINARY
- trained=RESULT/'dynamic_40ms_residual.bin'
+ trained=RESULT/'command_history_20d.bin'
  if binary.read_bytes()!=trained.read_bytes():raise RuntimeError(f'runtime binary differs from current trained model: {binary} != {trained}')
  expected=python_rollout(cfg,fit,load_weights(binary));simulated=simulator_rollout(cfg,fit,binary);sim_error=np.abs(simulated-expected)
  simulator_report={'status':'PASS' if sim_error.max()<TOLERANCE else 'FAIL','one_step_max_abs_error':float(sim_error[0].max()),'thirty_step_max_abs_error':float(sim_error.max()),'mean_abs_error':float(sim_error.mean())}

@@ -14,6 +14,7 @@
     dynamic_imu_weights_path: config/ifac2026_dynamic_imu_recursive.bin
     dynamic_mlp_weights_path: config/dynamic_MLP_ackermann_previous_steer.bin
     dynamic_mlp_servo_lag_weights_path: /home/a/smooth-mppi-cuda/config/dynamic_40ms_residual_servo_lag.bin
+    dynamic_mlp_vx_delta_weights_path: /home/a/smooth-mppi-cuda/config/dynamic_40ms_vx_delta_history_24d.bin
     effective_history_weights_path: config/effective_history_state_residual.bin
     e2e_weights_path: config/E2E.bin
     # IMU is causally aligned to odometry and is also used by the 2-state vy KF.
@@ -28,14 +29,14 @@
     lateral_velocity_kf_enabled: false  # dynamic_imu_recursive selects the KF automatically
     # Linear-tire cornering stiffness [N/rad]. These are NOT the Pacejka C shape factors.
     # 0807 collision-cleaned bag, recursive-KF rollout regression result.
-    kf_cornering_stiffness_front: 12.7222491
-    kf_cornering_stiffness_rear: 75.0944752
+    kf_cornering_stiffness_front: 11.8634884
+    kf_cornering_stiffness_rear: 58.0473264
     kf_min_vx: 0.5
     kf_low_speed_threshold: 0.5  # CUDA rollout: below 0.5 m/s force vy=0
     kf_max_abs_vy: 2.0
-    kf_q_vy: 0.02
+    kf_q_vy: 0.03372753
     kf_q_yaw_rate: 0.02
-    kf_r_lateral_accel: 0.5
+    kf_r_lateral_accel: 0.3960560
     kf_r_yaw_rate: 0.01
     kf_initial_p_vy: 0.25
     kf_initial_p_yaw_rate: 0.10
@@ -43,6 +44,13 @@
     # +1 assumes sensor_msgs/Imu.linear_acceleration.y is vehicle body +Y (left).
     # Set -1 only if the installed IMU's +Y axis points to vehicle right.
     imu_lateral_accel_sign: 1.0
+    # Adaptive oversteer handling: blend linear-bicycle prediction toward
+    # causal IMU d(vy)/dt = ay-vx*yaw_rate when lateral dynamics become nonlinear.
+    kf_nonlinear_dvy_threshold: 2.3911474
+    kf_nonlinear_dvy_width: 1.5530068
+    kf_nonlinear_inertial_blend: 0.6382294
+    kf_nonlinear_process_noise_scale: 7.4273267
+    kf_nonlinear_ay_noise_scale: 4.0024465
     # Must match model_tuning_utils/lateral_velocity_kf.py::estimate_dataset.
     kf_steer_scale: 1.1058064699
     kf_steer_bias: -0.0300696939
@@ -70,6 +78,12 @@
     q_lat_g: 60.0
     lat_g_soft_limit: 9.5                 # soft combined-grip ceiling
     longitudinal_accel_soft_limit: 4.0    # friction ellipse ax axis [m/s^2]
+    # Rear-slip soft constraint: q * max(0, |alpha_r|-limit)^2.
+    # alpha_r = -atan2(vy-l_r*yaw_rate, |vx|). It complements the GG ellipse
+    # by detecting rear-axle saturation while total ax/ay is still moderate.
+    q_rear_slip: 800.0
+    rear_slip_soft_limit_deg: 8.0
+    rear_slip_cost_min_speed: 1.5         # disable ill-conditioned low-vx slip cost
     collision_radius: 0.15     # aggressive racing-line clearance
     boundary_soft_margin: 0.15 # start soft cost at 0.30 m clearance
     q_boundary_soft: 500.0
@@ -82,7 +96,6 @@
     q_progress: 85.0        # simulation lap-time tuning
     q_escape_vel: 28.0      # horizon 말단의 전진속도 보상
     horizon_steps: 60       # model_dt=0.04 s 기준 2.4 s prediction horizon
-    
     # --- Obstacle Avoidance Params ---
     obstacle_avoidance_enabled: true
     # Simulation supplies one opponent as global odometry. Real-car perception

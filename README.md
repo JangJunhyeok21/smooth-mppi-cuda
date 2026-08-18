@@ -408,56 +408,24 @@ command history와 action에 대해 CUDA MPPI와 simulator의
 `x,y,yaw,vx,vy,yaw_rate` 단일-step 출력이 허용 오차 안에서 같은지 확인한다.
 
 
-## 학습 요약
-[extract_training_data.py](/home/a/smooth-mppi-cuda/model_tuning/extract_training_data.py)
-bag 탐색, /drive 및 odom 정렬, 충돌 구간 제거, train/test 데이터 생성
+## 현재 residual 모델 학습
 
-[visualize_driving_data.py](/home/a/smooth-mppi-cuda/model_tuning/visualize_driving_data.py)
-추출된 모든 bag/segment의 GT trajectory 시각화
+현재 MPPI가 사용하는 모델은 `dynamic_mlp_residual_servo_lag`이며, 유일한
+공식 학습 진입점은 다음 runner이다.
 
-[train_model.py](/home/a/smooth-mppi-cuda/model_tuning/train_model.py)
-kinematic_noslip_noimu, slip_kinematic_with_imu 또는 dynamic_imu residual MLP 학습
+```bash
+python3 model_tuning/real_car_v2/run_yaw_preserved_40ms_pipeline.py
+```
 
-[evaluate_model.py](/home/a/smooth-mppi-cuda/model_tuning/evaluate_model.py)
-trajectory, velocity, yaw-rate 오차와 best/median/worst 시각화
+이 명령 하나가 bag dataset 결합, 40 ms classic Pacejka 회귀, residual target
+생성, `20-64-32-3` one-step MLP 학습, 두 단계 1.2 s recursive fine-tuning,
+held-out 평가 및 MPPI 배포까지 수행한다. 세부 단계와 입출력 계약은
+[real_car_v2 README](/home/a/smooth-mppi-cuda/model_tuning/real_car_v2/README.md)에
+정리되어 있다.
 
-학습 모델을 CUDA MPPI 에 추가
-[import_model_to_mppi.py](/home/a/smooth-mppi-cuda/model_tuning/import_model_to_mppi.py)
-
-python model_tuning/extract_training_data.py BAG_ROOT \
-  -o model_tuning/data/training_data.npz
-
-python model_tuning/visualize_driving_data.py \
-  model_tuning/data/training_data.npz \
-  -o model_tuning/results/dataset
-
-python model_tuning/train_model.py \
-  model_tuning/data/training_data.npz \
-  -o model_tuning/results/kinematic_noslip_noimu \
-  --model kinematic_noslip_noimu \
-  --yaw-target odom
-
-# Slip-aware variant. MLP 입력에는 IMU가 직접 들어가지 않지만, 데이터
-# 전처리와 MPPI 제어주기의 초기 vy는 동일한 2-state IMU KF가 제공한다.
-python model_tuning/train_model.py \
-  model_tuning/data/training_data.npz \
-  -o model_tuning/results/slip_kinematic_with_imu \
-  --model slip_kinematic_with_imu
-
-python model_tuning/evaluate_model.py \
-  model_tuning/results/kinematic_noslip_noimu \
-  -o model_tuning/results/kinematic_noslip_noimu/visualization
-
-python model_tuning/import_model_to_mppi.py \
-  model_tuning_utils/ifac0807_strict_kinematic_noslip_noimu_samebag \
-  --name ifac0807_strict_noimu \
-  --activate
-(하는 역할 :
-model.pt의 MLP weight를 CUDA용 .bin으로 변환
-normalization.npz의 평균·표준편차를 같은 .bin 뒤에 저장
-모델 종류를 metrics.json에서 자동 판별
---activate 사용 시 config/params.yaml의 다음 항목 자동 변경dynamics_model
-해당 모델의 weights path)
+과거 여러 모델을 한 파일에서 선택하던 `train_model.py`와 실제 구현
+`train_mlp.py`의 중복 진입점은 제거했다. 이전 kinematic/E2E 실험 산출물은
+평가 비교용으로 남아 있지만 현재 residual checkpoint를 생성하지 않는다.
 
 현재 runtime binary 형식은 `[MLP weights][feature mean][feature std]`이다.
 MPPI 노드가 시작될 때 weight와 정규화 변수를 함께 GPU 메모리로 읽으므로,

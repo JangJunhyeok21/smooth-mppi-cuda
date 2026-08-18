@@ -26,6 +26,14 @@ class LateralVelocityKFParams:
     initial_var_yaw_rate: float = 0.10
     # IMU linear_acceleration.y must be vehicle body +Y (left).
     imu_lateral_accel_sign: float = 1.0
+    # When |ay-vx*r| grows, the linear-tire model is no longer trustworthy.
+    # Blend the prediction toward inertial d(vy)/dt=ay-vx*r and downweight
+    # the linear-tire ay measurement equation.
+    nonlinear_dvy_threshold: float = 2.3911474
+    nonlinear_dvy_width: float = 1.5530068
+    nonlinear_inertial_blend: float = 0.6382294
+    nonlinear_process_noise_scale: float = 7.4273267
+    nonlinear_ay_noise_scale: float = 4.0024465
 
 
 class LateralVelocityKF:
@@ -79,12 +87,20 @@ class LateralVelocityKF:
         ad00, ad01 = 1 + p.dt*a00, p.dt*a01
         ad10, ad11 = p.dt*a10, 1 + p.dt*a11
         vy0, w0 = self.vy, self.yaw_rate
-        self.vy = ad00*vy0 + ad01*w0 + p.dt*cf/m*steering_angle
+        linear_vy_prediction = ad00*vy0 + ad01*w0 + p.dt*cf/m*steering_angle
         self.yaw_rate = ad10*vy0 + ad11*w0 + p.dt*lf*cf/iz*steering_angle
+        signed_ay = p.imu_lateral_accel_sign*measured_lateral_accel if ay_ok else 0.0
+        dvy_measurement = signed_ay-abs_vx*w0
+        nonlinear_gate = (float(np.clip((abs(dvy_measurement)-p.nonlinear_dvy_threshold) /
+                          max(p.nonlinear_dvy_width, 1e-4), 0.0, 1.0)) if ay_ok else 0.0)
+        blend = nonlinear_gate*float(np.clip(p.nonlinear_inertial_blend, 0.0, 1.0))
+        inertial_vy_prediction = vy0+p.dt*dvy_measurement
+        self.vy = (1.0-blend)*linear_vy_prediction+blend*inertial_vy_prediction
 
         ap00, ap01 = ad00*self.p00 + ad01*self.p10, ad00*self.p01 + ad01*self.p11
         ap10, ap11 = ad10*self.p00 + ad11*self.p10, ad10*self.p01 + ad11*self.p11
-        pp00 = ap00*ad00 + ap01*ad01 + p.process_var_vy
+        process_scale = 1.0+nonlinear_gate*max(p.nonlinear_process_noise_scale-1.0, 0.0)
+        pp00 = ap00*ad00 + ap01*ad01 + p.process_var_vy*process_scale
         pp01 = ap00*ad10 + ap01*ad11
         pp10 = ap10*ad00 + ap11*ad01
         pp11 = ap10*ad10 + ap11*ad11 + p.process_var_yaw_rate
@@ -96,7 +112,8 @@ class LateralVelocityKF:
         r0 = p.imu_lateral_accel_sign*measured_lateral_accel - (h00*self.vy + h01*self.yaw_rate + cf/m*steering_angle)
         r1 = measured_yaw_rate - self.yaw_rate
         hp00, hp01 = h00*pp00 + h01*pp10, h00*pp01 + h01*pp11
-        s00 = hp00*h00 + hp01*h01 + p.measurement_var_lateral_accel
+        ay_noise_scale = 1.0+nonlinear_gate*max(p.nonlinear_ay_noise_scale-1.0, 0.0)
+        s00 = hp00*h00 + hp01*h01 + p.measurement_var_lateral_accel*ay_noise_scale
         s01 = hp01
         s10 = pp10*h00 + pp11*h01
         s11 = pp11 + p.measurement_var_yaw_rate

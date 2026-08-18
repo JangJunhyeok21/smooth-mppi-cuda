@@ -85,7 +85,9 @@ class Recorder(Node):
         if m.data and self.t0 is not None: self.finish("collision")
     def check(self):
         if not self.odom:return
-        if abs(self.accumulated_progress) >= .98*self.track_length:
+        # Require a full centerline arc-length lap. The former 0.98 threshold
+        # was useful for smoke tests but cannot substantiate a >=1 lap claim.
+        if abs(self.accumulated_progress) >= 1.0*self.track_length:
             self.finish("lap_complete")
         elif self.rel()>30: self.finish("timeout")
     def finish(self,status):
@@ -104,7 +106,8 @@ class Recorder(Node):
             center=np.median(obstacle[:,1:3],axis=0)
             minimum_obstacle_distance=float(np.min(np.hypot(od[:,1]-center[0],od[:,2]-center[1])))
         with open(self.out/"summary.txt","w") as f:
-            f.write(f"status={self.status}\nduration_s={self.rel():.6f}\nodom_samples={len(od)}\ndrive_samples={len(dr)}\nprediction_samples={len(self.pred)}\nminimum_obstacle_center_distance_m={minimum_obstacle_distance:.6f}\n")
+            lap_ratio=abs(self.accumulated_progress)/max(self.track_length,1e-9)
+            f.write(f"status={self.status}\nduration_s={self.rel():.6f}\nodom_samples={len(od)}\ndrive_samples={len(dr)}\nprediction_samples={len(self.pred)}\naccumulated_progress_m={abs(self.accumulated_progress):.6f}\ntrack_length_m={self.track_length:.6f}\nlap_ratio={lap_ratio:.6f}\nminimum_obstacle_center_distance_m={minimum_obstacle_distance:.6f}\n")
         fig,ax=plt.subplots(1,2,figsize=(15,6))
         if len(od): ax[0].plot(od[:,1],od[:,2],"k",lw=2,label="Simulator actual")
         if len(obstacle):

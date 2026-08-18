@@ -2,8 +2,9 @@
 """5/5: Export a trained MLP to the runtime binary loaded by CUDA MPPI.
 
 The result directory must contain model.pt, normalization.npz and metrics.json
-created by train_model.py.  Use --activate only when this model should become
-the active model in config/params.yaml.
+created by the archived multi-model training pipeline. This converter remains
+for reproducing legacy kinematic/E2E experiments; the current 40 ms residual
+is deployed by real_car_v2/deploy_dynamic_40ms_to_mppi.py.
 """
 import argparse
 import json

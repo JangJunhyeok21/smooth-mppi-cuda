@@ -35,7 +35,7 @@ def main():
     if RUN_BUILD_DATASET:
         run("build_dataset.py")
     if RUN_CLASSIC_REGRESSION:
-        run("regress_dynamic_40ms.py")
+        run("regress_dynamic_40ms_advanced.py")
     if RUN_BUILD_RESIDUAL_DATASET:
         run("build_dynamic_40ms_dataset.py")
     if RUN_ONE_STEP_TRAINING:

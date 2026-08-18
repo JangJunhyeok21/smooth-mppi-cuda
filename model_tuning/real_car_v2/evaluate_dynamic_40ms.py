@@ -30,7 +30,7 @@ def main():
     i=start+2*k;c0=x[i,3:5]
     if k>0:hist=np.vstack((hist[1:],c0))
     previous=hist[-2,0];current=state.copy()
-    cmd=c0;ap,_=actuator_step(ap,cmd[0],cmd[1],state[0],c);sr,bax=longitudinal_actuator_step(sr,cmd[1],np.hypot(state[0],state[1]),c);vx,vy,r=state;safe=max(abs(vx),.5);af=ap-np.arctan2(vy+lf*r,safe);ar=-np.arctan2(vy-lr*r,safe);bf=fit['B_f']*af;br=fit['B_r']*ar;fyf=fzf*fit['D_f']*np.sin(fit['C_f']*np.arctan(bf));fyr=fzr*fit['D_r']*np.sin(fit['C_r']*np.arctan(br));ay=(fyf*np.cos(ap)+fyr)/m;rd=(lf*fyf*np.cos(ap)-lr*fyr)/iz;state=np.array((vx+(bax+vy*r)*.04,vy+(ay-vx*r)*.04,r+rd*.04))
+    cmd=c0;ap,_=actuator_step(ap,cmd[0],cmd[1],state[0],c);sr,bax=longitudinal_actuator_step(sr,cmd[1],np.hypot(state[0],state[1]),c);vx,vy,r=state;safe=max(abs(vx),.5);af=ap-np.arctan2(vy+lf*r,safe);ar=-np.arctan2(vy-lr*r,safe);bf=fit['B_f']*af;br=fit['B_r']*ar;front_inner=bf-fit['E_f']*(bf-np.arctan(bf));rear_inner=br-fit['E_r']*(br-np.arctan(br));fyf=fzf*fit['D_f']*np.sin(fit['C_f']*np.arctan(front_inner));fyr=fzr*fit['D_r']*np.sin(fit['C_r']*np.arctan(rear_inner));ay=(fyf*np.cos(ap)+fyr)/m;rd=(lf*fyf*np.cos(ap)-lr*fyr)/iz;state=np.array((vx+(bax+vy*r)*.04,vy+(ay-vx*r)*.04,r+rd*.04))
     feat=np.r_[current,c0,ap,c0[0]-previous,state,hist.ravel()];res=(np.zeros(3) if a.disable_mlp else net(feat,w)*residual_gates(current[0],c));state=state+res*.04;yaw=pose[2];pose=np.array((pose[0]+c.position_speed_scale*(state[0]*np.cos(yaw)-state[1]*np.sin(yaw))*.04,pose[1]+c.position_speed_scale*(state[0]*np.sin(yaw)+state[1]*np.cos(yaw))*.04,yaw+state[2]*.04));trace.append(np.r_[pose,state])
    gt=x[start+2:start+2*H+1:2,:3];gp=np.zeros((H,3))
    for k,q in enumerate(gt):

@@ -42,6 +42,7 @@ enum DynamicsModel : int {
     DYNAMIC_MLP_RESIDUAL = 8,
     DYNAMIC_MLP_RESIDUAL_SERVO_LAG = 9,
     EFFECTIVE_HISTORY_STATE_RESIDUAL = 10,
+    DYNAMIC_MLP_RESIDUAL_SERVO_LAG_VX_DELTA_24D = 11,
 };
 
 struct alignas(16) ButterworthCoeffs {
@@ -77,6 +78,7 @@ struct Params {
     float residual_imu[3];
     float residual_command_history[10];
     float effective_command_history[20];
+    float residual_vx_history[5];
     float actuator_steer_state;
     float actuator_speed_reference_state;
     float steer_servo_time_constant;
@@ -108,6 +110,10 @@ struct Params {
     float q_lat_g;
     float lat_g_soft_limit;
     float longitudinal_accel_soft_limit;
+    // Rear-tire slip soft constraint. The threshold is stored in radians.
+    float q_rear_slip;
+    float rear_slip_soft_limit;
+    float rear_slip_cost_min_speed;
     float q_progress;
     float q_escape_vel;
     float collision_radius;
@@ -199,12 +205,17 @@ public:
     void load_slip_kinematic_with_imu_direct_weights(const std::string& path);
     void load_dynamic_imu_recursive_weights(const std::string& path);
     void load_dynamic_mlp_residual_weights(const std::string& path);
+    void load_dynamic_mlp_vx_delta_residual_weights(const std::string& path);
     void load_effective_history_state_residual_weights(const std::string& path);
     // Validation-only entry point. It launches the exact CUDA rollout step,
     // including actuator states, feature construction, MLP and integration.
     State debug_dynamic_mlp_residual_step(
         const State& state, const Control& control,
         std::array<float, 12>& command_history, bool use_servo_lag);
+    State debug_dynamic_mlp_vx_delta_residual_step(
+        const State& state, const Control& control,
+        std::array<float, 12>& command_history,
+        std::array<float, 5>& vx_history);
     State debug_effective_history_state_residual_step(
         const State& state, const Control& control,
         std::array<float, 20>& command_history);

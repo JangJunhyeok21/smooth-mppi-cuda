@@ -25,6 +25,11 @@ struct LateralVelocityKFParams {
     // sensor_msgs/Imu.linear_acceleration.y must be vehicle body +Y (left).
     // Set to -1 when the installed IMU reports +Y to the right.
     float imu_lateral_accel_sign{1.0f};
+    float nonlinear_dvy_threshold{2.3911474f};
+    float nonlinear_dvy_width{1.5530068f};
+    float nonlinear_inertial_blend{0.6382294f};
+    float nonlinear_process_noise_scale{7.4273267f};
+    float nonlinear_ay_noise_scale{4.0024465f};
 };
 
 // Allocation-free 2-state KF: state = [body lateral velocity, yaw rate].
@@ -58,6 +63,11 @@ public:
             std::max(params_.measurement_var_lateral_accel, 1.0e-8f);
         params_.measurement_var_yaw_rate =
             std::max(params_.measurement_var_yaw_rate, 1.0e-8f);
+        params_.nonlinear_dvy_threshold = std::max(params_.nonlinear_dvy_threshold, 0.0f);
+        params_.nonlinear_dvy_width = std::max(params_.nonlinear_dvy_width, 1.0e-4f);
+        params_.nonlinear_inertial_blend = std::clamp(params_.nonlinear_inertial_blend, 0.0f, 1.0f);
+        params_.nonlinear_process_noise_scale = std::max(params_.nonlinear_process_noise_scale, 1.0f);
+        params_.nonlinear_ay_noise_scale = std::max(params_.nonlinear_ay_noise_scale, 1.0f);
         reset(0.0f);
     }
 
@@ -112,15 +122,27 @@ public:
         const float bd0 = params_.dt * cf / m;
         const float bd1 = params_.dt * lf * cf / iz;
 
-        const float vy_pred = ad00 * vy_ + ad01 * yaw_rate_ + bd0 * steering_angle;
-        const float yaw_pred = ad10 * vy_ + ad11 * yaw_rate_ + bd1 * steering_angle;
+        const float previous_vy = vy_;
+        const float previous_yaw_rate = yaw_rate_;
+        const float linear_vy_pred = ad00 * previous_vy + ad01 * previous_yaw_rate + bd0 * steering_angle;
+        const float yaw_pred = ad10 * previous_vy + ad11 * previous_yaw_rate + bd1 * steering_angle;
+        const float signed_ay = ay_valid ? params_.imu_lateral_accel_sign * measured_lateral_accel : 0.0f;
+        const float measured_dvy = signed_ay - abs_vx * previous_yaw_rate;
+        const float nonlinear_gate = ay_valid ? std::clamp(
+            (std::fabs(measured_dvy) - params_.nonlinear_dvy_threshold) /
+            params_.nonlinear_dvy_width, 0.0f, 1.0f) : 0.0f;
+        const float blend = nonlinear_gate * params_.nonlinear_inertial_blend;
+        const float inertial_vy_pred = previous_vy + params_.dt * measured_dvy;
+        const float vy_pred = (1.0f - blend) * linear_vy_pred + blend * inertial_vy_pred;
 
         // P- = Ad P Ad' + Q, expanded explicitly (no Eigen/heap/inverse).
         const float ap00 = ad00 * p00_ + ad01 * p10_;
         const float ap01 = ad00 * p01_ + ad01 * p11_;
         const float ap10 = ad10 * p00_ + ad11 * p10_;
         const float ap11 = ad10 * p01_ + ad11 * p11_;
-        float pp00 = ap00 * ad00 + ap01 * ad01 + params_.process_var_vy;
+        const float process_scale = 1.0f + nonlinear_gate *
+            (params_.nonlinear_process_noise_scale - 1.0f);
+        float pp00 = ap00 * ad00 + ap01 * ad01 + params_.process_var_vy * process_scale;
         float pp01 = ap00 * ad10 + ap01 * ad11;
         float pp10 = ap10 * ad00 + ap11 * ad01;
         float pp11 = ap10 * ad10 + ap11 * ad11 + params_.process_var_yaw_rate;
@@ -146,8 +168,10 @@ public:
         // S = H P- H' + R, explicitly expanded.
         const float hp00 = h00 * pp00 + h01 * pp10;
         const float hp01 = h00 * pp01 + h01 * pp11;
+        const float ay_noise_scale = 1.0f + nonlinear_gate *
+            (params_.nonlinear_ay_noise_scale - 1.0f);
         const float s00 = hp00 * h00 + hp01 * h01
-                        + params_.measurement_var_lateral_accel;
+                        + params_.measurement_var_lateral_accel * ay_noise_scale;
         const float s01 = hp01;
         const float s10 = pp10 * h00 + pp11 * h01;
         const float s11 = pp11 + params_.measurement_var_yaw_rate;

@@ -480,15 +480,11 @@ private:
         float lat_g  = (ay_abs >= 9.5f) ? mppi_params_.q_lat_g * expf(-3.f*(ay_abs-9.5f)) : 0.f;
 
         float min_bnd   = compute_min_boundary_distance(s, idx);
-        float safe_dist = mppi_params_.collision_radius + mppi_params_.boundary_soft_margin;
+        float safe_dist = mppi_params_.collision_radius;
         float bnd_cost  = 0.f;
         if (min_bnd < safe_dist) {
             float pen = safe_dist - min_bnd;
-            float hrd = 0.f;
-            if (min_bnd < mppi_params_.collision_radius * 1.2f)
-                hrd = mppi_params_.q_collision *
-                      std::log(1.f + std::exp(-40.f*(min_bnd - mppi_params_.collision_radius)));
-            bnd_cost = mppi_params_.q_boundary_soft * pen * pen + hrd;
+            bnd_cost = mppi_params_.q_boundary_slack * pen * pen;
         }
 
         msg.dist_cost       = mppi_params_.q_dist * dist_error;
@@ -590,11 +586,12 @@ private:
         this->declare_parameter("q_progress",           13.0);   mppi_params_.q_progress    = this->get_parameter("q_progress").as_double();
         this->declare_parameter("q_escape_vel",         6.5);    mppi_params_.q_escape_vel  = this->get_parameter("q_escape_vel").as_double();
         this->declare_parameter("collision_radius",     0.19);   mppi_params_.collision_radius = this->get_parameter("collision_radius").as_double();
-        this->declare_parameter("boundary_soft_margin", 0.60);   mppi_params_.boundary_soft_margin = this->get_parameter("boundary_soft_margin").as_double();
-        this->declare_parameter("q_boundary_soft",      150.0);  mppi_params_.q_boundary_soft = this->get_parameter("q_boundary_soft").as_double();
-        this->declare_parameter("all_rollouts_fault_cost_threshold", 5000.0);
-        mppi_params_.all_rollouts_fault_cost_threshold =
-            this->get_parameter("all_rollouts_fault_cost_threshold").as_double();
+        this->declare_parameter("q_boundary_slack", 15000.0);
+        mppi_params_.q_boundary_slack =
+            this->get_parameter("q_boundary_slack").as_double();
+        this->declare_parameter("q_boundary_terminal_slack", 15000.0);
+        mppi_params_.q_boundary_terminal_slack =
+            this->get_parameter("q_boundary_terminal_slack").as_double();
         this->declare_parameter("weighted_trajectory_safety_enabled", true);
         mppi_params_.weighted_trajectory_safety_enabled =
             this->get_parameter("weighted_trajectory_safety_enabled").as_bool();
@@ -764,10 +761,10 @@ private:
         contour_speed_limit_gain_ = std::max(0.0f, contour_speed_limit_gain_);
         if (mppi_params_.collision_radius < 0.0f)
             mppi_params_.collision_radius = std::abs(mppi_params_.collision_radius);
-        if (mppi_params_.boundary_soft_margin < 0.0f)
-            mppi_params_.boundary_soft_margin = 0.0f;
-        if (mppi_params_.q_boundary_soft < 0.0f)
-            mppi_params_.q_boundary_soft = 0.0f;
+        if (mppi_params_.q_boundary_slack < 0.0f)
+            mppi_params_.q_boundary_slack = 0.0f;
+        if (mppi_params_.q_boundary_terminal_slack < 0.0f)
+            mppi_params_.q_boundary_terminal_slack = 0.0f;
         if (mppi_params_.dynamic_mlp_min_speed < 0.0f)
             mppi_params_.dynamic_mlp_min_speed = 0.0f;
         if(mppi_params_.dynamics_model==mppi::EFFECTIVE_HISTORY_STATE_RESIDUAL &&
@@ -784,11 +781,10 @@ private:
             mppi_params_.effective_max_accel<=0.f ||
             mppi_params_.effective_vy_decay_tau<=0.f))
             throw std::invalid_argument("effective_history_state_residual effective response parameters must be positive");
-        if (mppi_params_.all_rollouts_fault_cost_threshold <= 0.0f)
-            mppi_params_.all_rollouts_fault_cost_threshold = 5000.0f;
     }
 
     bool path_received_{false}, left_bnd_received_{false}, right_bnd_received_{false};
+    int slack_boundary_publish_remaining_{0};
 
     void path_callback(const nav_msgs::msg::Path::SharedPtr msg) {
         if (path_received_ || msg->poses.empty()) return;
@@ -824,11 +820,74 @@ private:
     }
 
     void update_boundaries() {
-        if (!left_xs_.empty() && !right_xs_.empty() && left_xs_.size() == right_xs_.size())
+        if (!left_xs_.empty() && !right_xs_.empty() && left_xs_.size() == right_xs_.size()) {
             solver_->set_boundaries(left_xs_, left_ys_, right_xs_, right_ys_);
+            slack_boundary_publish_remaining_ = 5;
+        }
+    }
+
+    void publish_slack_boundaries() {
+        const size_t count = std::min({
+            ref_path_xs_.size(), ref_path_ys_.size(), ref_path_yaws_.size(),
+            left_xs_.size(), left_ys_.size(), right_xs_.size(), right_ys_.size()});
+        if (count < 2) return;
+
+        visualization_msgs::msg::MarkerArray markers;
+        visualization_msgs::msg::Marker left_marker;
+        visualization_msgs::msg::Marker right_marker;
+        left_marker.header.frame_id = right_marker.header.frame_id = "map";
+        left_marker.header.stamp = right_marker.header.stamp = this->now();
+        left_marker.ns = right_marker.ns = "boundary_slack_zero";
+        left_marker.id = 200;
+        right_marker.id = 201;
+        left_marker.type = right_marker.type = visualization_msgs::msg::Marker::LINE_STRIP;
+        left_marker.action = right_marker.action = visualization_msgs::msg::Marker::ADD;
+        left_marker.pose.orientation.w = right_marker.pose.orientation.w = 1.0;
+        left_marker.scale.x = right_marker.scale.x = 0.045;
+        left_marker.color.r = 1.0f;
+        left_marker.color.g = 0.35f;
+        left_marker.color.a = 1.0f;
+        right_marker.color.r = 0.85f;
+        right_marker.color.b = 1.0f;
+        right_marker.color.a = 1.0f;
+        left_marker.points.reserve(count + 1);
+        right_marker.points.reserve(count + 1);
+
+        for (size_t index = 0; index < count; ++index) {
+            const float normal_x = -std::sin(ref_path_yaws_[index]);
+            const float normal_y =  std::cos(ref_path_yaws_[index]);
+            const float left_width = std::hypot(
+                left_xs_[index] - ref_path_xs_[index],
+                left_ys_[index] - ref_path_ys_[index]);
+            const float right_width = std::hypot(
+                right_xs_[index] - ref_path_xs_[index],
+                right_ys_[index] - ref_path_ys_[index]);
+            const float allowed_left = left_width - mppi_params_.collision_radius;
+            const float allowed_right = right_width - mppi_params_.collision_radius;
+
+            geometry_msgs::msg::Point left_point;
+            geometry_msgs::msg::Point right_point;
+            left_point.x = ref_path_xs_[index] + normal_x * allowed_left;
+            left_point.y = ref_path_ys_[index] + normal_y * allowed_left;
+            right_point.x = ref_path_xs_[index] - normal_x * allowed_right;
+            right_point.y = ref_path_ys_[index] - normal_y * allowed_right;
+            left_point.z = right_point.z = 0.04;
+            left_marker.points.push_back(left_point);
+            right_marker.points.push_back(right_point);
+        }
+        left_marker.points.push_back(left_marker.points.front());
+        right_marker.points.push_back(right_marker.points.front());
+        markers.markers.push_back(std::move(left_marker));
+        markers.markers.push_back(std::move(right_marker));
+        vis_pub_->publish(markers);
     }
 
     void timer_callback() {
+        if (slack_boundary_publish_remaining_ > 0 && path_received_ &&
+            left_bnd_received_ && right_bnd_received_) {
+            publish_slack_boundaries();
+            --slack_boundary_publish_remaining_;
+        }
         mppi_params_.sudden_obstacle_replan = sudden_obstacle_replan_enabled_ &&
             this->now() < sudden_obstacle_replan_until_;
         if (obstacle_avoidance_enabled_ && mppi_params_.num_obstacles > 0 &&
@@ -938,46 +997,6 @@ private:
         }
         solver_->update_params(mppi_params_);
         mppi::Control u = solver_->solve(current_state_);
-        bool geometric_boundary_recovery = false;
-        if (mppi_params_.weighted_trajectory_safety_enabled &&
-            !ref_path_xs_.empty() && left_xs_.size() == ref_path_xs_.size() &&
-            right_xs_.size() == ref_path_xs_.size()) {
-            const int nearest_index = update_nearest_index(current_state_);
-            const float reference_yaw = ref_path_yaws_[nearest_index];
-            const float position_dx = current_state_.x-ref_path_xs_[nearest_index];
-            const float position_dy = current_state_.y-ref_path_ys_[nearest_index];
-            const float lateral_error = -std::sin(reference_yaw)*position_dx
-                                      +  std::cos(reference_yaw)*position_dy;
-            const float left_width = std::hypot(
-                left_xs_[nearest_index]-ref_path_xs_[nearest_index],
-                left_ys_[nearest_index]-ref_path_ys_[nearest_index]);
-            const float right_width = std::hypot(
-                right_xs_[nearest_index]-ref_path_xs_[nearest_index],
-                right_ys_[nearest_index]-ref_path_ys_[nearest_index]);
-            const float measured_boundary_clearance = std::min(
-                left_width-lateral_error,right_width+lateral_error);
-            if (measured_boundary_clearance < mppi_params_.collision_radius+0.05f) {
-                const int lookahead_index = (nearest_index+8)%ref_path_xs_.size();
-                const float desired_heading = std::atan2(
-                    ref_path_ys_[lookahead_index]-current_state_.y,
-                    ref_path_xs_[lookahead_index]-current_state_.x);
-                const float heading_error = std::atan2(
-                    std::sin(desired_heading-current_state_.yaw),
-                    std::cos(desired_heading-current_state_.yaw));
-                const float desired_applied_steer = std::clamp(
-                    0.8f*heading_error,-mppi_params_.max_steer,mppi_params_.max_steer);
-                const float steer_scale = std::abs(mppi_params_.kinematic_steer_scale)>1.0e-6f
-                    ?mppi_params_.kinematic_steer_scale:1.0f;
-                u.steer=std::clamp(
-                    (desired_applied_steer-mppi_params_.kinematic_steer_bias)/steer_scale,
-                    -mppi_params_.max_steer,mppi_params_.max_steer);
-                u.accel=mppi_params_.min_speed;
-                geometric_boundary_recovery=true;
-                RCLCPP_WARN_THROTTLE(this->get_logger(),*this->get_clock(),1000,
-                    "Actual-state boundary recovery active (clearance %.3f m)",
-                    measured_boundary_clearance);
-            }
-        }
         float next_v;
         float published_accel;
         if(direct_speed_model_) {
@@ -1002,11 +1021,9 @@ private:
                 mppi_params_.min_speed, safety_speed_limit);
             const float desired_speed = std::clamp(
                 u.accel, recovery_speed_floor, safety_speed_limit);
-            const float requested_speed = geometric_boundary_recovery
-                ? mppi_params_.min_speed
-                : std::clamp(desired_speed,
-                    previous_speed_command-direct_speed_step_,
-                    previous_speed_command+direct_speed_step_);
+            const float requested_speed = std::clamp(desired_speed,
+                previous_speed_command-direct_speed_step_,
+                previous_speed_command+direct_speed_step_);
             next_v=std::clamp(requested_speed, 0.0f, mppi_params_.max_speed);
             published_accel=std::clamp(
                 (next_v-current_state_.v)/mppi_params_.dt,

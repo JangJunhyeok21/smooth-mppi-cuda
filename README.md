@@ -440,3 +440,31 @@ base_yaw_rate, command_history(10)]`의 18차원이고 출력은
 `v=sqrt(vx^2+vy^2)`에 대해 `x_next=x+v*cos(yaw+beta)*dt`,
 `y_next=y+v*sin(yaw+beta)*dt`를 사용한다. 활성화 시 `dynamics_model`을
 `slip_kinematic_with_imu_direct_speed`로 지정한다.
+# Track-boundary soft constraint
+
+The CUDA MPPI uses the same lane-boundary slack interpretation as the QP MPC
+under `/home/a/f1tenth_ws/src/MDN_SLCMPC_module/control/MPC`.  For every
+predicted state, `min_boundary_clearance` is positive inside the track and
+negative outside it.  The analytically optimal nonnegative slack is
+
+```math
+s_k=\max(0,\;r_{safe}-d_{boundary,k}),
+```
+
+and its rollout cost is
+
+```math
+J_{boundary}=\sum_{k=1}^{N-1}q_s s_k^2+q_{s,N}s_N^2.
+```
+
+`r_safe`, `q_s`, and `q_{s,N}` are configured by `collision_radius`,
+`q_boundary_slack`, and `q_boundary_terminal_slack`. Boundary violation is a
+finite cost and does not invalidate a rollout or trigger reuse of the previous
+control horizon. Physical obstacle overlap remains separately protected by
+the obstacle candidate check.
+
+Unlike the QP implementation, MPPI does not need to add `N+1` optimization
+variables: once a sampled state is known, the minimum feasible slack is the
+closed-form expression above.  The CUDA implementation therefore adds only a
+`max`, subtraction, and multiply per rollout step and performs no additional
+host/device transfer.

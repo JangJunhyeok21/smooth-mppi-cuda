@@ -117,9 +117,8 @@ struct Params {
     float q_progress;
     float q_escape_vel;
     float collision_radius;
-    float boundary_soft_margin;
-    float q_boundary_soft;
-    float all_rollouts_fault_cost_threshold;
+    float q_boundary_slack;
+    float q_boundary_terminal_slack;
     bool weighted_trajectory_safety_enabled;
     
     // Obstacle Avoidance Params

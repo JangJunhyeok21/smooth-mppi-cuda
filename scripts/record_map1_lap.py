@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Record one Map1 MPPI lap (or collision/timeout) and generate plots."""
+"""Record consecutive Map1 MPPI laps (or collision/timeout) and plot them."""
 import csv
 import math
 import time
@@ -16,11 +16,17 @@ from rclpy.node import Node
 from std_msgs.msg import Bool
 from smppi_cuda_controller.msg import MppiTrajectory
 
+# User-editable test settings. No command-line arguments are required.
+TARGET_LAPS = 10.0
+TIMEOUT_SECONDS = 180.0
+OUTPUT_DIRECTORY = Path(
+    "/home/a/smooth-mppi-cuda/model_tuning/results/map1_boundary_soft_10laps")
+
 
 class Recorder(Node):
     def __init__(self):
         super().__init__("map1_lap_recorder")
-        self.out = Path("/home/a/smooth-mppi-cuda/model_tuning/map1_closed_loop_no_imu")
+        self.out = OUTPUT_DIRECTORY
         self.out.mkdir(parents=True, exist_ok=True)
         self.t0 = None; self.start = None; self.left_start = False
         self.latest_pose = None
@@ -85,11 +91,10 @@ class Recorder(Node):
         if m.data and self.t0 is not None: self.finish("collision")
     def check(self):
         if not self.odom:return
-        # Require a full centerline arc-length lap. The former 0.98 threshold
-        # was useful for smoke tests but cannot substantiate a >=1 lap claim.
-        if abs(self.accumulated_progress) >= 1.0*self.track_length:
-            self.finish("lap_complete")
-        elif self.rel()>30: self.finish("timeout")
+        if abs(self.accumulated_progress) >= TARGET_LAPS*self.track_length:
+            self.finish("laps_complete")
+        elif self.rel() > TIMEOUT_SECONDS:
+            self.finish("timeout")
     def finish(self,status):
         if not rclpy.ok():return
         self.status=status; self.save(); self.get_logger().info(f"END {status}, t={self.rel():.2f}s")

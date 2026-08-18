@@ -744,6 +744,7 @@ namespace mppi
         const Control &u, const Control &u_prev,
         const Params &p,
         float min_bnd_dist,
+        bool terminal_step,
         int* last_idx)
     {
         float min_dist_sq = 1e9f;
@@ -839,25 +840,22 @@ namespace mppi
         float rate_cost = p.q_du * (d_steer * d_steer + d_accel * d_accel);
         float steer_cost = p.q_steer * (u.steer * u.steer);
         
-        // 6. Boundary Collision Cost
-        float boundary_cost = 0.0f;
-        float safe_dist = p.collision_radius + p.boundary_soft_margin;
-
-        if (min_bnd_dist < safe_dist) {
-            float penetration = safe_dist - min_bnd_dist;
-            float soft_cost = p.q_boundary_soft * (penetration * penetration);
-
-            float hard_cost = 0.0f;
-            if (min_bnd_dist < p.collision_radius * 1.5f) {
-                float diff = min_bnd_dist - p.collision_radius;
-                // Preserve negative penetration. The old max(diff, 1e-5)
-                // made every actual collision receive nearly the same cost.
-                float capped = fminf(1.0f, fmaxf(-1.0f, diff));
-                hard_cost = p.q_collision * logf(1.0f + __expf(-30.0f * capped));
-            }
-
-            boundary_cost = soft_cost + hard_cost;
-        }
+        // 6. Track-boundary soft constraint.
+        //
+        // The reference MPC introduces s_k >= 0 in both lane inequalities
+        // and minimizes q_s*s_k^2.  For a sampled MPPI state the optimal
+        // slack is available analytically, so no solver variable or extra
+        // kernel is required:
+        //   s_k = max(0, required_clearance - measured_clearance).
+        // A negative measured clearance simply means the predicted state is
+        // outside the lane and produces a correspondingly larger finite cost.
+        // It is deliberately not converted into an invalid rollout.
+        const float boundary_slack =
+            fmaxf(0.0f, p.collision_radius - min_bnd_dist);
+        const float boundary_slack_weight = terminal_step
+            ? p.q_boundary_terminal_slack : p.q_boundary_slack;
+        const float boundary_cost = boundary_slack_weight
+            * boundary_slack * boundary_slack;
 
         // 7. Obstacle Cost
         float obs_cost = 0.0f;
@@ -1181,7 +1179,8 @@ namespace mppi
                 total_cost += compute_cost_cuda(
                     x,
                     ref_xs, ref_ys, ref_yaws, path_len,
-                    u_clamped, last_u, p, min_dist, &local_path_idx);
+                    u_clamped, last_u, p, min_dist, t == T - 1,
+                    &local_path_idx);
             }
 
             // 종점 진행도 보상
@@ -1754,13 +1753,9 @@ namespace mppi
         float min_cost = *min_it;
         best_k_ = static_cast<int>(std::distance(h_costs_.begin(), min_it));
 
-        // If this optimization result is unusably expensive, keep executing
-        // the remaining sequence from the previously solved MPPI horizon.
-        // h_prev_controls_ is already the previous solution shifted by one
-        // step after every successful solve.
-        if (std::isinf(min_cost) ||
-            (!params_.sudden_obstacle_replan &&
-             min_cost >= params_.all_rollouts_fault_cost_threshold)) {
+        // A large finite cost is still a valid soft-constrained solution.
+        // Only non-finite rollouts may reuse the previous horizon.
+        if (!std::isfinite(min_cost)) {
             const std::vector<Control> fallback_controls = h_prev_controls_;
             optimal_controls_ = fallback_controls;
             weighted_control_trajectory_.resize(T_);
@@ -1821,17 +1816,14 @@ namespace mppi
         CUDA_CHECK(cudaMemcpy(weighted_control_trajectory_.data(), d_weighted_states_,
                               T_ * sizeof(State), cudaMemcpyDeviceToHost));
 
-        // A convex average of safe control sequences is not necessarily safe
-        // after nonlinear dynamics. Reject an off-track weighted rollout and
-        // execute the lowest-cost sampled sequence that stays inside the
-        // collision boundary instead.
+        // Boundary clearance is intentionally soft.  Keep post-selection only
+        // for physical obstacle overlap; do not reject a trajectory merely
+        // because its lane-boundary slack is non-zero.
         if(params_.weighted_trajectory_safety_enabled &&
-           (trajectory_min_boundary_clearance(weighted_control_trajectory_)
-                < params_.collision_radius ||
-            trajectory_min_obstacle_clearance(weighted_control_trajectory_)
+           trajectory_min_obstacle_clearance(weighted_control_trajectory_)
                 < (params_.sudden_obstacle_replan
                     ? std::max(params_.car_radius,params_.sudden_obstacle_candidate_clearance)
-                    : params_.car_radius))) {
+                    : params_.car_radius)) {
             CUDA_CHECK(cudaMemcpy(h_states_.data(),d_states_,K_*T_*sizeof(State),
                                   cudaMemcpyDeviceToHost));
             std::vector<int> candidates(K_);
@@ -1843,9 +1835,7 @@ namespace mppi
             int safe_candidate=-1;
             for(int k:candidates) {
                 std::copy_n(h_states_.begin()+k*T_,T_,candidate_trajectory.begin());
-                if(trajectory_min_boundary_clearance(candidate_trajectory)
-                        >= params_.collision_radius &&
-                   trajectory_min_obstacle_clearance(candidate_trajectory)
+                if(trajectory_min_obstacle_clearance(candidate_trajectory)
                         >= (params_.sudden_obstacle_replan
                             ? std::max(params_.car_radius,params_.sudden_obstacle_candidate_clearance)
                             : params_.car_radius)) {

@@ -84,11 +84,13 @@
     q_rear_slip: 800.0
     rear_slip_soft_limit_deg: 8.0
     rear_slip_cost_min_speed: 1.5         # disable ill-conditioned low-vx slip cost
-    collision_radius: 0.15     # aggressive racing-line clearance
-    boundary_soft_margin: 0.15 # start soft cost at 0.30 m clearance
-    q_boundary_soft: 500.0
-    # Minimum rollout cost interpreted as "all candidates faulted".
-    all_rollouts_fault_cost_threshold: 5000.0
+    # MPC-style lane-boundary slack:
+    # s_k=max(0, collision_radius-min_boundary_clearance), cost=q_s*s_k^2.
+    # Boundary violation remains finite/selectable; only physical obstacles
+    # retain post-rollout hard candidate rejection.
+    collision_radius: 0.40
+    q_boundary_slack: 15000.0
+    q_boundary_terminal_slack: 15000.0
     # true: reject an off-track weighted-control rollout and use the
     # lowest-cost safe sampled sequence. false: publish standard MPPI weighted
     # controls without this post-optimization replacement.
@@ -202,7 +204,7 @@
     # --- Runtime environment and topics ---
     # true : simulator pose + twist come from simulation_odom_topic
     # false: real_pose_topic supplies map pose and real_odom_topic supplies velocity
-    is_simulation: false
+    is_simulation: true
     simulation_odom_topic: /ego_racecar/odom
     simulation_drive_topic: /drive  # must match f1tenth_gym_ros sim.yaml ego_drive_topic
     real_pose_topic: /newmcl_pose

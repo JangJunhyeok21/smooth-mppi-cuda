@@ -60,6 +60,9 @@ public:
         drive_pub_ = this->create_publisher<ackermann_msgs::msg::AckermannDriveStamped>(
             selected_drive_topic_, 10);
         vis_pub_   = this->create_publisher<visualization_msgs::msg::MarkerArray>("/mppi_viz", 50);
+        boundary_vis_pub_ = this->create_publisher<visualization_msgs::msg::MarkerArray>(
+            boundary_visualization_topic_,
+            rclcpp::QoS(rclcpp::KeepLast(5)).reliable().transient_local());
         traj_pub_  = this->create_publisher<smppi_cuda_controller::msg::MppiTrajectory>("/mppi_optimal_trajectory", 10);
 
         auto path_qos = rclcpp::QoS(rclcpp::KeepLast(1)).reliable().transient_local();
@@ -617,6 +620,9 @@ private:
         this->declare_parameter("max_accel_rate",       1000.0); mppi_params_.max_accel_rate   = this->get_parameter("max_accel_rate").as_double();
         this->declare_parameter("lambda",               10.0);   mppi_params_.lambda        = this->get_parameter("lambda").as_double();
         this->declare_parameter("visualize_candidates", true);   mppi_params_.visualize_candidates = this->get_parameter("visualize_candidates").as_bool();
+        this->declare_parameter("boundary_visualization_topic", "/mppi_boundary_viz");
+        boundary_visualization_topic_ =
+            this->get_parameter("boundary_visualization_topic").as_string();
         this->declare_parameter("mass",   3.74);   mppi_params_.mass = this->get_parameter("mass").as_double();
         this->declare_parameter("l_f",    0.163);  mppi_params_.l_f  = this->get_parameter("l_f").as_double();
         this->declare_parameter("l_r",    0.162);  mppi_params_.l_r  = this->get_parameter("l_r").as_double();
@@ -879,7 +885,7 @@ private:
         right_marker.points.push_back(right_marker.points.front());
         markers.markers.push_back(std::move(left_marker));
         markers.markers.push_back(std::move(right_marker));
-        vis_pub_->publish(markers);
+        boundary_vis_pub_->publish(markers);
     }
 
     void timer_callback() {
@@ -1217,6 +1223,7 @@ private:
 
     rclcpp::Publisher<ackermann_msgs::msg::AckermannDriveStamped>::SharedPtr drive_pub_;
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr       vis_pub_;
+    rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr       boundary_vis_pub_;
     rclcpp::Publisher<smppi_cuda_controller::msg::MppiTrajectory>::SharedPtr traj_pub_;
 
     rclcpp::TimerBase::SharedPtr timer_;
@@ -1224,6 +1231,7 @@ private:
     std::string simulation_odom_topic_, simulation_drive_topic_;
     std::string real_pose_topic_, real_odom_topic_, real_drive_topic_;
     std::string selected_drive_topic_, path_topic_, imu_topic_, dynamics_model_name_, residual_weights_path_,mlp_weights_path_;
+    std::string boundary_visualization_topic_;
     std::string simulation_obstacle_odom_topic_;
     std::string real_perception_obstacles_topic_, real_perception_obstacles_frame_;
     std::string kinematic_noslip_noimu_weights_path_,slip_kinematic_with_imu_weights_path_,dynamic_imu_weights_path_,dynamic_mlp_weights_path_,dynamic_mlp_servo_lag_weights_path_,dynamic_mlp_vx_delta_weights_path_,e2e_weights_path_,effective_history_weights_path_;

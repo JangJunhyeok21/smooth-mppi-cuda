@@ -132,6 +132,8 @@
     lambda: 20.0
     num_samples: 3200        # desktop simulation: ~4 ms measured
     visualize_candidates: true
+    # Slack-zero left/right boundary markers are separate from rollout markers.
+    boundary_visualization_topic: /mppi_boundary_viz
     control_rate_hz: 50.0    # 20 ms timer; MPPI 계산도 이 주기보다 짧아야 함
     model_dt: 0.04  # lag/effective rollout knot; ROS solve/publish remains 50 Hz
     # effective_history_state_residual training contract. These describe the

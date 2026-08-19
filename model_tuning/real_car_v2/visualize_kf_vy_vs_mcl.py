@@ -11,7 +11,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
-from model_tuning_utils.lateral_velocity_kf import (  # noqa: E402
+from helper_lateral_velocity_kf import (  # noqa: E402
     LateralVelocityKFParams, estimate_dataset)
 
 DATA_DIR = ROOT / "model_tuning/data/ifac0817_0818_autonomous_physics_clean"

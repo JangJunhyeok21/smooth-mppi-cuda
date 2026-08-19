@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 import numpy as np,yaml
 
 ROOT=Path(__file__).resolve().parents[2];sys.path.insert(0,str(ROOT))
-from model_tuning_utils.lateral_velocity_kf import LateralVelocityKFParams,estimate_dataset
+from helper_lateral_velocity_kf import LateralVelocityKFParams,estimate_dataset
 from offline_lateral_velocity_smoother import smooth_segment_vy
 
 DATA_DIRS=(ROOT/'model_tuning/data/ifac0815_autonomous_physics_clean',

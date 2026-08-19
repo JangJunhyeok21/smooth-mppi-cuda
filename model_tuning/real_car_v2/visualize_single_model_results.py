@@ -6,8 +6,8 @@ import matplotlib;matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
 # Direct-run settings. Edit these values and run
-# `python3 model_tuning/evaluate_model.py`; CLI arguments are optional.
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+# CLI arguments are optional.
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 RESULT_PATH = PROJECT_ROOT / 'model_tuning/results/ifac0807_0808_actuator_regressed_yaw_curriculum'
 OUTPUT_PATH = RESULT_PATH / 'visualization'
 COMPARE_RESULT_PATH = None

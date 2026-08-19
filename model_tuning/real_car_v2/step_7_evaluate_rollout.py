@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Free-recursive 1.2 s evaluation of a 40 ms two-substep dynamic residual."""
+"""Step 7: quantitatively evaluate held-out 1.2 s rollouts."""
 import argparse,json,sys
 from pathlib import Path
 import numpy as np,yaml

@@ -389,8 +389,8 @@ namespace mppi
     }
 
     // Pacejka dynamic classic base + residual MLP. This is byte-for-byte the
-    // Same 20-D feature order used by build_dynamic_40ms_dataset.py and
-    // train_dynamic_40ms.py.
+    // Same 20-D feature order used by step_4_build_40ms_dataset.py and
+    // step_5_train_residual_mlp.py.
     __device__ State update_dynamic_mlp_residual(
         const State &current_state,
         const Control &control,

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Copy the trained 40 ms residual binary and activate its values in MPPI YAML."""
+"""Step 8: validate and deploy the selected model to the MPPI runtime."""
 from pathlib import Path
 import hashlib
 import json

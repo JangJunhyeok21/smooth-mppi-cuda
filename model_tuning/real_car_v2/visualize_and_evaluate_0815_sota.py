@@ -14,7 +14,7 @@ ROOT = HERE.parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(HERE))
 from contract import Contract, actuator_step, longitudinal_actuator_step, residual_gates
-from model_tuning_utils.lateral_velocity_kf import LateralVelocityKFParams, estimate_dataset
+from helper_lateral_velocity_kf import LateralVelocityKFParams, estimate_dataset
 
 DATA_DIR = ROOT / "model_tuning/data/ifac0815_autonomous_physics_clean"
 WEIGHTS = ROOT / "config/dynamic_40ms_residual_servo_lag.bin"

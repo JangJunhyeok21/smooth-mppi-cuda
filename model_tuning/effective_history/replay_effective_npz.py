@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np,yaml
 HERE=Path(__file__).resolve().parent;ROOT=HERE.parents[1];sys.path.insert(0,str(HERE));sys.path.insert(0,str(ROOT))
 from check_cuda_parity import load
-from model_tuning_utils.lateral_velocity_kf import LateralVelocityKFParams,estimate_dataset
+from model_tuning.real_car_v2.helper_lateral_velocity_kf import LateralVelocityKFParams,estimate_dataset
 
 def ema(x,a=.25):
  y=x.copy()

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Train/export a 20-64-32-3 derivative residual for a 40 ms model knot."""
+"""Step 5: train/export the one-step 20-64-32-3 residual MLP."""
 import argparse,json,sys
 from pathlib import Path
 import numpy as np,torch

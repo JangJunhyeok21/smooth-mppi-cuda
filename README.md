@@ -302,7 +302,7 @@ python model_tuning/collect_all_bags.py \
 GT trajectory를 먼저 확인한다.
 
 ```bash
-python model_tuning/plot_extracted_bag_gt_trajectories.py \
+python model_tuning/real_car_v2/visualize_extracted_bag_gt_trajectories.py \
   model_tuning/data/tiv_mppi_80_20.npz \
   -o model_tuning/tiv_mppi_gt_check
 ```
@@ -414,7 +414,7 @@ command history와 action에 대해 CUDA MPPI와 simulator의
 공식 학습 진입점은 다음 runner이다.
 
 ```bash
-python3 model_tuning/real_car_v2/run_yaw_preserved_40ms_pipeline.py
+python3 model_tuning/real_car_v2/run_pipeline.py
 ```
 
 이 명령 하나가 bag dataset 결합, 40 ms classic Pacejka 회귀, residual target

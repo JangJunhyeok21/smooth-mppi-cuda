@@ -51,7 +51,7 @@
     kf_nonlinear_inertial_blend: 0.6382294
     kf_nonlinear_process_noise_scale: 7.4273267
     kf_nonlinear_ay_noise_scale: 4.0024465
-    # Must match model_tuning_utils/lateral_velocity_kf.py::estimate_dataset.
+    # Must match model_tuning/real_car_v2/helper_lateral_velocity_kf.py::estimate_dataset.
     kf_steer_scale: 1.1058064699
     kf_steer_bias: -0.0300696939
     kf_max_steer: 0.4788

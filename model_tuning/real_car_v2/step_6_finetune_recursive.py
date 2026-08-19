@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Fully recursive multi-horizon fine-tuning for the 40 ms dynamic residual."""
+"""Step 6: fully recursive multi-horizon fine-tuning."""
 import argparse,json,os,sys
 from pathlib import Path
 import numpy as np,torch,yaml
 from torch import nn
-ROOT=Path(__file__).resolve().parents[2];HERE=Path(__file__).resolve().parent;sys.path.insert(0,str(HERE));from train_dynamic_40ms import Net
+ROOT=Path(__file__).resolve().parents[2];HERE=Path(__file__).resolve().parent;sys.path.insert(0,str(HERE));from step_5_train_residual_mlp import Net
 DATA=ROOT/'model_tuning/data/dynamic_40ms_residual.npz';PARAMS=ROOT/'model_tuning/results/dynamic_40ms_regression/params.json';HORIZONS=(5,10,20,30)
 # User-editable defaults. Run once for the canonical recursive fine-tuning stage.
 INITIAL_MODEL_PATH=ROOT/'model_tuning/results/dynamic_40ms_residual_seed31'

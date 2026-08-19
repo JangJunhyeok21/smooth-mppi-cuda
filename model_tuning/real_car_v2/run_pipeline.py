@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""One-command reproduction/deployment of dynamic_40ms_yaw_preserved_stage2."""
+"""Run the numbered real-car training pipeline from extraction products onward."""
 from pathlib import Path
 import os
 import subprocess
@@ -33,13 +33,13 @@ def run(script, *arguments, environment=None):
 
 def main():
     if RUN_BUILD_DATASET:
-        run("build_dataset.py")
+        run("step_2_build_20ms_dataset.py")
     if RUN_CLASSIC_REGRESSION:
-        run("regress_dynamic_40ms_advanced.py")
+        run("step_3_regress_classic_model.py")
     if RUN_BUILD_RESIDUAL_DATASET:
-        run("build_dynamic_40ms_dataset.py")
+        run("step_4_build_40ms_dataset.py")
     if RUN_ONE_STEP_TRAINING:
-        run("train_dynamic_40ms.py")
+        run("step_5_train_residual_mlp.py")
 
     # Preserve the high-speed yaw solution by applying the low-speed gate to
     # all three residual heads during recursive optimization. At runtime/eval,
@@ -47,20 +47,20 @@ def main():
     yaw_environment = os.environ.copy()
     yaw_environment["GATE_AX_RESIDUAL"] = "1"
     if RUN_RECURSIVE_STAGE1:
-        run("finetune_dynamic_40ms_recursive.py", ONE_STEP,
+        run("step_6_finetune_recursive.py", ONE_STEP,
             "--out", STAGE1, "--epochs", "100", "--seed", "31",
             environment=yaw_environment)
     if RUN_RECURSIVE_STAGE2:
-        run("finetune_dynamic_40ms_recursive.py", STAGE1,
+        run("step_6_finetune_recursive.py", STAGE1,
             "--out", STAGE2, "--epochs", "100", "--seed", "31",
             environment=yaw_environment)
     if RUN_EVALUATION:
-        run("evaluate_dynamic_40ms.py", STAGE2,
+        run("step_7_evaluate_rollout.py", STAGE2,
             "--out", STAGE2 / "rollout_ax_ungated_metrics.json")
     if RUN_PLOT:
-        run("plot_highspeed_tail_comparison.py")
+        run("visualize_highspeed_tail_comparison.py")
     if RUN_DEPLOY_TO_MPPI:
-        run("deploy_dynamic_40ms_to_mppi.py")
+        run("step_8_deploy_to_mppi.py")
 
     print("\nCompleted: dynamic_40ms_yaw_preserved_stage2")
     print("weight:", STAGE2 / "dynamic_40ms_residual.bin")

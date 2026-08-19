@@ -1,25 +1,27 @@
 #!/usr/bin/env python3
-"""Extract the exact real-car MPPI observation path from rosbag2.
+"""Step 1: extract the exact real-car MPPI observation path from rosbag2.
 
 Pose is taken from /newmcl_pose, body velocity from /odom, controls from the
 selected Ackermann topic, and IMU from /imu/data.  Every stream is aligned by
 causal hold; no future sample is used.
 """
 import argparse
+import datetime as dtlib
 import json
+import re
 import sys
 from pathlib import Path
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from model_tuning_utils.filter_collision_recovery_episodes import (
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(PROJECT_ROOT))
+from helper_filter_collision_recovery import (
     collision_recovery_mask, physical_inconsistency_mask)
-from model_tuning_utils.lateral_velocity_kf import LateralVelocityKFParams, estimate_dataset
+from helper_lateral_velocity_kf import LateralVelocityKFParams, estimate_dataset
 
 # USER SETTINGS. Add every bag storage file or rosbag2 directory here. Running
 # this script without arguments extracts them sequentially.
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
 NEW_DATA_ROOTS = (
     Path("/mnt/nas_custom/F1tenth/2026 IFAC/0817 (1)"),
     Path("/mnt/nas_custom/F1tenth/2026 IFAC/0818"),
@@ -30,9 +32,10 @@ BAG_PATH = sorted({metadata.parent for root in NEW_DATA_ROOTS
                    for metadata in root.rglob("metadata.yaml")})
 OUTPUT_PATH = PROJECT_ROOT / "model_tuning/data/ifac0817_0818_autonomous_physics_clean"
 USE_PLOT = False
-# 0815 IMU is already expressed in the MPPI body convention (+x forward,
-# +y left, +z up), so no legacy 0807/0810 sign inversion is applied.
+# The sensor/body convention changed on 2026-08-17. Before that date IMU y/z
+# oppose MPPI FLU; from 0817 onward all axes already match MPPI.
 IMU_WZ_SIGN = 1.0; IMU_AX_SIGN = 1.0; IMU_AY_SIGN = 1.0; IMU_EMA_ALPHA = .25
+IMU_SIGN_CUTOVER = dtlib.date(2026, 8, 17)
 # Match the current runtime observer in config/params.yaml.
 KF_CF = 12.7222491; KF_CR = 75.0944752
 KF_LOW_SPEED_THRESHOLD = 0.5
@@ -49,6 +52,21 @@ PHYSICS_DISTANCE_WINDOW_S = .5; PHYSICS_MIN_ODOM_DISTANCE = .35
 PHYSICS_MIN_POSE_ODOM_RATIO = .65; PHYSICS_IMPACT_DECEL = -8.0
 PHYSICS_MAX_POSE_STEP = .30; PHYSICS_MAX_YAW_STEP = .45
 DT = .02; MAX_POSE_AGE = .10; MAX_VELOCITY_AGE = .10; MAX_COMMAND_AGE = .10; MAX_IMU_AGE = .05
+
+
+def recording_date(path):
+    text=str(path)
+    match=re.search(r"(?:rosbag2_)?(20\d{2})[_-](\d{2})[_-](\d{2})",text)
+    if match:return dtlib.date(*(int(value) for value in match.groups()))
+    short=re.search(r"(?:^|[/_ (])(0[78]\d{2})(?:[/_ )]|$)",text)
+    if short:
+        value=short.group(1);return dtlib.date(2026,int(value[:2]),int(value[2:]))
+    raise RuntimeError(f"{path}: cannot infer recording date for IMU sign convention")
+
+
+def imu_signs(path):
+    date=recording_date(path)
+    return ((1.,1.,1.) if date>=IMU_SIGN_CUTOVER else (-1.,1.,-1.)),date
 
 
 def resolve_storage(path):
@@ -148,7 +166,7 @@ def causal_hold(stream, times, max_age):
     return stream[clipped], valid
 
 
-def plot_extracted(samples, columns, dt, title, command_topic):
+def plot_extracted(samples, columns, dt, title, command_topic, signs=(1.,1.,1.)):
     """Show one bag and block until its window is closed."""
     import matplotlib.pyplot as plt
     source_t=samples[:,0];x,y,heading=samples[:,1],samples[:,2],samples[:,3]
@@ -168,9 +186,10 @@ def plot_extracted(samples, columns, dt, title, command_topic):
     kf_params=LateralVelocityKFParams(cornering_stiffness_front=KF_CF,
         cornering_stiffness_rear=KF_CR,dt=dt,
         low_speed_threshold=KF_LOW_SPEED_THRESHOLD)
+    wz_sign,ax_sign,ay_sign=signs
     kf_vy,kf_w=estimate_dataset(samples,columns,dt,kf_params,
         steer_scale=KF_STEER_SCALE,steer_bias=KF_STEER_BIAS,max_steer=KF_MAX_STEER,
-        imu_ema_alpha=IMU_EMA_ALPHA,imu_wz_sign=IMU_WZ_SIGN,imu_ay_sign=IMU_AY_SIGN)
+        imu_ema_alpha=IMU_EMA_ALPHA,imu_wz_sign=wz_sign,imu_ay_sign=ay_sign)
     fig,axes=plt.subplots(5,2,figsize=(15,21));fig.suptitle(title,y=.995)
     ax=axes[0,0];ax.plot(x,y,"k-",lw=1.5,label="pose trajectory")
     stride=max(1,len(samples)//35)
@@ -179,9 +198,9 @@ def plot_extracted(samples, columns, dt, title, command_topic):
               label="yaw direction")
     ax.set_title("x-y trajectory with yaw direction/color");ax.set_xlabel("x [m]");ax.set_ylabel("y [m]")
     ax.axis("equal");ax.grid(alpha=.25);ax.legend()
-    signed_imu_wz=IMU_WZ_SIGN*imu_wz
+    signed_imu_wz=wz_sign*imu_wz
     axes[0,1].plot(t,np.unwrap(heading),label="pose yaw [rad]")
-    axes[0,1].plot(t,signed_imu_wz,label=f"signed IMU yaw-rate (raw x {IMU_WZ_SIGN:+.0f})")
+    axes[0,1].plot(t,signed_imu_wz,label=f"signed IMU yaw-rate (raw x {wz_sign:+.0f})")
     axes[0,1].plot(t,imu_wz,":",color="0.65",label="raw IMU yaw-rate (sensor frame)")
     axes[0,1].plot(t,omega,label="odom yaw-rate [rad/s]")
     axes[0,1].plot(t,kf_w,label="KF yaw-rate [rad/s]",alpha=.8)
@@ -196,9 +215,9 @@ def plot_extracted(samples, columns, dt, title, command_topic):
     axes[2,1].plot(t,odom_vy,label="stored odom vy");axes[2,1].plot(t,pose_vy,label="pose-derived vy")
     axes[2,1].plot(t,kf_vy,label="training/runtime KF vy",lw=1.5)
     axes[2,1].set_title("Lateral velocity inputs/estimates")
-    axes[3,0].plot(t,IMU_AX_SIGN*imu_ax,label=f"signed training IMU ax (raw x {IMU_AX_SIGN:+.0f})")
+    axes[3,0].plot(t,ax_sign*imu_ax,label=f"signed training IMU ax (raw x {ax_sign:+.0f})")
     axes[3,0].plot(t,imu_ay,":",color="0.65",label="raw IMU ay (sensor frame)")
-    axes[3,0].plot(t,IMU_AY_SIGN*imu_ay,label=f"signed training IMU ay (raw x {IMU_AY_SIGN:+.0f})",alpha=.9)
+    axes[3,0].plot(t,ay_sign*imu_ay,label=f"signed training IMU ay (raw x {ay_sign:+.0f})",alpha=.9)
     axes[3,0].set_title("IMU acceleration and configured ay sign")
     axes[3,1].plot(t,steer,label=f"{command_topic} steering command");axes[3,1].set_title("Steering command")
     speed=np.hypot(vx,odom_vy);beta=np.arctan2(odom_vy,np.maximum(np.abs(vx),1e-4))
@@ -218,6 +237,7 @@ def plot_extracted(samples, columns, dt, title, command_topic):
 
 
 def extract_one(storage, out, args):
+    signs,date=imu_signs(storage)
     pose,velocity,drive,imu,applied=read_streams(storage,args.pose_topic,args.velocity_topic,
         args.command_topic,args.imu_topic,args.applied_command_topic)
     streams={"pose":pose,"velocity":velocity,"command":drive,"imu":imu,"applied_command":applied}
@@ -258,13 +278,16 @@ def extract_one(storage, out, args):
     np.savez_compressed(out,samples=samples,dt=args.dt,columns=columns,pose_topic=np.array(args.pose_topic),
                         velocity_topic=np.array(args.velocity_topic),command_topic=np.array(args.command_topic),
                         imu_topic=np.array(args.imu_topic),
-                        imu_axis_signs=np.array([IMU_WZ_SIGN,IMU_AX_SIGN,IMU_AY_SIGN],np.float32),
+                        recording_date=np.array(date.isoformat()),
+                        imu_sign_cutover=np.array(IMU_SIGN_CUTOVER.isoformat()),
+                        imu_axis_signs=np.array(signs,np.float32),
                         imu_ema_alpha=np.array(IMU_EMA_ALPHA,np.float32),
                         kf_cornering_stiffness=np.array([KF_CF,KF_CR],np.float32),
                         kf_low_speed_threshold=np.array(KF_LOW_SPEED_THRESHOLD,np.float32))
     meta={"source":str(storage.resolve()),"pose_topic":args.pose_topic,"velocity_topic":args.velocity_topic,
           "command_topic":args.command_topic,"imu_topic":args.imu_topic,"alignment":"causal_hold",
-          "imu_axis_signs":{"wz":IMU_WZ_SIGN,"ax":IMU_AX_SIGN,"ay":IMU_AY_SIGN},
+          "recording_date":date.isoformat(),"imu_sign_cutover":"2026-08-17",
+          "imu_axis_signs":{"wz":signs[0],"ax":signs[1],"ay":signs[2]},
           "imu_ema_alpha":IMU_EMA_ALPHA,
           "kf_parameters":{"cornering_stiffness_front":KF_CF,"cornering_stiffness_rear":KF_CR,
                            "low_speed_threshold":KF_LOW_SPEED_THRESHOLD,"steer_scale":KF_STEER_SCALE,
@@ -286,7 +309,7 @@ def extract_one(storage, out, args):
           "split_policy":"single-bag-identical-train-test"}
     out.with_suffix(".json").write_text(json.dumps(meta,indent=2)+"\n")
     print(json.dumps({**meta,"output":str(out)},indent=2))
-    return samples,columns
+    return samples,columns,signs
 
 
 def main():
@@ -329,13 +352,13 @@ def main():
         out=output_for_bag(args.output,storage,len(storages)>1)
         print(f"[{number}/{len(storages)}] Extracting {storage} -> {out}")
         try:
-            samples,columns=extract_one(storage,out,args)
+            samples,columns,signs=extract_one(storage,out,args)
         except RuntimeError as error:
             print(f"[{number}/{len(storages)}] SKIPPED: {error}",file=sys.stderr)
             continue
         if USE_PLOT: plot_extracted(samples,columns,args.dt,
                                     f"Bag {number}/{len(storages)}: {storage.parent.name}",
-                                    args.command_topic)
+                                    args.command_topic,signs)
 
 
 if __name__ == "__main__":

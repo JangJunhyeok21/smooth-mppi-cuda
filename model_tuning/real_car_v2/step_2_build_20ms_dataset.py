@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Build the audited 20-D residual-derivative dataset from real rosbag extracts.
+"""Step 2: build the audited 20 ms dataset from direct rosbag extracts.
 
 The diagnostic reconstructed CSV is explicitly forbidden. Inputs must be NPZ
 files produced directly from rosbag messages with /drive causal alignment.
 """
 from pathlib import Path
-import json, os, sys
+import datetime as dtlib
+import json, os, re, sys
 import numpy as np
 import yaml
 from scipy.signal import savgol_filter
@@ -14,7 +15,7 @@ HERE=Path(__file__).resolve().parent; ROOT=HERE.parents[1]
 sys.path.insert(0,str(ROOT));sys.path.insert(0,str(HERE))
 from contract import Contract, FEATURES, OUTPUTS, actuator_step, longitudinal_actuator_step
 from offline_lateral_velocity_smoother import smooth_segment_vy
-from model_tuning_utils.lateral_velocity_kf import LateralVelocityKFParams,estimate_dataset
+from helper_lateral_velocity_kf import LateralVelocityKFParams,estimate_dataset
 
 SOURCE_DIRS=(
     ROOT/"model_tuning/data/real_car_v2_drive",
@@ -30,6 +31,41 @@ USE_OFFLINE_VY_SMOOTHER=os.environ.get("USE_OFFLINE_VY_SMOOTHER","1")=="1"
 FORBIDDEN="prediction_vs_actual_run12_reconstructed.csv"
 TRAINING_MAX_SPEED=4.0  # retain high-speed bag samples even during 2 m/s shakedown deployment
 LEGACY_IMU_SIGNS=np.array((-1.0,1.0,-1.0),dtype=float)
+CURRENT_IMU_SIGNS=np.array((1.0,1.0,1.0),dtype=float)
+IMU_CONVENTION_CUTOFF=dtlib.date(2026,8,17)
+
+def source_date(path,archive=None):
+    """Return the recording date encoded in an IFAC folder or bag name."""
+    if archive is not None and "recording_date" in archive.files:
+        return dtlib.date.fromisoformat(str(archive["recording_date"]))
+    sidecar=Path(path).with_suffix(".json")
+    if sidecar.exists():
+        recorded=json.loads(sidecar.read_text()).get("recording_date")
+        if recorded:return dtlib.date.fromisoformat(recorded)
+    # Prefer the bag filename. A combined output directory such as
+    # ifac0817_0818... is not a recording date and must never decide signs.
+    text=Path(path).name
+    full=re.search(r"(?:rosbag2_)?(20\d{2})[_-](\d{2})[_-](\d{2})",text)
+    if full:return dtlib.date(*(int(q) for q in full.groups()))
+    # Folder names in the archive use 0807, 0815, 0817, ... .  Restrict this
+    # fallback to the known 2026 IFAC archive so unrelated four-digit tokens
+    # cannot silently select an IMU convention.
+    short=re.search(r"(?:^|[/_ (])(0[78]\d{2})(?:[/_ )]|$)",text)
+    if short:
+        value=short.group(1);return dtlib.date(2026,int(value[:2]),int(value[2:]))
+    return None
+
+def imu_signs_for_source(path,archive):
+    """Apply the verified 0817 sensor-frame cutover, independent of YAML."""
+    date=source_date(path,archive)
+    if date is None:
+        raise RuntimeError(f"{path}: cannot infer recording date for IMU sign convention")
+    expected=CURRENT_IMU_SIGNS if date>=IMU_CONVENTION_CUTOFF else LEGACY_IMU_SIGNS
+    stored=archive["imu_axis_signs"].astype(float) if "imu_axis_signs" in archive.files else None
+    if stored is not None and not np.array_equal(stored,expected):
+        raise RuntimeError(f"{path}: stored imu_axis_signs={stored.tolist()} conflict with "
+                           f"date contract {expected.tolist()} (cutover=2026-08-17)")
+    return expected.copy(),date
 
 def ema(x,alpha=.25):
     y=x.copy()
@@ -76,14 +112,11 @@ def main():
             ii=np.flatnonzero(local_ids==local);s=a[ii];n=len(s)
             if n<12:continue
             kfp=LateralVelocityKFParams(cornering_stiffness_front=float(cfg["kf_cornering_stiffness_front"]),cornering_stiffness_rear=float(cfg["kf_cornering_stiffness_rear"]),mass=float(cfg["mass"]),yaw_inertia=float(cfg["I_z"]),l_f=float(cfg["l_f"]),l_r=float(cfg["l_r"]),dt=dt,min_longitudinal_speed=float(cfg["kf_min_vx"]),low_speed_threshold=float(cfg["kf_low_speed_threshold"]),max_abs_vy=float(cfg["kf_max_abs_vy"]),process_var_vy=float(cfg["kf_q_vy"]),process_var_yaw_rate=float(cfg["kf_q_yaw_rate"]),measurement_var_lateral_accel=float(cfg["kf_r_lateral_accel"]),measurement_var_yaw_rate=float(cfg["kf_r_yaw_rate"]),initial_var_vy=float(cfg["kf_initial_p_vy"]),initial_var_yaw_rate=float(cfg["kf_initial_p_yaw_rate"]),imu_lateral_accel_sign=float(cfg["imu_lateral_accel_sign"]),nonlinear_dvy_threshold=float(cfg["kf_nonlinear_dvy_threshold"]),nonlinear_dvy_width=float(cfg["kf_nonlinear_dvy_width"]),nonlinear_inertial_blend=float(cfg["kf_nonlinear_inertial_blend"]),nonlinear_process_noise_scale=float(cfg["kf_nonlinear_process_noise_scale"]),nonlinear_ay_noise_scale=float(cfg["kf_nonlinear_ay_noise_scale"]))
-            # Pre-0815 bags used the legacy mounted-sensor convention. New
-            # extracts store their own body-frame sign contract in the NPZ.
-            # Never apply one global sign to a mixed-date training archive.
-            # Missing metadata means a pre-0815 extract. Those bags retain the
-            # old sensor mounting convention; current YAML signs describe the
-            # live post-0815 node and must not be retroactively applied here.
-            source_signs=(z["imu_axis_signs"].astype(float) if "imu_axis_signs" in z.files
-                          else LEGACY_IMU_SIGNS.copy())
+            # The installed IMU convention changed on 2026-08-17: before the
+            # cutover sensor y/z oppose MPPI FLU, from 0817 onward they match.
+            # Resolve this from the recording date and reject contradictory
+            # per-file metadata instead of silently mixing body frames.
+            source_signs,recording_date=imu_signs_for_source(path,z)
             imu_wz_sign,imu_ax_sign,imu_ay_sign=source_signs
             source_ema_alpha=(float(z["imu_ema_alpha"]) if "imu_ema_alpha" in z.files
                               else float(cfg["imu_ema_alpha"]))
@@ -143,7 +176,7 @@ def main():
             # Every discontinuous segment needs its own id. Reusing source_id
             # made recursive windows cross localization/collision cuts.
             bag_id=next_bag
-            features.append(feat.astype(np.float32));targets.append(target.astype(np.float32));observations.append(np.c_[imu_ax,imu_ay,r].astype(np.float32));teacher_vys.append(vy_teacher.astype(np.float32));teacher_confidences.append(teacher_confidence.astype(np.float32));valids.append(ok);bag_ids.append(np.full(n,bag_id));split_ids.append(np.full(n,split));manifest.append({"bag_id":bag_id,"source":str(path),"segment":int(local),"split":("train","val","test")[split],"samples":n,"valid":int(ok.sum()),"vy_input":"causal_kf","vy_teacher":("offline_mcl_imu_smoother" if smoother_diagnostics and smoother_diagnostics.get("usable") else "causal_kf_fallback"),"vy_smoother":smoother_diagnostics,"imu_ax_stationary_bias_removed":ax_bias,"imu_axis_signs":{"wz":imu_wz_sign,"ax":imu_ax_sign,"ay":imu_ay_sign},"imu_ema_alpha":source_ema_alpha,"command_topic":str(z["command_topic"])});next_bag+=1
+            features.append(feat.astype(np.float32));targets.append(target.astype(np.float32));observations.append(np.c_[imu_ax,imu_ay,r].astype(np.float32));teacher_vys.append(vy_teacher.astype(np.float32));teacher_confidences.append(teacher_confidence.astype(np.float32));valids.append(ok);bag_ids.append(np.full(n,bag_id));split_ids.append(np.full(n,split));manifest.append({"bag_id":bag_id,"source":str(path),"recording_date":recording_date.isoformat(),"imu_sign_cutover":"2026-08-17","segment":int(local),"split":("train","val","test")[split],"samples":n,"valid":int(ok.sum()),"vy_input":"causal_kf","vy_teacher":("offline_mcl_imu_smoother" if smoother_diagnostics and smoother_diagnostics.get("usable") else "causal_kf_fallback"),"vy_smoother":smoother_diagnostics,"imu_ax_stationary_bias_removed":ax_bias,"imu_axis_signs":{"wz":imu_wz_sign,"ax":imu_ax_sign,"ay":imu_ay_sign},"imu_ema_alpha":source_ema_alpha,"command_topic":str(z["command_topic"])});next_bag+=1
     X=np.concatenate(features);Y=np.concatenate(targets);O=np.concatenate(observations);TV=np.concatenate(teacher_vys);TC=np.concatenate(teacher_confidences);B=np.concatenate(bag_ids);S=np.concatenate(split_ids);V=np.concatenate(valids)
     assert X.shape[1]==20 and tuple(FEATURES)==("vx","vy","yaw_rate","steer_cmd","speed_cmd","applied_steer","steer_cmd_delta","base_next_vx","base_next_vy","base_next_yaw_rate","steer_t-4","speed_t-4","steer_t-3","speed_t-3","steer_t-2","speed_t-2","steer_t-1","speed_t-1","steer_t","speed_t")
     np.savez_compressed(OUTPUT,features=X,targets=Y,observations=O,teacher_vy=TV,teacher_vy_confidence=TC,bag_id=B,split=S,valid=V,feature_names=np.array(FEATURES),target_names=np.array(OUTPUTS),observation_names=np.array(("imu_ax","imu_ay","imu_yaw_rate")),dt=c.dt,vy_input_contract="causal_kf",vy_teacher_contract="offline_smoother_with_causal_fallback")

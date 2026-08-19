@@ -28,7 +28,7 @@ RANDOM_SEED = 31
 UPDATE_CONFIG = True
 SHOW_PLOTS = False
 
-# These are source-session splits, identical to build_dataset.py.
+# These are source-session splits, identical to step_2_build_20ms_dataset.py.
 VALIDATION_FILES = {"rosbag2_2026_08_08-16_54_33.npz"}
 TEST_FILES = {
     "rosbag2_2026_08_10-21_45_57.npz",

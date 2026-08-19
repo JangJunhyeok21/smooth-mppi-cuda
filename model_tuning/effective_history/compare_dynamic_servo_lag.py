@@ -6,7 +6,7 @@ import numpy as np,yaml
 
 HERE=Path(__file__).resolve().parent;ROOT=HERE.parents[1]
 sys.path.insert(0,str(ROOT));sys.path.insert(0,str(HERE.parent/"real_car_v2"))
-from model_tuning_utils.lateral_velocity_kf import LateralVelocityKFParams,estimate_dataset
+from model_tuning.real_car_v2.helper_lateral_velocity_kf import LateralVelocityKFParams,estimate_dataset
 from contract import Contract,actuator_step,longitudinal_actuator_step,low_speed_gate
 
 def ema(x,a=.25):

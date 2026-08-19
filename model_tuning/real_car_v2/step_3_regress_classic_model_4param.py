@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Identify a two-20-ms-substep Pacejka model for one 40 ms MPPI knot."""
+"""Step 3 alternative: identify a constrained four-parameter Pacejka model."""
 from pathlib import Path
 import json,numpy as np,yaml
 from scipy.optimize import differential_evolution,least_squares

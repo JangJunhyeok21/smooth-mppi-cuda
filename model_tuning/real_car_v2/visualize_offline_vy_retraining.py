@@ -7,7 +7,7 @@ import numpy as np
 import torch, yaml
 
 ROOT=Path(__file__).resolve().parents[2];HERE=Path(__file__).resolve().parent;sys.path.insert(0,str(HERE))
-from compare_recursive_20d_vx_delta_24d import replay_new, metrics
+from visualize_recursive_20d_vx_delta_24d import replay_new, metrics
 
 DATA=Path(os.environ.get('OFFLINE_VY_DATA',ROOT/'model_tuning/data/dynamic_40ms_residual_offline_vy_adam8d.npz'))
 OLD_MODEL=Path(os.environ.get('OLD_VY_MODEL',ROOT/'model_tuning/results/adam8d_vx_delta24d_stage2/model.pt'))

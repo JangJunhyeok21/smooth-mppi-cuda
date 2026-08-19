@@ -17,6 +17,8 @@ model_tuning/**
 !model_tuning/real_car_v2/**
 !model_tuning/effective_history/
 !model_tuning/effective_history/**
+!model_tuning/trash/
+!model_tuning/trash/**
 model_tuning_utils/tiv_collision_vesc_p_focus3x/history.csv
 model_tuning_utils/__pycache__/**
 model_tuning_utils/all_bags_tuned_lstm_finetune/**.json

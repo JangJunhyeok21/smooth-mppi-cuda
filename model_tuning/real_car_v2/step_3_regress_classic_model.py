@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare global, differentiable and MLP-surrogate Pacejka identification.
+"""Step 3: regress and select the classic Pacejka baseline.
 
 This script never uses reconstructed diagnostic CSV data.  It preserves the
 bag-level train/validation/test split and selects one *global* eight-parameter

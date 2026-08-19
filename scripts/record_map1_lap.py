@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Record consecutive Map1 MPPI laps (or collision/timeout) and plot them."""
 import csv
+import argparse
 import math
 import time
 from pathlib import Path
@@ -24,9 +25,12 @@ OUTPUT_DIRECTORY = Path(
 
 
 class Recorder(Node):
-    def __init__(self):
+    def __init__(self, target_laps=TARGET_LAPS, timeout_seconds=TIMEOUT_SECONDS,
+                 output_directory=OUTPUT_DIRECTORY):
         super().__init__("map1_lap_recorder")
-        self.out = OUTPUT_DIRECTORY
+        self.target_laps = target_laps
+        self.timeout_seconds = timeout_seconds
+        self.out = output_directory
         self.out.mkdir(parents=True, exist_ok=True)
         self.t0 = None; self.start = None; self.left_start = False
         self.latest_pose = None
@@ -91,9 +95,9 @@ class Recorder(Node):
         if m.data and self.t0 is not None: self.finish("collision")
     def check(self):
         if not self.odom:return
-        if abs(self.accumulated_progress) >= TARGET_LAPS*self.track_length:
+        if abs(self.accumulated_progress) >= self.target_laps*self.track_length:
             self.finish("laps_complete")
-        elif self.rel() > TIMEOUT_SECONDS:
+        elif self.rel() > self.timeout_seconds:
             self.finish("timeout")
     def finish(self,status):
         if not rclpy.ok():return
@@ -131,7 +135,12 @@ class Recorder(Node):
         fig.tight_layout();fig.savefig(self.out/"map1_mppi_prediction_vs_simulator.png",dpi=180);plt.close(fig)
 
 def main():
-    rclpy.init(); n=Recorder()
+    parser=argparse.ArgumentParser()
+    parser.add_argument("--laps",type=float,default=TARGET_LAPS)
+    parser.add_argument("--timeout",type=float,default=TIMEOUT_SECONDS)
+    parser.add_argument("--output",type=Path,default=OUTPUT_DIRECTORY)
+    args=parser.parse_args()
+    rclpy.init(); n=Recorder(args.laps,args.timeout,args.output)
     try:rclpy.spin(n)
     except KeyboardInterrupt:
         if rclpy.ok(): n.finish("interrupted")

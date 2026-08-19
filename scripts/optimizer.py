@@ -23,13 +23,13 @@ class MPPIOptimizer(Node):
         self.q_du_list = [0.2, 0.5, 0.8]
         self.q_steer_list = [3.0, 5.0, 7.0 ]
         self.q_lat_g_list = [200.0, 250.0, 300.0]
-        self.q_collision_list = [200.0, 150.0]
+        self.q_obs_list = [10000.0, 15000.0, 20000.0]
         self.q_progress_list = [10.0, 13.0, 16.0]
         self.q_escape_vel_list = [5.0, 6.5, 8.0]
         
         self.param_combinations = list(itertools.product(
             self.q_v_list, self.q_dist_list, self.q_du_list, 
-            self.q_steer_list, self.q_lat_g_list, self.q_collision_list, self.q_progress_list, self.q_escape_vel_list
+            self.q_steer_list, self.q_lat_g_list, self.q_obs_list, self.q_progress_list, self.q_escape_vel_list
         ))
         self.get_logger().info(f"Total Combinations to run: {len(self.param_combinations)}")
         
@@ -114,7 +114,7 @@ class MPPIOptimizer(Node):
         self.reset_pending = True
         self.reset_deadline = time.time() + 1.0
 
-    def start_mppi_node(self, q_v, q_dist, q_du, q_steer, q_lat_g, q_collision, q_progress, q_escape_vel):
+    def start_mppi_node(self, q_v, q_dist, q_du, q_steer, q_lat_g, q_obs, q_progress, q_escape_vel):
         """🚨 ros2 run으로 제어기만 단독 실행. 베이스 yaml 위에 최적화 변수만 덮어씌움"""
         cmd = [
             "ros2", "run", "smppi_cuda_controller", "smppi_node",
@@ -125,13 +125,13 @@ class MPPIOptimizer(Node):
             "-p", f"q_du:={q_du}",
             "-p", f"q_steer:={q_steer}",
             "-p", f"q_lat_g:={q_lat_g}",
-            "-p", f"q_collision:={q_collision}",
+            "-p", f"q_obs:={q_obs}",
             "-p", f"q_progress:={q_progress}",
             "-p", f"q_escape_vel:={q_escape_vel}",
             "-p", "is_simulation:=True"            # 시뮬레이터 모드 강제
         ]
         
-        self.get_logger().info(f"Run {self.current_run + 1}: q_v={q_v}, lat_g={q_lat_g}, col={q_collision}, progress={q_progress}, escape_vel={q_escape_vel}")
+        self.get_logger().info(f"Run {self.current_run + 1}: q_v={q_v}, lat_g={q_lat_g}, q_obs={q_obs}, progress={q_progress}, escape_vel={q_escape_vel}")
         
         os.makedirs("result", exist_ok=True)
         log_path = f"result/mppi_node_run_{self.current_run + 1}.log"
@@ -215,7 +215,7 @@ class MPPIOptimizer(Node):
                 q_v, q_dist, q_du, q_steer, q_lat_g, q_col, q_progress, q_escape_vel = self.param_combinations[self.current_run]
                 self.results.append({
                     'q_v': q_v, 'q_dist': q_dist, 'q_du': q_du, 'q_steer': q_steer,
-                    'q_lat_g': q_lat_g, 'q_collision': q_col, 'q_progress': q_progress, 'q_escape_vel': q_escape_vel,
+                    'q_lat_g': q_lat_g, 'q_obs': q_col, 'q_progress': q_progress, 'q_escape_vel': q_escape_vel,
                     'status': 'Crashed', 'lap_time': 999.0,
                     'max_distance': self.max_distance
                 })
@@ -235,7 +235,7 @@ class MPPIOptimizer(Node):
                     q_v, q_dist, q_du, q_steer, q_lat_g, q_col, q_progress, q_escape_vel = self.param_combinations[self.current_run]
                     self.results.append({
                         'q_v': q_v, 'q_dist': q_dist, 'q_du': q_du, 'q_steer': q_steer,
-                        'q_lat_g': q_lat_g, 'q_collision': q_col, 'q_progress': q_progress, 'q_escape_vel': q_escape_vel,
+                        'q_lat_g': q_lat_g, 'q_obs': q_col, 'q_progress': q_progress, 'q_escape_vel': q_escape_vel,
                         'status': 'Finished', 'lap_time': elapsed_time,
                         'max_distance': self.max_distance
                     })
@@ -248,7 +248,7 @@ class MPPIOptimizer(Node):
                 q_v, q_dist, q_du, q_steer, q_lat_g, q_col, q_progress, q_escape_vel = self.param_combinations[self.current_run]
                 self.results.append({
                     'q_v': q_v, 'q_dist': q_dist, 'q_du': q_du, 'q_steer': q_steer,
-                    'q_lat_g': q_lat_g, 'q_collision': q_col, 'q_progress': q_progress, 'q_escape_vel': q_escape_vel,
+                    'q_lat_g': q_lat_g, 'q_obs': q_col, 'q_progress': q_progress, 'q_escape_vel': q_escape_vel,
                     'status': 'Timeout', 'lap_time': 999.0,
                     'max_distance': self.max_distance
                 })
@@ -259,7 +259,7 @@ class MPPIOptimizer(Node):
         with open('result/mppi_optimization_results.csv', 'w', newline='') as f:
             writer = csv.DictWriter(
                 f,
-                fieldnames=['q_v', 'q_dist', 'q_du', 'q_steer', 'q_lat_g', 'q_collision', 'q_progress', 'q_escape_vel', 'status', 'lap_time', 'max_distance']
+                fieldnames=['q_v', 'q_dist', 'q_du', 'q_steer', 'q_lat_g', 'q_obs', 'q_progress', 'q_escape_vel', 'status', 'lap_time', 'max_distance']
             )
             writer.writeheader()
             writer.writerows(self.results)

@@ -45,7 +45,7 @@ F_y = D · sin(C · atan(B · α))
 | 속도 추종 | `q_v` | 목표 속도와의 편차 |
 | 제어 변화율 | `q_du` | 조향·가속 변화량 |
 | 조향량 | `q_steer` | 조향각 크기 패널티 |
-| 충돌 | `q_collision` | 경계선 침범 시 급격한 패널티 |
+| 장애물 slack | `q_obs` | `max(0, car_radius-distance)^2` 패널티 |
 | 횡가속도 | `q_lat_g` | 9.5 m/s² 초과 시 지수 패널티 |
 | 진행 보상 | `q_progress` | 경로 방향 진행 보상 (음의 비용) |
 | 탈출 속도 | `q_escape_vel` | 저속 고착 상황 탈출 |

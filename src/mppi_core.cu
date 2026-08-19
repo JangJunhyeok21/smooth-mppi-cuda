@@ -861,41 +861,16 @@ namespace mppi
         const float boundary_cost = boundary_slack_weight
             * boundary_slack * boundary_slack;
 
-        // 7. Obstacle Cost
+        // 7. Obstacle soft constraint.
+        // s_obs=max(0,required_clearance-center_distance), J=q_obs*s_obs^2.
+        // The post-rollout collision guard remains a separate safety layer.
         float obs_cost = 0.0f;
         for (int i = 0; i < p.num_obstacles; ++i) {
             float dx = s.x - p.obs_x[i];
             float dy = s.y - p.obs_y[i];
             float dist = sqrtf(dx * dx + dy * dy);
-            const float influence_distance = p.sudden_obstacle_replan
-                ? fmaxf(p.obstacle_influence_distance,
-                        p.sudden_obstacle_influence_distance)
-                : p.obstacle_influence_distance;
-            const float required_clearance = p.sudden_obstacle_replan
-                ? fmaxf(p.car_radius,p.sudden_obstacle_min_clearance)
-                : p.car_radius;
-            const float obstacle_cost_weight = p.q_obs *
-                (p.sudden_obstacle_replan
-                    ? fmaxf(1.0f,p.sudden_obstacle_cost_multiplier) : 1.0f);
-            if (dist < influence_distance) {
-                const float penetration = influence_distance - dist;
-                obs_cost += obstacle_cost_weight * penetration * penetration;
-                // Entering the avoidance corridor at racing speed leaves no
-                // steering authority for the next knot. Penalize kinetic
-                // energy progressively near the obstacle, but allow speed to
-                // recover immediately after passing it.
-                const float proximity = penetration /
-                    fmaxf(1.0e-3f, influence_distance - required_clearance);
-                const float bounded_proximity = fminf(1.0f, fmaxf(0.0f, proximity));
-                obs_cost += 0.35f * obstacle_cost_weight * bounded_proximity * bounded_proximity
-                          * (s.v * s.v + s.vy * s.vy);
-                if (dist < required_clearance) {
-                    // The former reciprocal became negative after collision,
-                    // accidentally rewarding rollouts through an obstacle.
-                    const float overlap = required_clearance - dist;
-                    obs_cost += p.q_collision * (1.0f + 20.0f * overlap * overlap);
-                }
-            }
+            const float obstacle_slack=fmaxf(0.0f,p.car_radius-dist);
+            obs_cost += p.q_obs*obstacle_slack*obstacle_slack;
         }
 
         return path_cost + vel_cost + error_speed_cost + friction_ellipse_cost
@@ -1034,22 +1009,7 @@ namespace mppi
         // forced speed reduction: speed remains an MPPI optimization result.
         if (p.rollout_obstacle_ahead) {
             const int avoidance_lane = k & 15;
-            if (p.sudden_obstacle_replan && avoidance_lane >= 4) {
-                const int magnitude_index = ((avoidance_lane-4) >> 1) % 3;
-                const float magnitude = 0.12f * (magnitude_index+1);
-                current_action.steer += (avoidance_lane & 1) ? magnitude : -magnitude;
-                // These are candidate controls, not a forced command. MPPI
-                // selects them only when their total rollout cost is lower.
-                if (avoidance_lane >= 10) {
-                    // At ~4 m/s a suddenly revealed obstacle cannot always be
-                    // cleared by steering alone. Sample moderate direct-speed
-                    // references, avoiding the 0.5 m/s emergency hypotheses
-                    // that caused excessive yaw and boundary departure.
-                    const float candidate_speed = avoidance_lane >= 14
-                        ? 2.0f : (avoidance_lane >= 12 ? 2.4f : 2.8f);
-                    current_action.accel = fminf(current_action.accel,candidate_speed);
-                }
-            } else if (avoidance_lane == 14) {
+            if (avoidance_lane == 14) {
                 current_action.steer -= 0.24f;
             } else if (avoidance_lane == 15) {
                 current_action.steer += 0.24f;
@@ -1804,9 +1764,7 @@ namespace mppi
         // because its lane-boundary slack is non-zero.
         if(params_.weighted_trajectory_safety_enabled &&
            trajectory_min_obstacle_clearance(weighted_control_trajectory_)
-                < (params_.sudden_obstacle_replan
-                    ? std::max(params_.car_radius,params_.sudden_obstacle_candidate_clearance)
-                    : params_.car_radius)) {
+                < params_.car_radius) {
             CUDA_CHECK(cudaMemcpy(h_states_.data(),d_states_,K_*T_*sizeof(State),
                                   cudaMemcpyDeviceToHost));
             CUDA_CHECK(cudaMemcpy(h_controls_.data(),d_controls_,K_*T_*sizeof(Control),
@@ -1821,9 +1779,7 @@ namespace mppi
             for(int k:candidates) {
                 std::copy_n(h_states_.begin()+k*T_,T_,candidate_trajectory.begin());
                 if(trajectory_min_obstacle_clearance(candidate_trajectory)
-                        >= (params_.sudden_obstacle_replan
-                            ? std::max(params_.car_radius,params_.sudden_obstacle_candidate_clearance)
-                            : params_.car_radius)) {
+                        >= params_.car_radius) {
                     safe_candidate=k;
                     break;
                 }
@@ -1868,62 +1824,6 @@ namespace mppi
                     std::cos(desired_heading-current_state.yaw));
                 float desired_applied_steer=std::min(params_.max_steer,
                     std::max(-params_.max_steer,0.8f*heading_error));
-                if(params_.sudden_obstacle_replan &&
-                   nearest_index<h_left_bnd_xs_.size() &&
-                   nearest_index<h_right_bnd_xs_.size()) {
-                    const float reference_yaw=h_ref_yaws_[nearest_index];
-                    const float lateral_error=
-                        -(current_state.x-h_ref_xs_[nearest_index])*sinf(reference_yaw)
-                        +(current_state.y-h_ref_ys_[nearest_index])*cosf(reference_yaw);
-                    const float left_width=hypotf(
-                        h_left_bnd_xs_[nearest_index]-h_ref_xs_[nearest_index],
-                        h_left_bnd_ys_[nearest_index]-h_ref_ys_[nearest_index]);
-                    const float right_width=hypotf(
-                        h_right_bnd_xs_[nearest_index]-h_ref_xs_[nearest_index],
-                        h_right_bnd_ys_[nearest_index]-h_ref_ys_[nearest_index]);
-                    const float left_clearance=left_width-lateral_error;
-                    const float right_clearance=right_width+lateral_error;
-                    float pass_side=left_clearance>=right_clearance?1.0f:-1.0f;
-                    float nearest_obstacle_distance_sq=std::numeric_limits<float>::infinity();
-                    float obstacle_lateral=0.0f;
-                    for(int obstacle_index=0;
-                        obstacle_index<params_.num_obstacles;++obstacle_index) {
-                        const float obstacle_dx=params_.obs_x[obstacle_index]-current_state.x;
-                        const float obstacle_dy=params_.obs_y[obstacle_index]-current_state.y;
-                        const float obstacle_distance_sq=
-                            obstacle_dx*obstacle_dx+obstacle_dy*obstacle_dy;
-                        if(obstacle_distance_sq<nearest_obstacle_distance_sq) {
-                            nearest_obstacle_distance_sq=obstacle_distance_sq;
-                            obstacle_lateral=
-                                -(params_.obs_x[obstacle_index]-h_ref_xs_[nearest_index])
-                                    *sinf(reference_yaw)
-                                +(params_.obs_y[obstacle_index]-h_ref_ys_[nearest_index])
-                                    *cosf(reference_yaw);
-                        }
-                    }
-                    // If the obstacle is already offset, pass on its opposite
-                    // side. For a centerline obstacle use the wider corridor.
-                    if(std::fabs(obstacle_lateral)>0.10f)
-                        pass_side=obstacle_lateral>0.0f?-1.0f:1.0f;
-                    const size_t emergency_lookahead=h_ref_xs_.empty()?0:
-                        (nearest_index+16)%h_ref_xs_.size();
-                    const float lookahead_yaw=h_ref_yaws_[emergency_lookahead];
-                    const float available_width=pass_side>0.0f?left_width:right_width;
-                    const float pass_offset=pass_side*std::min(0.55f,
-                        std::max(0.25f,available_width-params_.car_radius-0.10f));
-                    const float target_x=h_ref_xs_[emergency_lookahead]
-                        -sinf(lookahead_yaw)*pass_offset;
-                    const float target_y=h_ref_ys_[emergency_lookahead]
-                        +cosf(lookahead_yaw)*pass_offset;
-                    const float emergency_heading=std::atan2(
-                        target_y-current_state.y,target_x-current_state.x);
-                    const float emergency_heading_error=std::atan2(
-                        std::sin(emergency_heading-current_state.yaw),
-                        std::cos(emergency_heading-current_state.yaw));
-                    desired_applied_steer=std::min(params_.max_steer,
-                        std::max(-params_.max_steer,
-                            0.8f*emergency_heading_error));
-                }
                 const float steer_scale=std::fabs(params_.kinematic_steer_scale)>1.0e-6f
                     ?params_.kinematic_steer_scale:1.0f;
                 const float recovery_steer=std::min(params_.max_steer,

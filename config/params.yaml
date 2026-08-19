@@ -59,7 +59,6 @@
     q_error_speed: 0.0      # 중앙선 오차에 따른 속도 억제 비활성화
     q_du: 0.12
     q_steer: 0.30
-    q_collision: 5000.0
     q_lat_g: 60.0
     lat_g_soft_limit: 9.5                 # soft combined-grip ceiling
     longitudinal_accel_soft_limit: 4.0    # friction ellipse ax axis [m/s^2]
@@ -91,22 +90,9 @@
     real_perception_obstacles_topic: /f1/perception/object/obstacles/arr
     real_perception_obstacles_frame: map
     obstacle_timeout: 0.5
-    car_radius: 0.25             # conservative combined footprint radius
-    obstacle_influence_distance: 0.9
-    # Temporary emergency exploration only when a previously absent/moved
-    # obstacle first appears near the vehicle. Normal obstacle planning keeps
-    # using obstacle_influence_distance and has no forced deceleration.
-    sudden_obstacle_replan_enabled: false
-    sudden_obstacle_jump_threshold: 0.75 # 새로 나타난 것으로 볼 위치 변화량
-    sudden_obstacle_replan_distance: 1.0 # 긴급 모드를 켤 최대 차량 거리
-    sudden_obstacle_replan_duration: 1.0 # 긴급 모드를 유지할 시간
-    sudden_obstacle_influence_distance: 2.0 # rollout cost에 장애물 비용을 적용하기 시작하는 거리 (기존 obstacle_influence_distance 대신)
-    # Cost target includes model/rectangular-footprint margin, while candidate
-    # acceptance remains at the actual measured clearance requirement.
-    sudden_obstacle_min_clearance: 0.70 # 긴급 모드의 비용상 목표 안전거리
-    sudden_obstacle_candidate_clearance: 0.68 # 실제 실행 candidate를 허용하는 최소 예측 거리
-    sudden_obstacle_cost_multiplier: 3.0
-    q_obs: 650.0
+    car_radius: 0.4            # conservative combined footprint radius
+    # 장애물 soft constraint: s=max(0, car_radius-distance), cost=q_obs*s^2
+    q_obs: 15000.0
     
     # --- Noise & Tuning ---
     noise_steer_std: 0.35    # rad/s
@@ -116,7 +102,7 @@
     max_accel_rate: 4.0
     lambda: 20.0
     num_samples: 3200        # desktop simulation: ~4 ms measured
-    visualize_candidates: false  # K*T state D2H 복사를 막아 horizon 80 solve 시간 절감
+    visualize_candidates: false # K*T 후보 복사는 끄고 weighted optimal trajectory만 발행
     # Slack-zero left/right boundary markers are separate from rollout markers.
     boundary_visualization_topic: /mppi_boundary_viz
     control_rate_hz: 50.0    # 20 ms timer; MPPI 계산도 이 주기보다 짧아야 함

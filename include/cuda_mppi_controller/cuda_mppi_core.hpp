@@ -107,7 +107,6 @@ struct Params {
     float q_v;
     float q_du;
     float q_steer;
-    float q_collision;
     float q_lat_g;
     float lat_g_soft_limit;
     float longitudinal_accel_soft_limit;
@@ -127,13 +126,7 @@ struct Params {
     float obs_x[MAX_OBS];
     float obs_y[MAX_OBS];
     float car_radius;
-    float obstacle_influence_distance;
-    float sudden_obstacle_influence_distance;
-    float sudden_obstacle_min_clearance;
-    float sudden_obstacle_candidate_clearance;
-    float sudden_obstacle_cost_multiplier;
     float q_obs;
-    bool sudden_obstacle_replan;
     bool rollout_obstacle_ahead;
 
     // Noise & Tuning

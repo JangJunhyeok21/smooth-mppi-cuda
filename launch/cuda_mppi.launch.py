@@ -21,22 +21,8 @@ def generate_launch_description():
     # topics, simulation/real mode, rollout count, and visualization are all
     # owned by params.yaml.
     path_overrides = {
-        "residual_weights_path": os.path.join(
-            config_dir, "kinematic_residual_gru.bin"),
-        "mlp_weights_path": os.path.join(
-            config_dir, "kinematic_mlp_residual.bin"),
-        "kinematic_noslip_noimu_weights_path": os.path.join(
-            config_dir, "ifac0807_strict_noslip_noimu_16d.bin"),
-        "slip_kinematic_with_imu_weights_path": os.path.join(
-            config_dir, "slip_kinmatic_MLP.bin"),
-        "dynamic_mlp_weights_path": os.path.join(
-            config_dir, "dynamic_MLP.bin"),
         "dynamic_mlp_servo_lag_weights_path": os.path.join(
             config_dir, "dynamic_40ms_residual_servo_lag.bin"),
-        "effective_history_weights_path": os.path.join(
-            config_dir, "effective_history_state_residual.bin"),
-        "e2e_weights_path": os.path.join(
-            config_dir, "E2E.bin"),
     }
     
     return LaunchDescription(

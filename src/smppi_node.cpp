@@ -108,39 +108,14 @@ public:
     }
 
 private:
-    void activate_sudden_replan_if_needed(
-        float obstacle_x, float obstacle_y, bool newly_observed,
-        float obstacle_jump) {
-        const float ego_distance = std::hypot(
-            obstacle_x-current_state_.x, obstacle_y-current_state_.y);
-        if (sudden_obstacle_replan_enabled_ &&
-            (newly_observed || obstacle_jump >= sudden_obstacle_jump_threshold_) &&
-            ego_distance <= sudden_obstacle_replan_distance_) {
-            sudden_obstacle_replan_until_ = this->now() +
-                rclcpp::Duration::from_seconds(sudden_obstacle_replan_duration_s_);
-            RCLCPP_WARN(this->get_logger(),
-                "Sudden obstacle replan: jump=%.2f m, range=%.2f m, duration=%.2f s",
-                obstacle_jump, ego_distance, sudden_obstacle_replan_duration_s_);
-        }
-    }
-
     void obstacle_odom_callback(const nav_msgs::msg::Odometry::SharedPtr msg) {
         if (!std::isfinite(msg->pose.pose.position.x) ||
             !std::isfinite(msg->pose.pose.position.y)) return;
         const float obstacle_x = static_cast<float>(msg->pose.pose.position.x);
         const float obstacle_y = static_cast<float>(msg->pose.pose.position.y);
-        const bool was_active = mppi_params_.num_obstacles > 0;
-        const float obstacle_jump = has_obstacle_measurement_
-            ? std::hypot(obstacle_x-last_obstacle_x_,obstacle_y-last_obstacle_y_)
-            : 0.0f;
-        activate_sudden_replan_if_needed(
-            obstacle_x, obstacle_y, !was_active, obstacle_jump);
         mppi_params_.obs_x[0] = obstacle_x;
         mppi_params_.obs_y[0] = obstacle_y;
         mppi_params_.num_obstacles = 1;
-        last_obstacle_x_ = obstacle_x;
-        last_obstacle_y_ = obstacle_y;
-        has_obstacle_measurement_ = true;
         obstacle_stamp_ = this->now();
     }
 
@@ -158,14 +133,6 @@ private:
             return;
         }
 
-        std::array<float, MAX_OBS> previous_x{};
-        std::array<float, MAX_OBS> previous_y{};
-        const int previous_count = mppi_params_.num_obstacles;
-        for (int index=0; index<previous_count; ++index) {
-            previous_x[index] = mppi_params_.obs_x[index];
-            previous_y[index] = mppi_params_.obs_y[index];
-        }
-
         int count = 0;
         for (const auto &obstacle : msg->f1_state_arr) {
             if (count >= MAX_OBS) break;
@@ -173,24 +140,11 @@ private:
             const float obstacle_y = static_cast<float>(obstacle.y);
             if (!std::isfinite(obstacle_x) || !std::isfinite(obstacle_y)) continue;
 
-            float nearest_previous_jump = std::numeric_limits<float>::infinity();
-            for (int previous=0; previous<previous_count; ++previous) {
-                nearest_previous_jump = std::min(nearest_previous_jump,
-                    std::hypot(obstacle_x-previous_x[previous],
-                               obstacle_y-previous_y[previous]));
-            }
-            const bool newly_observed = previous_count == 0 ||
-                !std::isfinite(nearest_previous_jump) ||
-                nearest_previous_jump >= sudden_obstacle_jump_threshold_;
-            activate_sudden_replan_if_needed(
-                obstacle_x, obstacle_y, newly_observed,
-                previous_count > 0 ? nearest_previous_jump : 0.0f);
             mppi_params_.obs_x[count] = obstacle_x;
             mppi_params_.obs_y[count] = obstacle_y;
             ++count;
         }
         mppi_params_.num_obstacles = count;
-        has_obstacle_measurement_ = count > 0;
         obstacle_stamp_ = this->now();
     }
 
@@ -538,7 +492,6 @@ private:
         this->declare_parameter("q_v",                  2.0);    mppi_params_.q_v           = this->get_parameter("q_v").as_double();
         this->declare_parameter("q_du",                 0.8);    mppi_params_.q_du          = this->get_parameter("q_du").as_double();
         this->declare_parameter("q_steer",              0.3);    mppi_params_.q_steer       = this->get_parameter("q_steer").as_double();
-        this->declare_parameter("q_collision",          400.0);  mppi_params_.q_collision   = this->get_parameter("q_collision").as_double();
         this->declare_parameter("q_lat_g",              200.0);  mppi_params_.q_lat_g       = this->get_parameter("q_lat_g").as_double();
         this->declare_parameter("lat_g_soft_limit",     9.81);   mppi_params_.lat_g_soft_limit = this->get_parameter("lat_g_soft_limit").as_double();
         this->declare_parameter("longitudinal_accel_soft_limit", 4.0); mppi_params_.longitudinal_accel_soft_limit = this->get_parameter("longitudinal_accel_soft_limit").as_double();
@@ -563,27 +516,18 @@ private:
         mppi_params_.weighted_trajectory_safety_enabled =
             this->get_parameter("weighted_trajectory_safety_enabled").as_bool();
         this->declare_parameter("car_radius",           0.15);   mppi_params_.car_radius    = this->get_parameter("car_radius").as_double();
-        this->declare_parameter("obstacle_influence_distance", 1.2); mppi_params_.obstacle_influence_distance=this->get_parameter("obstacle_influence_distance").as_double();
-        this->declare_parameter("sudden_obstacle_influence_distance", 2.0); mppi_params_.sudden_obstacle_influence_distance=this->get_parameter("sudden_obstacle_influence_distance").as_double();
-        this->declare_parameter("sudden_obstacle_min_clearance", 0.65); mppi_params_.sudden_obstacle_min_clearance=this->get_parameter("sudden_obstacle_min_clearance").as_double();
-        this->declare_parameter("sudden_obstacle_candidate_clearance", 0.65); mppi_params_.sudden_obstacle_candidate_clearance=this->get_parameter("sudden_obstacle_candidate_clearance").as_double();
-        this->declare_parameter("sudden_obstacle_cost_multiplier", 3.0); mppi_params_.sudden_obstacle_cost_multiplier=this->get_parameter("sudden_obstacle_cost_multiplier").as_double();
-        this->declare_parameter("q_obs",                50.0);   mppi_params_.q_obs         = this->get_parameter("q_obs").as_double();
+        this->declare_parameter("q_obs",             15000.0);  mppi_params_.q_obs         = this->get_parameter("q_obs").as_double();
         this->declare_parameter("obstacle_avoidance_enabled", false); obstacle_avoidance_enabled_=this->get_parameter("obstacle_avoidance_enabled").as_bool();
         this->declare_parameter("simulation_obstacle_odom_topic", "/opp_racecar/odom"); simulation_obstacle_odom_topic_=this->get_parameter("simulation_obstacle_odom_topic").as_string();
         this->declare_parameter("real_perception_obstacles_topic", "/f1/perception/object/obstacles/arr"); real_perception_obstacles_topic_=this->get_parameter("real_perception_obstacles_topic").as_string();
         this->declare_parameter("real_perception_obstacles_frame", "map"); real_perception_obstacles_frame_=this->get_parameter("real_perception_obstacles_frame").as_string();
         this->declare_parameter("obstacle_timeout", 0.5); obstacle_timeout_s_=this->get_parameter("obstacle_timeout").as_double();
-        this->declare_parameter("sudden_obstacle_replan_enabled", true); sudden_obstacle_replan_enabled_=this->get_parameter("sudden_obstacle_replan_enabled").as_bool();
-        this->declare_parameter("sudden_obstacle_jump_threshold", 0.75); sudden_obstacle_jump_threshold_=this->get_parameter("sudden_obstacle_jump_threshold").as_double();
-        this->declare_parameter("sudden_obstacle_replan_distance", 3.0); sudden_obstacle_replan_distance_=this->get_parameter("sudden_obstacle_replan_distance").as_double();
-        this->declare_parameter("sudden_obstacle_replan_duration", 0.6); sudden_obstacle_replan_duration_s_=this->get_parameter("sudden_obstacle_replan_duration").as_double();
         this->declare_parameter("noise_steer_std",      0.4);    mppi_params_.noise_steer_std  = this->get_parameter("noise_steer_std").as_double();
         this->declare_parameter("noise_accel_std",      2.0);    mppi_params_.noise_accel_std  = this->get_parameter("noise_accel_std").as_double();
         this->declare_parameter("max_steer_rate",       0.5236); mppi_params_.max_steer_rate   = this->get_parameter("max_steer_rate").as_double();
         this->declare_parameter("max_accel_rate",       1000.0); mppi_params_.max_accel_rate   = this->get_parameter("max_accel_rate").as_double();
         this->declare_parameter("lambda",               10.0);   mppi_params_.lambda        = this->get_parameter("lambda").as_double();
-        this->declare_parameter("visualize_candidates", true);   mppi_params_.visualize_candidates = this->get_parameter("visualize_candidates").as_bool();
+        this->declare_parameter("visualize_candidates", false);  mppi_params_.visualize_candidates = this->get_parameter("visualize_candidates").as_bool();
         this->declare_parameter("boundary_visualization_topic", "/mppi_boundary_viz");
         boundary_visualization_topic_ =
             this->get_parameter("boundary_visualization_topic").as_string();
@@ -925,8 +869,6 @@ private:
             publish_slack_boundaries();
             --slack_boundary_publish_remaining_;
         }
-        mppi_params_.sudden_obstacle_replan = sudden_obstacle_replan_enabled_ &&
-            this->now() < sudden_obstacle_replan_until_;
         if (obstacle_avoidance_enabled_ && mppi_params_.num_obstacles > 0 &&
             obstacle_timeout_s_ > 0.0 &&
             (this->now() - obstacle_stamp_).seconds() > obstacle_timeout_s_) {
@@ -1081,7 +1023,10 @@ private:
         const size_t command_history_limit=mppi_params_.dynamics_model==mppi::EFFECTIVE_HISTORY_STATE_RESIDUAL?10:5;
         while(command_history_.size()>command_history_limit)command_history_.pop_front();
 
-        if (mppi_params_.visualize_candidates) { publish_path_visualization(); publish_mppi_trajectory(); }
+        // Candidate 복사는 옵션으로 끄되 weighted optimal Marker는 항상 발행한다.
+        publish_path_visualization();
+        // 최적 weighted trajectory 80점은 후보 K*T 시각화와 무관하게 발행한다.
+        publish_mppi_trajectory();
 
         auto end = std::chrono::high_resolution_clock::now();
         std::chrono::duration<double, std::milli> elapsed = end - start;
@@ -1125,16 +1070,15 @@ private:
 
     void publish_path_visualization() {
         visualization_msgs::msg::MarkerArray markers;
-        const auto &states = solver_->get_generated_trajectories();
-        const auto &costs  = solver_->get_costs();
-        int K = solver_->get_K(), T = solver_->get_T();
-
-        visualization_msgs::msg::Marker tm;
-        tm.header.frame_id = "map"; tm.header.stamp = this->now();
-        tm.ns = "candidates"; tm.id = 0;
-        tm.type = visualization_msgs::msg::Marker::LINE_LIST;
-        tm.action = visualization_msgs::msg::Marker::ADD; tm.scale.x = 0.02;
-        if ((int)costs.size() == K) {
+        if (mppi_params_.visualize_candidates) {
+            const auto &states = solver_->get_generated_trajectories();
+            const auto &costs  = solver_->get_costs();
+            const int K = solver_->get_K(), T = solver_->get_T();
+            visualization_msgs::msg::Marker tm;
+            tm.header.frame_id = "map"; tm.header.stamp = this->now();
+            tm.ns = "candidates"; tm.id = 0;
+            tm.type = visualization_msgs::msg::Marker::LINE_LIST;
+            tm.action = visualization_msgs::msg::Marker::ADD; tm.scale.x = 0.02;
             std::vector<int> idx(K); for (int k=0;k<K;++k) idx[k]=k;
             std::sort(idx.begin(), idx.end(), [&costs](int a, int b){ return costs[a]<costs[b]; });
             for (int i = 0; i < std::min(50,K); ++i) {
@@ -1149,24 +1093,24 @@ private:
                     tm.points.push_back(p2); tm.colors.push_back(col);
                 }
             }
-        }
-        markers.markers.push_back(tm);
+            markers.markers.push_back(std::move(tm));
 
-        visualization_msgs::msg::Marker bm;
-        bm.header.frame_id = "map"; bm.header.stamp = this->now();
-        bm.ns = "best_trajectory"; bm.id = 1;
-        bm.type = visualization_msgs::msg::Marker::LINE_LIST;
-        bm.action = visualization_msgs::msg::Marker::ADD; bm.scale.x = 0.06;
-        const auto &bt = solver_->get_best_trajectory();
-        if (!bt.empty()) {
-            for (int t = 0; t < (int)bt.size()-1; ++t) {
-                geometry_msgs::msg::Point p1, p2;
-                p1.x=bt[t].x; p1.y=bt[t].y; p2.x=bt[t+1].x; p2.y=bt[t+1].y;
-                auto bc = get_speed_color(bt[t].v, 1.0f);
-                bm.points.push_back(p1); bm.colors.push_back(bc);
-                bm.points.push_back(p2); bm.colors.push_back(bc);
+            visualization_msgs::msg::Marker bm;
+            bm.header.frame_id = "map"; bm.header.stamp = this->now();
+            bm.ns = "best_trajectory"; bm.id = 1;
+            bm.type = visualization_msgs::msg::Marker::LINE_LIST;
+            bm.action = visualization_msgs::msg::Marker::ADD; bm.scale.x = 0.06;
+            const auto &bt = solver_->get_best_trajectory();
+            if (!bt.empty()) {
+                for (int t = 0; t < (int)bt.size()-1; ++t) {
+                    geometry_msgs::msg::Point p1, p2;
+                    p1.x=bt[t].x; p1.y=bt[t].y; p2.x=bt[t+1].x; p2.y=bt[t+1].y;
+                    auto bc = get_speed_color(bt[t].v, 1.0f);
+                    bm.points.push_back(p1); bm.colors.push_back(bc);
+                    bm.points.push_back(p2); bm.colors.push_back(bc);
+                }
+                markers.markers.push_back(std::move(bm));
             }
-            markers.markers.push_back(bm);
         }
 
         visualization_msgs::msg::Marker wm;
@@ -1266,13 +1210,6 @@ private:
     double obstacle_timeout_s_{0.5};
     rclcpp::Time obstacle_stamp_{0, 0, RCL_ROS_TIME};
     int published_obstacle_marker_count_{0};
-    bool sudden_obstacle_replan_enabled_{true};
-    bool has_obstacle_measurement_{false};
-    float last_obstacle_x_{0.0f},last_obstacle_y_{0.0f};
-    double sudden_obstacle_jump_threshold_{0.75};
-    double sudden_obstacle_replan_distance_{3.0};
-    double sudden_obstacle_replan_duration_s_{0.6};
-    rclcpp::Time sudden_obstacle_replan_until_{0, 0, RCL_ROS_TIME};
     bool is_simulation_{true}, pose_received_{false}, velocity_received_{false};
     bool has_prev_velocity_{false};
     rclcpp::Time last_velocity_stamp_{0, 0, RCL_ROS_TIME};

@@ -15,7 +15,7 @@ int main(int argc, char** argv) {
     p.max_steer=.4788f; p.min_accel=-10.f; p.max_accel=10.f;
     p.min_speed=0.f; p.max_speed=10.f; p.kf_low_speed_threshold=.5f;
     p.q_v=12.f; p.q_heading=1.f; p.q_du=.12f; p.q_steer=.3f;
-    p.q_collision=5000.f; p.q_lat_g=60.f; p.lat_g_soft_limit=9.5f;
+    p.q_obs=15000.f; p.q_lat_g=60.f; p.lat_g_soft_limit=9.5f;
     p.longitudinal_accel_soft_limit=4.f; p.q_rear_slip=800.f;
     p.rear_slip_soft_limit=.13962634f; p.rear_slip_cost_min_speed=1.5f;
     p.q_progress=85.f; p.q_escape_vel=28.f; p.collision_radius=.4f;

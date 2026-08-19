@@ -42,46 +42,46 @@
     kf_max_steer: 0.4788
     # --- Limits ---
     max_steer: 0.4788        # rad
-    min_accel: -10.0          # m/s^2
-    max_accel: 10.0           # m/s^2
-    min_speed: 0.0
+    min_accel: -1.0          # m/s^2
+    max_accel: 1.0           # m/s^2
+    min_speed: 0.5
     max_speed: 10.0  # fastest validated Map1 setting
     # Racing-line 자유도를 위해 중앙선 오차 기반 publish 속도 제한은 사용하지 않는다.
     heading_speed_limit_gain: 0.0
     contour_speed_limit_gain: 0.0
 
     # --- Costs (최적화 결과 반영) ---
-    q_v: 12.0
+    q_v: 16.0
     q_dist: 0.0             # legacy Euclidean path cost (MPCC에서는 0 유지)
     q_contour: 0.0          # 중앙선 고정 대신 track boundary 안에서 racing line 허용
     q_lag: 0.0              # 중앙선 접선방향 위치 오차는 랩타임 목적에 사용하지 않음
     q_heading: 1.0          # 역주행/불안정 억제를 위한 약한 방향 regularization만 유지
     q_error_speed: 0.0      # 중앙선 오차에 따른 속도 억제 비활성화
     q_du: 0.12
-    q_steer: 0.30
-    q_lat_g: 60.0
+    q_steer: 0.50
+    q_lat_g: 30.0
     lat_g_soft_limit: 9.5                 # soft combined-grip ceiling
-    longitudinal_accel_soft_limit: 4.0    # friction ellipse ax axis [m/s^2]
+    longitudinal_accel_soft_limit: 2.8    # friction ellipse ax axis [m/s^2]
     # Rear-slip soft constraint: q * max(0, |alpha_r|-limit)^2.
     # alpha_r = -atan2(vy-l_r*yaw_rate, |vx|). It complements the GG ellipse
     # by detecting rear-axle saturation while total ax/ay is still moderate.
-    q_rear_slip: 800.0
-    rear_slip_soft_limit_deg: 8.0
+    q_rear_slip: 300.0
+    rear_slip_soft_limit_deg: 7.0
     rear_slip_cost_min_speed: 1.5         # disable ill-conditioned low-vx slip cost
     # MPC-style lane-boundary slack:
     # s_k=max(0, collision_radius-min_boundary_clearance), cost=q_s*s_k^2.
     # Boundary violation remains finite/selectable; only physical obstacles
     # retain post-rollout hard candidate rejection.
-    collision_radius: 0.40
-    q_boundary_slack: 15000.0
+    collision_radius: 0.30
+    q_boundary_slack: 1000.0
     q_boundary_terminal_slack: 15000.0
     # true: reject an off-track weighted-control rollout and use the
     # lowest-cost safe sampled sequence. false: publish standard MPPI weighted
     # controls without this post-optimization replacement.
     weighted_trajectory_safety_enabled: true
     q_progress: 85.0        # simulation lap-time tuning
-    q_escape_vel: 28.0      # horizon 말단의 전진속도 보상
-    horizon_steps: 80       # model_dt=0.04 s 기준 3.2 s prediction horizon
+    q_escape_vel: 56.0      # horizon 말단의 전진속도 보상
+    horizon_steps: 60       # model_dt=0.04 s 기준 3.2 s prediction horizon
     # --- Obstacle Avoidance Params ---
     obstacle_avoidance_enabled: true
     # Simulation supplies one opponent as global odometry. Real-car perception
@@ -101,7 +101,7 @@
     # Input slew rate: m/s^2 for direct-speed models, m/s^3 for acceleration-command models.
     max_accel_rate: 4.0
     lambda: 20.0
-    num_samples: 3200        # desktop simulation: ~4 ms measured
+    num_samples: 1600        # desktop simulation: ~4 ms measured
     visualize_candidates: false # K*T 후보 복사는 끄고 weighted optimal trajectory만 발행
     # Slack-zero left/right boundary markers are separate from rollout markers.
     boundary_visualization_topic: /mppi_boundary_viz
@@ -184,7 +184,7 @@
     publish_rate: 1.0
     # true : simulator pose + twist come from simulation_odom_topic
     # false: real_pose_topic supplies map pose and real_odom_topic supplies velocity
-    is_simulation: true
+    is_simulation: false
     simulation_odom_topic: /ego_racecar/odom
     simulation_drive_topic: /drive  # must match f1tenth_gym_ros sim.yaml ego_drive_topic
     real_pose_topic: /newmcl_pose

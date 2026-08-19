@@ -74,6 +74,17 @@ F_y = D · sin(C · atan(B · α))
 | `/drive` (`drive_topic`) | `ackermann_msgs/AckermannDriveStamped` | 조향 + direct speed 명령 |
 | `/mppi_viz` | `visualization_msgs/MarkerArray` | 샘플 궤적 시각화 |
 | `/mppi_optimal_trajectory` | `smppi_cuda_controller/MppiTrajectory` | 최적 궤적 + 비용 분해 |
+| `/mppi_mlp_input` | `smppi_cuda_controller/MlpModelInput` | 선택된 첫 knot의 실제 22D residual MLP 입력 |
+
+학습용 bag에는 다음처럼 입력 토픽을 함께 기록한다.
+
+```bash
+ros2 bag record /mppi_mlp_input /newmcl_pose /odom /imu/data /drive /mppi_optimal_trajectory
+```
+
+`features[0:22]` 순서는 `MlpModelInput.msg`에 고정되어 있으며,
+`features[4]`는 MPPI rollout command, `published_speed`는 safety/rate limit 이후
+차량에 실제 발행된 command다.
 
 **제어 주기:** 20 ms (50 Hz, `control_rate_hz`로 설정)
 

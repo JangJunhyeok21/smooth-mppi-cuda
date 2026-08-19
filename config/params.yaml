@@ -79,8 +79,19 @@
     # lowest-cost safe sampled sequence. false: publish standard MPPI weighted
     # controls without this post-optimization replacement.
     weighted_trajectory_safety_enabled: true
+    # LMPC와 같은 terminal safe set: 최근 2개 완주 lap에서 진행도 주변 20점씩 사용.
+    # 목적함수 전환: mpcc=contour/progress, lmpc=terminal safe-set/cost-to-go.
+    # 현재 2 m/s safe set은 느리므로 랩타임 주행 기본값은 mpcc이다.
+    objective_mode: mpcc
+    safe_set_file_path: /home/a/MDN_SLCMPC_module/control/MPC/data/safeset/initial_safe_set_map1.csv
+    safe_set_k_near: 20
+    q_terminal_safe_set_slack: 1000.0  # terminal 상태와 convex safe set 사이 slack
+    safe_set_cost_coefficient: 10.0    # 완주까지 남은 step(cost-to-go) 가중치
+    safe_set_state_scale_x: 1.0        # x 오차 정규화 크기 [m]
+    safe_set_state_scale_y: 1.0        # y 오차 정규화 크기 [m]
+    safe_set_state_scale_yaw: 0.5      # yaw 오차 정규화 크기 [rad]
     q_progress: 85.0        # simulation lap-time tuning
-    q_escape_vel: 28.0      # horizon 말단의 전진속도 보상
+    q_escape_vel: 0.0      # horizon 말단의 전진속도 보상
     horizon_steps: 80       # model_dt=0.04 s 기준 3.2 s prediction horizon
     # --- Obstacle Avoidance Params ---
     obstacle_avoidance_enabled: true
@@ -105,11 +116,12 @@
     visualize_candidates: false # K*T 후보 복사는 끄고 weighted optimal trajectory만 발행
     # Slack-zero left/right boundary markers are separate from rollout markers.
     boundary_visualization_topic: /mppi_boundary_viz
+    mlp_input_topic: /mppi_mlp_input  # 실제 CUDA 첫 knot의 22D MLP 입력 기록용
     control_rate_hz: 50.0    # 20 ms timer; MPPI 계산도 이 주기보다 짧아야 함
     model_dt: 0.04  # lag/effective rollout knot; ROS solve/publish remains 50 Hz
     # effective_history_state_residual training contract. These describe the
     # joint command-to-state response, not a measured physical servo.
-    effective_steer_scale: 0.51
+    effective_steer_scale: 1.0
     effective_steer_bias: 0.01
     effective_yaw_response_tau: 0.10
     effective_max_yaw_accel: 15.0
@@ -122,21 +134,22 @@
     l_f: 0.163
     l_r: 0.161
     # tiv_imu_bagdisjoint_kinematic_classic 식별 결과. l_f/l_r/mass는 학습 시 고정값.
-    kinematic_steer_scale: 0.50927964
+    kinematic_steer_scale: 1.0
     kinematic_steer_bias: 0.01015773
     # Robust 1.6 s fit: /odom speed units -> /newmcl_pose map displacement.
     kinematic_position_speed_scale: 0.8633491306389823
     kinematic_no_slip: true               # residual checkpoint 학습 조건(beta=0)
-    speed_servo_kp: 0.7616888694734905
+    # vx_cmd 추종 회귀값: 종방향 residual 없이 실제 바퀴속도 응답을 재현
+    speed_servo_kp: 27.85168694
     # r_kin=vx*tan(delta)/L is a target, not an instantaneous yaw-rate assignment.
     kinematic_yaw_rate_time_constant: 0.1
     kinematic_max_yaw_accel: 15.0
     steer_servo_time_constant: 0.15514851356820727
     actuator_max_steer_rate: 0.8344090950084138
     # all6_seed31 검증 조합: 1.2 s yaw-rate MAE/p95가 회귀 후보보다 우수함.
-    speed_reference_accel_time_constant: 0.04
-    speed_reference_brake_time_constant: 0.02
-    actuator_max_speed_reference_rate: 8.0
+    speed_reference_accel_time_constant: 0.09013387
+    speed_reference_brake_time_constant: 0.09717008
+    actuator_max_speed_reference_rate: 5.89577526
     I_z: 0.04712
     Cm0: 0.04                # 고속 감쇠용 모터 역기전력 계수
     
@@ -163,16 +176,26 @@
     E_r: 0.0597
 
     # 0807 dynamic regression; used only by dynamic_mlp_residual.
-    dynamic_mlp_B_f: 9.12282176301589
-    dynamic_mlp_C_f: 0.5002347803506063
-    dynamic_mlp_D_f: 0.6650224707259669
-    dynamic_mlp_E_f: 0.6615091317133239
-    dynamic_mlp_B_r: 4.206913984108843
-    dynamic_mlp_C_r: 0.752008642861947
-    dynamic_mlp_D_r: 0.527046479337352
-    dynamic_mlp_E_r: -0.9977396148257512
+    dynamic_mlp_B_f: 2.699455556625641
+    dynamic_mlp_C_f: 0.5000000000006778
+    dynamic_mlp_D_f: 0.9640880886587351
+    dynamic_mlp_E_f: 0.5180579952591258
+    dynamic_mlp_B_r: 0.8540693080601909
+    dynamic_mlp_C_r: 0.5000039198559398
+    dynamic_mlp_D_r: 3.1890651732250443
+    dynamic_mlp_E_r: -0.9999999999999999
     dynamic_mlp_I_z: 0.04712
     dynamic_mlp_min_speed: 0.8 # runtime low-speed kinematic yaw fallback / residual gate
+    # 실차 학습분포(P99.5 yaw accel=10.8 rad/s^2) 기반 yaw 예측 폭주 방지.
+    dynamic_mlp_max_residual_yaw_accel: 12.0
+    # 실제 applied steer가 포화에 가까울 때만 residual을 점진적으로 줄인다.
+    dynamic_mlp_residual_gate_steer_start: 0.40
+    dynamic_mlp_residual_gate_steer_end: 0.4788
+    dynamic_mlp_max_total_yaw_accel: 12.0
+    # min(scale*|vx*tan(applied)/L|+margin, ay_limit/|vx|) yaw-rate 한계.
+    dynamic_mlp_yaw_rate_kinematic_scale: 0.75
+    dynamic_mlp_yaw_rate_margin: 0.35
+    dynamic_mlp_yaw_rate_lateral_accel_limit: 9.5
 
     # --- Runtime environment and topics ---
     # Required CSV columns: x_m, y_m, w_tr_left_m, w_tr_right_m.

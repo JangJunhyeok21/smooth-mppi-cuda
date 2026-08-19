@@ -24,6 +24,7 @@
     } while (0)
 
 #define MAX_OBS 5 // 처리 가능한 최대 장애물 개수
+#define MAX_SAFE_SET_POINTS 40 // LMPC: recent 2 laps x K_NEAR(20)
 #define RESIDUAL_HISTORY 50
 #define RESIDUAL_FEATURES 11
 #define RESIDUAL_HIDDEN 96
@@ -44,6 +45,11 @@ enum DynamicsModel : int {
     EFFECTIVE_HISTORY_STATE_RESIDUAL = 10,
     DYNAMIC_MLP_RESIDUAL_SERVO_LAG_VX_DELTA_24D = 11,
     DYNAMIC_RESIDUAL_SERVO_LAG = 12,
+};
+
+enum ObjectiveMode : int {
+    MPCC_OBJECTIVE = 0,
+    LMPC_OBJECTIVE = 1,
 };
 
 struct alignas(16) ButterworthCoeffs {
@@ -120,6 +126,20 @@ struct Params {
     float q_boundary_slack;
     float q_boundary_terminal_slack;
     bool weighted_trajectory_safety_enabled;
+
+    // LMPC terminal safe set. The host selects the same local 2*K_NEAR
+    // samples as lmpc.cpp; each rollout solves the convex terminal projection.
+    int objective_mode;
+    int safe_set_count;
+    float q_terminal_safe_set_slack;
+    float safe_set_cost_coefficient;
+    float safe_set_inv_x_scale;
+    float safe_set_inv_y_scale;
+    float safe_set_inv_yaw_scale;
+    float safe_set_x[MAX_SAFE_SET_POINTS];
+    float safe_set_y[MAX_SAFE_SET_POINTS];
+    float safe_set_yaw[MAX_SAFE_SET_POINTS];
+    float safe_set_cost[MAX_SAFE_SET_POINTS];
     
     // Obstacle Avoidance Params
     int num_obstacles;
@@ -171,6 +191,13 @@ struct Params {
     float dynamic_mlp_B_r, dynamic_mlp_C_r, dynamic_mlp_D_r, dynamic_mlp_E_r;
     float dynamic_mlp_I_z;
     float dynamic_mlp_min_speed;
+    float dynamic_mlp_max_residual_yaw_accel;
+    float dynamic_mlp_residual_gate_steer_start;
+    float dynamic_mlp_residual_gate_steer_end;
+    float dynamic_mlp_max_total_yaw_accel;
+    float dynamic_mlp_yaw_rate_kinematic_scale;
+    float dynamic_mlp_yaw_rate_margin;
+    float dynamic_mlp_yaw_rate_lateral_accel_limit;
 
     // Command-to-state effective model. These are joint response parameters,
     // not claims about a measured physical steering servo.

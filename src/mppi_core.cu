@@ -29,8 +29,8 @@ namespace mppi
     __device__ float ksd_mean[20],ksd_std[20];
     __device__ float dir_w1[64*20],dir_b1[64],dir_w2[32*64],dir_b2[32],dir_w3[3*32],dir_b3[3];
     __device__ float dir_mean[20],dir_std[20];
-    __device__ float dmr_w1[64*20],dmr_b1[64],dmr_w2[32*64],dmr_b2[32],dmr_w3[3*32],dmr_b3[3];
-    __device__ float dmr_mean[20],dmr_std[20];
+    __device__ float dmr_w1[64*22],dmr_b1[64],dmr_w2[32*64],dmr_b2[32],dmr_w3[3*32],dmr_b3[3];
+    __device__ float dmr_mean[22],dmr_std[22];
     __device__ float dmr24_w1[64*24],dmr24_b1[64],dmr24_w2[32*64],dmr24_b2[32],dmr24_w3[3*32],dmr24_b3[3];
     __device__ float dmr24_mean[24],dmr24_std[24];
     __device__ float ehsr_w1[64*34],ehsr_b1[64],ehsr_w2[32*64],ehsr_b2[32],ehsr_w3[3*32],ehsr_b3[3];
@@ -513,12 +513,14 @@ namespace mppi
         const float classic_next_yaw_rate = current_state.omega
             + classic_yaw_moment / params.dynamic_mlp_I_z * dynamics_dt;
 
-        // Keep this exact 20-D order synchronized with the canonical 40 ms
+        // Keep this exact 22-D order synchronized with the canonical 40 ms
         // residual dataset/training pipeline:
         // [vx, vy, yaw_rate, steer_cmd, speed_cmd, applied_steer,
         //  steer_cmd_delta, classic_next_vx, classic_next_vy,
-        //  classic_next_yaw_rate, five previous (steer_cmd, speed_cmd) pairs].
-        float mlp_features[20] = {
+        //  classic_next_yaw_rate, five previous (steer_cmd, speed_cmd) pairs,
+        //  current_ax, current_ay]. At the first knot ax/ay are the causally
+        //  aligned IMU measurements; later knots use the predicted values.
+        float mlp_features[22] = {
             current_state.v,
             current_state.vy,
             current_state.omega,
@@ -533,6 +535,8 @@ namespace mppi
         for (int feature_index = 0; feature_index < 10; ++feature_index) {
             mlp_features[10 + feature_index] = command_history[feature_index];
         }
+        mlp_features[20]=current_state.ax;
+        mlp_features[21]=current_state.ay;
 
         // MLP outputs residual derivatives [delta_ax, delta_ay, delta_yaw_accel].
         float residual_derivatives[3];
@@ -548,14 +552,20 @@ namespace mppi
                 dmr24_w1,dmr24_b1,dmr24_w2,dmr24_b2,dmr24_w3,dmr24_b3,
                 residual_derivatives);
         } else {
-            split_residual_mlp_v2<20>(mlp_features,dmr_mean,dmr_std,
+            split_residual_mlp_v2<22>(mlp_features,dmr_mean,dmr_std,
                 dmr_w1,dmr_b1,dmr_w2,dmr_b2,dmr_w3,dmr_b3,
                 residual_derivatives);
         }
 
-        residual_derivatives[0] = fminf(8.0f, fmaxf(-8.0f, residual_derivatives[0]));
+        // Longitudinal response is identified directly from vx_cmd -> vx.
+        // Keep the network exclusively as a lateral/yaw correction model so
+        // its delta_ax cannot fight the deterministic speed-servo dynamics.
+        residual_derivatives[0] = 0.0f;
         residual_derivatives[1] = fminf(8.0f, fmaxf(-8.0f, residual_derivatives[1]));
-        residual_derivatives[2] = fminf(30.0f, fmaxf(-30.0f, residual_derivatives[2]));
+        residual_derivatives[2] = fminf(
+            params.dynamic_mlp_max_residual_yaw_accel,
+            fmaxf(-params.dynamic_mlp_max_residual_yaw_accel,
+                  residual_derivatives[2]));
 
         // Smoothly suppress a poorly observable residual around standstill;
         // this is identical to real_car_v2/contract.py::low_speed_gate.
@@ -568,6 +578,15 @@ namespace mppi
         residual_derivatives[1] *= low_speed_gate;
         residual_derivatives[2] *= low_speed_gate;
 
+        const float steer_gate_span=fmaxf(
+            params.dynamic_mlp_residual_gate_steer_end-
+                params.dynamic_mlp_residual_gate_steer_start,1.0e-4f);
+        const float steer_residual_gate=fminf(1.0f,fmaxf(0.0f,
+            (params.dynamic_mlp_residual_gate_steer_end-fabsf(steering_angle)) /
+                steer_gate_span));
+        residual_derivatives[1] *= steer_residual_gate;
+        residual_derivatives[2] *= steer_residual_gate;
+
         State next_state = current_state;
         next_state.v = classic_next_longitudinal_velocity
             + residual_derivatives[0] * dynamics_dt;
@@ -577,6 +596,22 @@ namespace mppi
             + residual_derivatives[2] * dynamics_dt;
         next_state.ax = classic_longitudinal_acceleration + residual_derivatives[0];
         next_state.ay = classic_lateral_acceleration + residual_derivatives[1];
+
+        // Bound the complete physics+residual transition. The real-car P99.5
+        // yaw acceleration is 10.8 rad/s^2; an unconstrained Pacejka step was
+        // observed jumping from 1 to 5 rad/s in one 40 ms rollout knot.
+        const float max_yaw_delta=params.dynamic_mlp_max_total_yaw_accel*dynamics_dt;
+        next_state.omega=current_state.omega+fminf(max_yaw_delta,fmaxf(
+            -max_yaw_delta,next_state.omega-current_state.omega));
+        const float wheelbase=params.l_f+params.l_r;
+        const float kinematic_yaw=fabsf(next_state.v*tanf(steering_angle)/wheelbase);
+        const float friction_yaw=params.dynamic_mlp_yaw_rate_lateral_accel_limit /
+            fmaxf(fabsf(next_state.v),MIN_DYNAMIC_SPEED);
+        const float yaw_envelope=fminf(
+            params.dynamic_mlp_yaw_rate_kinematic_scale*kinematic_yaw+
+                params.dynamic_mlp_yaw_rate_margin,
+            friction_yaw);
+        next_state.omega=fminf(yaw_envelope,fmaxf(-yaw_envelope,next_state.omega));
 
         // The dynamic bicycle equations are ill-conditioned near standstill:
         // slip angles divide by vx while tire forces can still create a large
@@ -873,7 +908,9 @@ namespace mppi
             obs_cost += p.q_obs*obstacle_slack*obstacle_slack;
         }
 
-        return path_cost + vel_cost + error_speed_cost + friction_ellipse_cost
+        const float tracking_cost=p.objective_mode==LMPC_OBJECTIVE
+            ? 0.0f : path_cost+vel_cost+error_speed_cost;
+        return tracking_cost + friction_ellipse_cost
              + rear_slip_cost
              + steer_cost + rate_cost + boundary_cost + obs_cost;
     }
@@ -918,6 +955,63 @@ namespace mppi
         start_lag = fminf(fmaxf(start_lag, -0.15f), 0.15f);
         end_lag = fminf(fmaxf(end_lag, -0.15f), 0.15f);
         return fmaxf(0.0f, distance + end_lag - start_lag);
+    }
+
+    // Frank-Wolfe solves the same small convex terminal problem used by LMPC:
+    //   min_lambda q_ts ||x_N-S lambda||_T^2 + c Q^T lambda
+    //   subject to lambda >= 0, sum(lambda)=1.
+    // Only px/py/yaw participate, matching control/MPC/src/lmpc.cpp.
+    __device__ float compute_lmpc_terminal_cost(const State &x, const Params &p)
+    {
+        const int n=p.safe_set_count;
+        if(p.objective_mode!=LMPC_OBJECTIVE || n<=0) return 0.0f;
+        int best=0;
+        float best_value=1.0e30f;
+        for(int j=0;j<n;++j) {
+            const float dx=(x.x-p.safe_set_x[j])*p.safe_set_inv_x_scale;
+            const float dy=(x.y-p.safe_set_y[j])*p.safe_set_inv_y_scale;
+            const float da=angle_normalize(x.yaw-p.safe_set_yaw[j])*
+                           p.safe_set_inv_yaw_scale;
+            const float value=p.q_terminal_safe_set_slack*(dx*dx+dy*dy+da*da)
+                +p.safe_set_cost_coefficient*p.safe_set_cost[j];
+            if(value<best_value){best_value=value;best=j;}
+        }
+        float zx=p.safe_set_x[best],zy=p.safe_set_y[best];
+        float za=x.yaw-angle_normalize(x.yaw-p.safe_set_yaw[best]);
+        float zq=p.safe_set_cost[best];
+        // Eight iterations are enough for this 3-D, 40-vertex local hull and
+        // avoid introducing a per-rollout QP solver or dynamic allocation.
+        for(int iteration=0;iteration<8;++iteration) {
+            const float ex=(zx-x.x)*p.safe_set_inv_x_scale;
+            const float ey=(zy-x.y)*p.safe_set_inv_y_scale;
+            const float ea=angle_normalize(za-x.yaw)*p.safe_set_inv_yaw_scale;
+            int vertex=0;float minimum=1.0e30f;
+            for(int j=0;j<n;++j) {
+                const float jyaw=x.yaw-angle_normalize(x.yaw-p.safe_set_yaw[j]);
+                const float gradient=2.0f*p.q_terminal_safe_set_slack*(
+                    ex*p.safe_set_inv_x_scale*p.safe_set_x[j]
+                   +ey*p.safe_set_inv_y_scale*p.safe_set_y[j]
+                   +ea*p.safe_set_inv_yaw_scale*jyaw)
+                   +p.safe_set_cost_coefficient*p.safe_set_cost[j];
+                if(gradient<minimum){minimum=gradient;vertex=j;}
+            }
+            const float vyaw=x.yaw-angle_normalize(x.yaw-p.safe_set_yaw[vertex]);
+            const float dx=(p.safe_set_x[vertex]-zx)*p.safe_set_inv_x_scale;
+            const float dy=(p.safe_set_y[vertex]-zy)*p.safe_set_inv_y_scale;
+            const float da=(vyaw-za)*p.safe_set_inv_yaw_scale;
+            const float dq=p.safe_set_cost[vertex]-zq;
+            const float denominator=2.0f*p.q_terminal_safe_set_slack*(dx*dx+dy*dy+da*da);
+            float gamma=denominator>1.0e-9f ? -(2.0f*p.q_terminal_safe_set_slack*
+                (ex*dx+ey*dy+ea*da)+p.safe_set_cost_coefficient*dq)/denominator : 0.0f;
+            gamma=fminf(1.0f,fmaxf(0.0f,gamma));
+            zx+=gamma*(p.safe_set_x[vertex]-zx);zy+=gamma*(p.safe_set_y[vertex]-zy);
+            za+=gamma*(vyaw-za);zq+=gamma*dq;
+        }
+        const float dx=(x.x-zx)*p.safe_set_inv_x_scale;
+        const float dy=(x.y-zy)*p.safe_set_inv_y_scale;
+        const float da=angle_normalize(x.yaw-za)*p.safe_set_inv_yaw_scale;
+        return p.q_terminal_safe_set_slack*(dx*dx+dy*dy+da*da)
+            +p.safe_set_cost_coefficient*zq;
     }
     
     // [수정된 함수] O(N) 바운더리 탐색을 대체하는 O(1) 횡방향 오차 기반 거리 연산
@@ -1096,19 +1190,17 @@ namespace mppi
 
             // 종점 진행도 보상
             if (t == T - 1 && path_len > 0) {
-                float progress_m = compute_progress_distance(
-                    start_state, x, initial_path_idx, local_path_idx,
-                    ref_xs, ref_ys, ref_yaws, path_len);
-                
-                // 실제 진행 거리[m]를 직접 최대화한다. 이것이 랩타임 최소화의
-                // receding-horizon 근사 목적이다.
-                total_cost -= p.q_progress * progress_m;
-
-                // 종단 속도는 경로 방향 성분만 선형 보상한다. 기존 v^2 보상은
-                // 진행 방향과 무관한 고속 슬라이드까지 과도하게 선호했다.
-                float terminal_forward_v = x.v * fast_cos(
-                    x.yaw - ref_yaws[local_path_idx]);
-                total_cost -= p.q_escape_vel * fmaxf(0.0f, terminal_forward_v);
+                if(p.objective_mode==MPCC_OBJECTIVE) {
+                    float progress_m = compute_progress_distance(
+                        start_state, x, initial_path_idx, local_path_idx,
+                        ref_xs, ref_ys, ref_yaws, path_len);
+                    total_cost -= p.q_progress * progress_m;
+                    float terminal_forward_v = x.v * fast_cos(
+                        x.yaw - ref_yaws[local_path_idx]);
+                    total_cost -= p.q_escape_vel * fmaxf(0.0f, terminal_forward_v);
+                } else {
+                    total_cost += compute_lmpc_terminal_cost(x,p);
+                }
             }
 
             last_u = u_clamped;
@@ -1388,12 +1480,13 @@ namespace mppi
         std::ifstream file(path,std::ios::binary);if(!file)throw std::runtime_error("cannot open dynamic residual MLP: "+path);
         file.seekg(0,std::ios::end);const std::streamoff bytes=file.tellg();file.seekg(0);
         const size_t count=static_cast<size_t>(bytes)/sizeof(float);
-        if(bytes%sizeof(float)!=0 || count!=3523+40)throw std::runtime_error("invalid dynamic residual MLP file: "+path);
+        constexpr size_t expected=64*22+64+32*64+32+3*32+3+22+22;
+        if(bytes%sizeof(float)!=0 || count!=expected)throw std::runtime_error("invalid 22-D IMU dynamic residual MLP file: "+path);
         std::vector<float>w(count);file.read(reinterpret_cast<char*>(w.data()),bytes);
         if(file.gcount()!=bytes)throw std::runtime_error("truncated dynamic residual MLP file: "+path);
         size_t o=0;
 #define LOAD_DMR(symbol,count) CUDA_CHECK(cudaMemcpyToSymbol(symbol,w.data()+o,(count)*sizeof(float)));o+=(count)
-        LOAD_DMR(dmr_w1,64*20);LOAD_DMR(dmr_b1,64);LOAD_DMR(dmr_w2,32*64);LOAD_DMR(dmr_b2,32);LOAD_DMR(dmr_w3,3*32);LOAD_DMR(dmr_b3,3);LOAD_DMR(dmr_mean,20);LOAD_DMR(dmr_std,20);
+        LOAD_DMR(dmr_w1,64*22);LOAD_DMR(dmr_b1,64);LOAD_DMR(dmr_w2,32*64);LOAD_DMR(dmr_b2,32);LOAD_DMR(dmr_w3,3*32);LOAD_DMR(dmr_b3,3);LOAD_DMR(dmr_mean,22);LOAD_DMR(dmr_std,22);
 #undef LOAD_DMR
     }
 

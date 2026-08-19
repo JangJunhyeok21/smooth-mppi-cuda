@@ -303,6 +303,11 @@ def validation_score(metric):
 def main():
     OUT.mkdir(parents=True,exist_ok=True);data=np.load(DATA)
     config=yaml.safe_load((ROOT/"config/params.yaml").read_text())["/**"]["ros__parameters"]
+    # Keep regression experiments isolated from the deployed runtime YAML.
+    config["kinematic_steer_scale"]=float(os.environ.get(
+        "KINEMATIC_STEER_SCALE_OVERRIDE",config["kinematic_steer_scale"]))
+    config["kinematic_steer_bias"]=float(os.environ.get(
+        "KINEMATIC_STEER_BIAS_OVERRIDE",config["kinematic_steer_bias"]))
     train,validation,test=(starts(data,index) for index in range(3));rng=np.random.default_rng(SEED)
     current=np.asarray((2.9844349007584565,1.3,.362611229414815,0.,
                         .3173165891873783,1.3,2.799999941680244,0.))
@@ -333,6 +338,8 @@ def main():
         "boundary_solution":boundary,"deployment_gate_passed":not any(boundary.values()),
         "fixed_parameters":{"mass":float(config["mass"]),"I_z":float(config["dynamic_mlp_I_z"]),
             "l_f":float(config["l_f"]),"l_r":float(config["l_r"])},
+        "fixed_actuator_mapping":{"kinematic_steer_scale":float(config["kinematic_steer_scale"]),
+            "kinematic_steer_bias":float(config["kinematic_steer_bias"])},
         "methods":comparison}
     (OUT/"advanced_params.json").write_text(json.dumps(report,indent=2)+"\n")
     # Canonical downstream dataset/deployer consumes params.json.

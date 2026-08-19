@@ -20,17 +20,21 @@ int main(int argc,char **argv){
     p.dynamics_model=vx_delta_24d
         ?mppi::DYNAMIC_MLP_RESIDUAL_SERVO_LAG_VX_DELTA_24D
         :mppi::DYNAMIC_MLP_RESIDUAL_SERVO_LAG;
-    p.min_accel=-1.f;p.max_accel=1.f;
+    p.min_accel=-10.f;p.max_accel=10.f;
     p.min_speed=std::atof(argv[12]);p.max_speed=std::atof(argv[13]);p.mass=3.74f;p.l_f=.163f;p.l_r=.161f;
-    p.kinematic_steer_scale=.50927964f;p.kinematic_steer_bias=.01015773f;p.kinematic_position_speed_scale=.8633491306389823f;
-    p.speed_servo_kp=.7616888694734905f;p.steer_servo_time_constant=.15514851356820727f;
-    p.actuator_max_steer_rate=.8344090950084138f;p.speed_reference_accel_time_constant=.04f;
-    p.speed_reference_brake_time_constant=.02f;p.actuator_max_speed_reference_rate=8.f;
+    p.kinematic_steer_scale=1.f;p.kinematic_steer_bias=.01015773f;p.kinematic_position_speed_scale=.8633491306389823f;
+    p.speed_servo_kp=27.85168694f;p.steer_servo_time_constant=.15514851356820727f;
+    p.actuator_max_steer_rate=.8344090950084138f;p.speed_reference_accel_time_constant=.09013387f;
+    p.speed_reference_brake_time_constant=.09717008f;p.actuator_max_speed_reference_rate=5.89577526f;
     p.dynamic_mlp_B_f=std::atof(argv[3]);p.dynamic_mlp_C_f=std::atof(argv[4]);
     p.dynamic_mlp_D_f=std::atof(argv[5]);p.dynamic_mlp_E_f=std::atof(argv[6]);
     p.dynamic_mlp_B_r=std::atof(argv[7]);p.dynamic_mlp_C_r=std::atof(argv[8]);
     p.dynamic_mlp_D_r=std::atof(argv[9]);p.dynamic_mlp_E_r=std::atof(argv[10]);p.dynamic_mlp_I_z=std::atof(argv[11]);
-    p.dynamic_mlp_min_speed=.8f;const float wb=p.l_f+p.l_r;p.F_zf=p.mass*9.81f*p.l_r/wb;p.F_zr=p.mass*9.81f*p.l_f/wb;
+    p.dynamic_mlp_min_speed=.8f;p.dynamic_mlp_max_residual_yaw_accel=12.f;
+    p.dynamic_mlp_residual_gate_steer_start=.40f;p.dynamic_mlp_residual_gate_steer_end=.4788f;
+    p.dynamic_mlp_max_total_yaw_accel=12.f;p.dynamic_mlp_yaw_rate_kinematic_scale=.75f;
+    p.dynamic_mlp_yaw_rate_margin=.35f;p.dynamic_mlp_yaw_rate_lateral_accel_limit=9.5f;
+    const float wb=p.l_f+p.l_r;p.F_zf=p.mass*9.81f*p.l_r/wb;p.F_zr=p.mass*9.81f*p.l_f/wb;
     mppi::MPPISolver solver(1,std::max(2,steps),p);
     if(vx_delta_24d)solver.load_dynamic_mlp_vx_delta_residual_weights(argv[1]);
     else solver.load_dynamic_mlp_residual_weights(argv[1]);

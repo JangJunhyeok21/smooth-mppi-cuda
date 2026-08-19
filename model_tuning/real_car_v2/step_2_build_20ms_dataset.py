@@ -73,6 +73,12 @@ def ema(x,alpha=.25):
 
 def main():
     cfg=yaml.safe_load((ROOT/"config/params.yaml").read_text())["/**"]["ros__parameters"]
+    # Isolated actuator-mapping experiments can rebuild the dataset without
+    # changing the parameters used by the running controller.
+    cfg["kinematic_steer_scale"]=float(os.environ.get(
+        "KINEMATIC_STEER_SCALE_OVERRIDE",cfg["kinematic_steer_scale"]))
+    cfg["kinematic_steer_bias"]=float(os.environ.get(
+        "KINEMATIC_STEER_BIAS_OVERRIDE",cfg["kinematic_steer_bias"]))
     files=sorted({p.resolve() for source in SOURCE_DIRS for p in source.glob("*.npz")})
     if not files:raise SystemExit(f"no direct-bag NPZ in {SOURCE_DIRS}")
     if any(FORBIDDEN in str(p) for p in files):raise RuntimeError("diagnostic reconstructed CSV/derivative is forbidden")
@@ -183,6 +189,6 @@ def main():
     X=np.concatenate(features);Y=np.concatenate(targets);O=np.concatenate(observations);TV=np.concatenate(teacher_vys);TC=np.concatenate(teacher_confidences);B=np.concatenate(bag_ids);S=np.concatenate(split_ids);V=np.concatenate(valids)
     assert X.shape[1]==20 and tuple(FEATURES)==("vx","vy","yaw_rate","steer_cmd","speed_cmd","applied_steer","steer_cmd_delta","base_next_vx","base_next_vy","base_next_yaw_rate","steer_t-4","speed_t-4","steer_t-3","speed_t-3","steer_t-2","speed_t-2","steer_t-1","speed_t-1","steer_t","speed_t")
     np.savez_compressed(OUTPUT,features=X,targets=Y,observations=O,teacher_vy=TV,teacher_vy_confidence=TC,bag_id=B,split=S,valid=V,feature_names=np.array(FEATURES),target_names=np.array(OUTPUTS),observation_names=np.array(("imu_ax","imu_ay","imu_yaw_rate")),dt=c.dt,vy_input_contract="causal_pacejka_mcl_ay_bias_ekf",vy_teacher_contract="offline_smoother_with_causal_fallback")
-    REPORT.write_text(json.dumps({"output":str(OUTPUT),"samples":len(X),"valid":int(V.sum()),"bags":int(len(np.unique(B))),"vy_input":"causal_pacejka_mcl_ay_bias_ekf","vy_teacher":"offline_mcl_imu_smoother_with_causal_fallback","sources":manifest,"forbidden_training_source":FORBIDDEN},indent=2)+"\n")
+    REPORT.write_text(json.dumps({"output":str(OUTPUT),"samples":len(X),"valid":int(V.sum()),"bags":int(len(np.unique(B))),"kinematic_steer_scale":c.steer_scale,"kinematic_steer_bias":c.steer_bias,"vy_input":"causal_pacejka_mcl_ay_bias_ekf","vy_teacher":"offline_mcl_imu_smoother_with_causal_fallback","sources":manifest,"forbidden_training_source":FORBIDDEN},indent=2)+"\n")
     print(REPORT.read_text())
 if __name__=="__main__":main()

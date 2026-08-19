@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Evaluate the deployed 40 ms dynamic residual model on sign-aligned 0815 bags."""
+"""Visualize latest deployed MLP residual versus Classic on 0810--0819 data."""
 from pathlib import Path
 import json, sys
 
@@ -16,17 +16,11 @@ sys.path.insert(0, str(HERE))
 from contract import Contract, actuator_step, longitudinal_actuator_step, residual_gates
 from helper_lateral_velocity_kf import LateralVelocityKFParams, estimate_dataset
 
-DATA_DIR = ROOT / "model_tuning/data/ifac0815_autonomous_physics_clean"
+DATA_DIR = ROOT / "model_tuning/data/ifac0810_0819_autonomous_physics_clean"
 WEIGHTS = ROOT / "config/dynamic_40ms_residual_servo_lag.bin"
-CLASSIC_PARAMS = ROOT / "model_tuning/results/dynamic_40ms_regression/params.json"
-OUTPUT_DIR = ROOT / "model_tuning/results/ifac0815_sota_evaluation"
+OUTPUT_DIR = ROOT / "model_tuning/results/latest_classic_vs_mlp_visualization"
 HORIZON_STEPS = 30                 # 30 x 40 ms = 1.2 s
 WINDOW_STRIDE_20MS = 10            # report windows every 0.2 s
-IMU_WZ_SIGN = 1.0                  # 0815 sensor is already in MPPI body convention
-IMU_AX_SIGN = 1.0
-IMU_AY_SIGN = 1.0
-
-
 def load_network(path):
     packed = np.fromfile(path, dtype="<f4")
     if packed.size != 3563:
@@ -62,7 +56,8 @@ def percentile_summary(value):
 def main():
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     cfg=yaml.safe_load((ROOT/"config/params.yaml").read_text())["/**"]["ros__parameters"]
-    fit=json.loads(CLASSIC_PARAMS.read_text())["expanded_fitted"]
+    fit={name:float(cfg[f"dynamic_mlp_{name}"])
+         for name in ("B_f","C_f","D_f","E_f","B_r","C_r","D_r","E_r")}
     network=load_network(WEIGHTS)
     contract=Contract(dt=.04, steer_scale=float(cfg["kinematic_steer_scale"]),
         steer_bias=float(cfg["kinematic_steer_bias"]),
@@ -80,6 +75,8 @@ def main():
     all_cases=[]; per_bag={}; sign_checks={}
     for path in sorted(DATA_DIR.glob("*.npz")):
         z=np.load(path); samples=z["samples"].astype(float)
+        imu_signs=z["imu_axis_signs"].astype(float) if "imu_axis_signs" in z.files else np.ones(3)
+        imu_wz_sign,imu_ax_sign,imu_ay_sign=imu_signs
         names={str(v):i for i,v in enumerate(z["columns"])}
         bag_cases=[]; correlations=[]
         for segment in np.unique(samples[:,names["bag_id"]].astype(int)):
@@ -93,9 +90,9 @@ def main():
             vy,yaw_rate=estimate_dataset(s,z["columns"],.02,kfp,
                 steer_scale=float(cfg["kf_steer_scale"]),steer_bias=float(cfg["kf_steer_bias"]),
                 max_steer=float(cfg["kf_max_steer"]),imu_ema_alpha=float(cfg["imu_ema_alpha"]),
-                imu_wz_sign=IMU_WZ_SIGN,imu_ay_sign=IMU_AY_SIGN)
+                imu_wz_sign=imu_wz_sign,imu_ay_sign=imu_ay_sign)
             pose_rate=np.gradient(np.unwrap(s[:,names["yaw"]]),.02)
-            raw_w=s[:,names["imu_wz"]]
+            raw_w=imu_wz_sign*s[:,names["imu_wz"]]
             good=np.isfinite(pose_rate)&np.isfinite(raw_w)&(np.abs(s[:,names["vx"]])>.5)
             if good.sum()>20:
                 correlations.append((np.corrcoef(pose_rate[good],raw_w[good])[0,1],
@@ -182,8 +179,9 @@ def main():
             delta=q["pred"][-1,signal_index]-q["gt"][-1,signal_index]
             values.append(abs(wrapped(delta)) if angle else abs(delta))
         return percentile_summary(values)
-    report={"contract":{"model":"dynamic_40ms_yaw_preserved_stage2","weights":str(WEIGHTS),"model_dt_s":.04,
-              "horizon_s":1.2,"imu_signs":{"wz":1,"ax":1,"ay":1},"windows_are_unseen_by_checkpoint":True},
+    report={"contract":{"model":"latest_dynamic_mlp_residual_servo_lag","weights":str(WEIGHTS),"model_dt_s":.04,
+              "horizon_s":1.2,"imu_signs":"per-NPZ imu_axis_signs (0815 cutover)",
+              "evaluation_scope":"all extracted 0810--0819 windows; not a strict unseen-only split"},
             "bags_evaluated":len(per_bag),"windows":len(all_cases),"imu_wz_sign_check":sign_checks,
             "aggregate":{"sota_trajectory_m":percentile_summary([q["traj_error"] for q in all_cases]),
                          "classic_trajectory_m":percentile_summary([q["classic_traj_error"] for q in all_cases]),
@@ -225,6 +223,27 @@ def main():
             axes[row,col].plot(t,q["gt"][:,idx],"k-",label="GT");axes[row,col].plot(t,q["pred"][:,idx],"C1--",label="SOTA");axes[row,col].plot(t,q["classic"][:,idx],"C3:",label="Classic");axes[row,col].set_ylabel(label)
         for ax in axes[:,col]:ax.grid(alpha=.3);ax.legend(fontsize=8)
     fig.tight_layout();fig.savefig(OUTPUT_DIR/"best_median_worst.png",dpi=180);plt.close(fig)
+    # Compact aggregate comparison for quick model selection.
+    mlp_error=np.asarray([q["traj_error"] for q in clean_cases])
+    classic_error=np.asarray([q["classic_traj_error"] for q in clean_cases])
+    report["observation_consistent_comparison"]={
+        "mlp_better_fraction":float(np.mean(mlp_error<classic_error)),
+        "mean_error_reduction_percent":float(100*(1-mlp_error.mean()/classic_error.mean()))}
+    (OUTPUT_DIR/"metrics.json").write_text(json.dumps(report,indent=2)+"\n")
+    labels=("Mean","Median","P95","Worst")
+    mlp_stat=(mlp_error.mean(),np.median(mlp_error),np.quantile(mlp_error,.95),mlp_error.max())
+    classic_stat=(classic_error.mean(),np.median(classic_error),np.quantile(classic_error,.95),classic_error.max())
+    fig,axes=plt.subplots(1,2,figsize=(12,4.8));x=np.arange(4);width=.36
+    axes[0].bar(x-width/2,np.asarray(mlp_stat)*100,width,label="MLP residual")
+    axes[0].bar(x+width/2,np.asarray(classic_stat)*100,width,label="Classic")
+    axes[0].set_xticks(x,labels);axes[0].set_ylabel("1.2 s endpoint position error [cm]")
+    axes[0].grid(axis="y",alpha=.3);axes[0].legend()
+    for values,label in ((mlp_error,"MLP residual"),(classic_error,"Classic")):
+        ordered=np.sort(values);axes[1].plot(ordered,np.arange(1,len(ordered)+1)/len(ordered),label=label)
+    axes[1].set_xlabel("1.2 s endpoint position error [m]");axes[1].set_ylabel("Empirical CDF")
+    axes[1].set_xlim(0,min(1.5,max(mlp_error.max(),classic_error.max())))
+    axes[1].grid(alpha=.3);axes[1].legend();fig.tight_layout()
+    fig.savefig(OUTPUT_DIR/"classic_vs_mlp_summary.png",dpi=200);plt.close(fig)
     print(json.dumps(report,indent=2))
 
 if __name__ == "__main__": main()

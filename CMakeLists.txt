@@ -98,6 +98,7 @@ target_include_directories(smppi_node PUBLIC
 # 커스텀 메시지 생성 인터페이스
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/MppiTrajectory.msg"
+  "msg/MlpModelInput.msg"
   DEPENDENCIES std_msgs
 )
 

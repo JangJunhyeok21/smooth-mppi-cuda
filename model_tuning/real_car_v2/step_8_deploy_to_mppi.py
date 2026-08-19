@@ -20,7 +20,7 @@ SIMULATOR_YAML_PATHS = (
 )
 ACTIVATE_MODEL = True
 ALLOW_BOUNDARY_REGRESSION = True  # explicit real-car deployment selection
-EXPECTED_BINARY_BYTES = 14252
+EXPECTED_BINARY_BYTES = 14780  # 22-D: 기존 20-D + causal IMU ax/ay
 
 
 def replace_scalar(text, key, value):

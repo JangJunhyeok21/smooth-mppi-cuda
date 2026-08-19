@@ -8,6 +8,7 @@ int main(int argc, char** argv) {
     const int samples = argc > 1 ? std::stoi(argv[1]) : 3200;
     const int horizon = argc > 2 ? std::stoi(argv[2]) : 80;
     const bool use_mlp = argc <= 4 || std::string(argv[4]) != "classic";
+    const bool use_safe_set = argc > 5 && std::string(argv[5]) == "safe";
     mppi::Params p{};
     p.dt=.02f; p.control_dt=.02f; p.model_dt=.04f;
     p.dynamics_model=use_mlp ? mppi::DYNAMIC_MLP_RESIDUAL_SERVO_LAG
@@ -36,8 +37,19 @@ int main(int argc, char** argv) {
     p.dynamic_mlp_B_r=4.20691398f; p.dynamic_mlp_C_r=.75200864f;
     p.dynamic_mlp_D_r=.52704648f; p.dynamic_mlp_E_r=-.99773961f;
     p.dynamic_mlp_min_speed=.8f;
+    p.dynamic_mlp_max_residual_yaw_accel=12.f;p.dynamic_mlp_residual_gate_steer_start=.40f;
+    p.dynamic_mlp_residual_gate_steer_end=.4788f;p.dynamic_mlp_max_total_yaw_accel=12.f;
+    p.dynamic_mlp_yaw_rate_kinematic_scale=.75f;p.dynamic_mlp_yaw_rate_margin=.35f;
+    p.dynamic_mlp_yaw_rate_lateral_accel_limit=9.5f;
     p.visualize_candidates=argc > 3 && std::stoi(argv[3]) != 0;
     p.actuator_speed_reference_state=3.f;
+    p.objective_mode=use_safe_set?mppi::LMPC_OBJECTIVE:mppi::MPCC_OBJECTIVE;
+    p.safe_set_count=use_safe_set?40:0;
+    p.q_terminal_safe_set_slack=1000.f;p.safe_set_cost_coefficient=10.f;
+    p.safe_set_inv_x_scale=1.f;p.safe_set_inv_y_scale=1.f;p.safe_set_inv_yaw_scale=2.f;
+    for(int i=0;i<p.safe_set_count;++i){const float a=.02f*i;
+        p.safe_set_x[i]=8.f*cosf(a);p.safe_set_y[i]=8.f*sinf(a);
+        p.safe_set_yaw[i]=a+1.57079632679f;p.safe_set_cost[i]=float(19-(i%20));}
     for(int i=0;i<5;++i) p.residual_command_history[2*i+1]=3.f;
 
     mppi::MPPISolver solver(samples,horizon,p);
@@ -60,5 +72,6 @@ int main(int argc, char** argv) {
     const auto end=std::chrono::steady_clock::now();
     const double ms=std::chrono::duration<double,std::milli>(end-begin).count()/iterations;
     std::cout<<"model="<<(use_mlp?"mlp":"classic")<<" samples="<<samples
-             <<" horizon="<<horizon<<" mean_solve_ms="<<ms<<"\n";
+             <<" horizon="<<horizon<<" safe_set="<<use_safe_set
+             <<" mean_solve_ms="<<ms<<"\n";
 }

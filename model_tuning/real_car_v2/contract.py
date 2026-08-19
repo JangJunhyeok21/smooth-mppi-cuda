@@ -8,6 +8,7 @@ FEATURES = ("vx","vy","yaw_rate","steer_cmd","speed_cmd","applied_steer",
             "steer_cmd_delta","base_next_vx","base_next_vy","base_next_yaw_rate",
             "steer_t-4","speed_t-4","steer_t-3","speed_t-3","steer_t-2",
             "speed_t-2","steer_t-1","speed_t-1","steer_t","speed_t")
+IMU_RESIDUAL_FEATURES = FEATURES + ("imu_ax", "imu_ay")
 OUTPUTS = ("delta_ax", "delta_ay", "delta_yaw_accel")
 
 @dataclass

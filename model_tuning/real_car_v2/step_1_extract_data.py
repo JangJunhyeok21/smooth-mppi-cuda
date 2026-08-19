@@ -51,6 +51,7 @@ COMMAND_STEER_MATCH_TOL = 1e-4; COMMAND_SPEED_MATCH_TOL = 1e-4
 # that the autonomous command cannot explain. Remove this causal context too.
 MANUAL_PRE_MARGIN_S = 1.2; MANUAL_POST_MARGIN_S = .5
 PHYSICS_PRE_MARGIN_S = 1.2; PHYSICS_POST_MARGIN_S = .5
+COLLISION_PRE_MARGIN_S = .5
 PHYSICS_MOVING_VX = .7; PHYSICS_FROZEN_POSE_SPEED = .12
 PHYSICS_DISTANCE_WINDOW_S = .5; PHYSICS_MIN_ODOM_DISTANCE = .35
 PHYSICS_MIN_POSE_ODOM_RATIO = .65; PHYSICS_IMPACT_DECEL = -8.0
@@ -256,7 +257,8 @@ def extract_one(storage, out, args):
     base=np.c_[times-times[0],pp[:,1:4],vv[:,1:4],dd[:,1:4]]
     command_mismatch=(np.abs(dd[:,1]-aa[:,1])>args.command_steer_match_tol)|(np.abs(dd[:,3]-aa[:,3])>args.command_speed_match_tol)
     manual=expand_boolean_intervals(command_mismatch,round(args.manual_pre_margin/args.dt),round(args.manual_post_margin/args.dt))
-    collision,episodes=collision_recovery_mask(base,args.dt)
+    collision,episodes=collision_recovery_mask(
+        base,args.dt,lookback_s=args.collision_pre_margin)
     physical_bad,physical_events=physical_inconsistency_mask(base,args.dt,
         pre_margin_s=args.physics_pre_margin,post_margin_s=args.physics_post_margin,
         moving_vx=args.physics_moving_vx,frozen_pose_speed=args.physics_frozen_pose_speed,
@@ -297,6 +299,7 @@ def extract_one(storage, out, args):
           "applied_command_topic":args.applied_command_topic,
           "alignment_start_epoch_s":float(start),"raw_aligned_samples":len(base),
           "removed_collision_samples":int(collision.sum()),"raw_command_mismatch_samples":int(command_mismatch.sum()),
+          "collision_pre_margin_s":args.collision_pre_margin,
           "removed_manual_with_margin_samples":int(manual.sum()),
           "removed_physical_inconsistency_samples":int(physical_bad.sum()),
           "physical_inconsistency_events":physical_events,
@@ -329,6 +332,8 @@ def main():
     p.add_argument("--command-speed-match-tol",type=float,default=COMMAND_SPEED_MATCH_TOL)
     p.add_argument("--manual-pre-margin",type=float,default=MANUAL_PRE_MARGIN_S)
     p.add_argument("--manual-post-margin",type=float,default=MANUAL_POST_MARGIN_S)
+    p.add_argument("--collision-pre-margin",type=float,default=COLLISION_PRE_MARGIN_S,
+                   help="접촉 직전 정상 hard-case를 보존하기 위한 제거 여유 [s]")
     p.add_argument("--physics-pre-margin",type=float,default=PHYSICS_PRE_MARGIN_S)
     p.add_argument("--physics-post-margin",type=float,default=PHYSICS_POST_MARGIN_S)
     p.add_argument("--physics-moving-vx",type=float,default=PHYSICS_MOVING_VX)

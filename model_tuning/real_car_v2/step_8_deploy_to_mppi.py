@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Step 8: validate and deploy the selected model to the MPPI runtime."""
 from pathlib import Path
+import argparse
 import hashlib
 import json
 import re
@@ -35,12 +36,22 @@ def replace_scalar(text, key, value):
 
 
 def main():
-    source = RESULT_PATH / "dynamic_40ms_residual.bin"
+    parser = argparse.ArgumentParser()
+    parser.add_argument("result", nargs="?", default=str(RESULT_PATH),
+                        help="배포할 Step 5/6 결과 폴더")
+    parser.add_argument("--regression", default=str(REGRESSION_PATH),
+                        help="Step 3 classic regression params.json")
+    parser.add_argument("--update-simulator", action="store_true",
+                        help="시뮬레이터 YAML도 함께 갱신")
+    args = parser.parse_args()
+    result_path = Path(args.result).resolve()
+    regression_path = Path(args.regression).resolve()
+    source = result_path / "dynamic_40ms_residual.bin"
     if source.stat().st_size != EXPECTED_BINARY_BYTES:
         raise RuntimeError(
             f"invalid CUDA binary size: {source.stat().st_size}, "
             f"expected {EXPECTED_BINARY_BYTES}")
-    regression_report = json.loads(REGRESSION_PATH.read_text())
+    regression_report = json.loads(regression_path.read_text())
     boundary_override = not regression_report.get("deployment_gate_passed", False)
     if boundary_override and not ALLOW_BOUNDARY_REGRESSION:
         raise RuntimeError("deployment blocked: classic regression has a boundary solution")
@@ -85,7 +96,8 @@ def main():
         "dynamic_mlp_E_r": regression["E_r"],
     }
     updated_simulator_yamls = []
-    for simulator_yaml_path in dict.fromkeys(SIMULATOR_YAML_PATHS):
+    simulator_paths = SIMULATOR_YAML_PATHS if args.update_simulator else ()
+    for simulator_yaml_path in dict.fromkeys(simulator_paths):
         if not simulator_yaml_path.exists():
             continue
         simulator_text = simulator_yaml_path.read_text()

@@ -62,8 +62,6 @@ def main():
         signs = (data["imu_axis_signs"].astype(float) if "imu_axis_signs" in data.files
                  else np.array((1., 1., 1.)))
         params = LateralVelocityKFParams(
-            cornering_stiffness_front=float(cfg["kf_cornering_stiffness_front"]),
-            cornering_stiffness_rear=float(cfg["kf_cornering_stiffness_rear"]),
             mass=float(cfg["mass"]), yaw_inertia=float(cfg["I_z"]),
             l_f=float(cfg["l_f"]), l_r=float(cfg["l_r"]), dt=dt,
             min_longitudinal_speed=float(cfg["kf_min_vx"]),
@@ -75,12 +73,7 @@ def main():
             measurement_var_yaw_rate=float(cfg["kf_r_yaw_rate"]),
             initial_var_vy=float(cfg["kf_initial_p_vy"]),
             initial_var_yaw_rate=float(cfg["kf_initial_p_yaw_rate"]),
-            imu_lateral_accel_sign=float(cfg["imu_lateral_accel_sign"]),
-            nonlinear_dvy_threshold=float(cfg["kf_nonlinear_dvy_threshold"]),
-            nonlinear_dvy_width=float(cfg["kf_nonlinear_dvy_width"]),
-            nonlinear_inertial_blend=float(cfg["kf_nonlinear_inertial_blend"]),
-            nonlinear_process_noise_scale=float(cfg["kf_nonlinear_process_noise_scale"]),
-            nonlinear_ay_noise_scale=float(cfg["kf_nonlinear_ay_noise_scale"]))
+            imu_lateral_accel_sign=float(cfg["imu_lateral_accel_sign"]))
         kf_vy, _ = estimate_dataset(
             samples, data["columns"], dt, params,
             steer_scale=float(cfg["kf_steer_scale"]),

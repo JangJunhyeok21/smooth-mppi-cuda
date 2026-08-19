@@ -95,7 +95,7 @@ def current_rollout(start, source, cfg, fit, weights):
         current = state.copy()
         applied, _ = actuator_step(applied, command[0], command[1], state[0], c)
         speed_reference, base_ax = longitudinal_actuator_step(
-            speed_reference, command[1], np.hypot(state[0], state[1]), c)
+            speed_reference, command[1], state[0], c)
         vx, vy, yaw_rate = state
         safe_vx = max(abs(vx), .5)
         alpha_f = applied-np.arctan2(vy+lf*yaw_rate, safe_vx)

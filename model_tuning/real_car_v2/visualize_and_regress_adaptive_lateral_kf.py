@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tune the causal 2-state KF, including lightweight nonlinear-slip adaptation."""
+"""Legacy comparison tuner; Pacejka EKF no longer has nonlinear blend knobs."""
 from pathlib import Path
 import json,sys
 import matplotlib.pyplot as plt
@@ -36,7 +36,7 @@ def load_records(cfg):
 
 def make_params(cfg,theta,dt):
  cf,cr,qvy,ray,threshold,width,blend,qscale,rscale=theta
- return LateralVelocityKFParams(cornering_stiffness_front=cf,cornering_stiffness_rear=cr,mass=float(cfg['mass']),yaw_inertia=float(cfg['I_z']),l_f=float(cfg['l_f']),l_r=float(cfg['l_r']),dt=dt,min_longitudinal_speed=float(cfg['kf_min_vx']),low_speed_threshold=float(cfg['kf_low_speed_threshold']),max_abs_vy=float(cfg['kf_max_abs_vy']),process_var_vy=qvy,process_var_yaw_rate=float(cfg['kf_q_yaw_rate']),measurement_var_lateral_accel=ray,measurement_var_yaw_rate=float(cfg['kf_r_yaw_rate']),initial_var_vy=float(cfg['kf_initial_p_vy']),initial_var_yaw_rate=float(cfg['kf_initial_p_yaw_rate']),imu_lateral_accel_sign=float(cfg['imu_lateral_accel_sign']),nonlinear_dvy_threshold=threshold,nonlinear_dvy_width=width,nonlinear_inertial_blend=blend,nonlinear_process_noise_scale=qscale,nonlinear_ay_noise_scale=rscale)
+ return LateralVelocityKFParams(cornering_stiffness_front=cf,cornering_stiffness_rear=cr,mass=float(cfg['mass']),yaw_inertia=float(cfg['I_z']),l_f=float(cfg['l_f']),l_r=float(cfg['l_r']),dt=dt,min_longitudinal_speed=float(cfg['kf_min_vx']),low_speed_threshold=float(cfg['kf_low_speed_threshold']),max_abs_vy=float(cfg['kf_max_abs_vy']),process_var_vy=qvy,process_var_yaw_rate=float(cfg['kf_q_yaw_rate']),measurement_var_lateral_accel=ray,measurement_var_yaw_rate=float(cfg['kf_r_yaw_rate']),initial_var_vy=float(cfg['kf_initial_p_vy']),initial_var_yaw_rate=float(cfg['kf_initial_p_yaw_rate']),imu_lateral_accel_sign=float(cfg['imu_lateral_accel_sign']))
 
 def replay(record,cfg,theta):
  vy,r=estimate_dataset(record['samples'],record['columns'],record['dt'],make_params(cfg,theta,record['dt']),steer_scale=float(cfg['kf_steer_scale']),steer_bias=float(cfg['kf_steer_bias']),max_steer=float(cfg['kf_max_steer']),imu_ema_alpha=record['alpha'],imu_wz_sign=float(record['sign'][0]),imu_ay_sign=float(record['sign'][2]));return vy,r
@@ -56,7 +56,7 @@ def score(records,cfg,theta):
 def stats(e):return {'mae':float(np.mean(e)),'p95':float(np.quantile(e,.95)),'max':float(np.max(e)),'samples':int(len(e))}
 
 def main():
- cfg=yaml.safe_load(PARAMS.read_text())['/**']['ros__parameters'];records=load_records(cfg);train=[r for i,r in enumerate(records) if i%5];test=[r for i,r in enumerate(records) if not i%5]
+ cfg=yaml.safe_load(PARAMS.read_text())['/**']['ros__parameters'];cfg.update(yaml.safe_load((ROOT/'model_tuning/real_car_v2/training_params.yaml').read_text())['training_parameters']);records=load_records(cfg);train=[r for i,r in enumerate(records) if i%5];test=[r for i,r in enumerate(records) if not i%5]
  base=np.array([cfg['kf_cornering_stiffness_front'],cfg['kf_cornering_stiffness_rear'],cfg['kf_q_vy'],cfg['kf_r_lateral_accel'],1e6,1.,0.,1.,1.],float);rng=np.random.default_rng(SEED);candidates=[base]
  # Broad search plus local candidates that preserve the already-good linear
  # regime while adding only as much nonlinear adaptation as tail error needs.

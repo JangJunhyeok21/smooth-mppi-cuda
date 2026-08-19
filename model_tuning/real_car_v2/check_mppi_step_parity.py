@@ -27,7 +27,7 @@ def python_rollout(cfg,fit,w):
  state=np.array([1.,-.5,.3,2.2,.15,-.4,.2,-.1,np.arctan2(.15,2.2)]);hist=np.array([-.10,2.,-.05,2.2,0.,2.5,.08,2.8,.12,3.,.07,2.]);rows=[]
  for k in range(STEPS):
   steer=.25-.012*k;speed=np.clip(3.5-.025*k,cfg['min_speed'],cfg['max_speed']);previous=hist[8];previous_applied=hist[10];hist[:8]=hist[2:10];hist[8:10]=(steer,speed)
-  applied,_=actuator_step(previous_applied,steer,speed,state[3],c);speed_ref,bax=longitudinal_actuator_step(hist[11],speed,np.hypot(state[3],state[4]),c);vx,vy,r=state[3:6];safe=max(abs(vx),.5);af=applied-np.arctan2(vy+lf*r,safe);ar=-np.arctan2(vy-lr*r,safe)
+  applied,_=actuator_step(previous_applied,steer,speed,state[3],c);speed_ref,bax=longitudinal_actuator_step(hist[11],speed,state[3],c);vx,vy,r=state[3:6];safe=max(abs(vx),.5);af=applied-np.arctan2(vy+lf*r,safe);ar=-np.arctan2(vy-lr*r,safe)
   def force(fz,prefix,a):
    B,C,D,E=(fit[f'{q}_{prefix}'] for q in 'BCDE');ba=B*a;return fz*D*np.sin(C*np.arctan(ba-E*(ba-np.arctan(ba))))
   fyf=force(fzf,'f',af);fyr=force(fzr,'r',ar);ay=(fyf*np.cos(applied)+fyr)/m;rd=(lf*fyf*np.cos(applied)-lr*fyr)/iz;base=np.array([vx+(bax+vy*r)*.04,vy+(ay-vx*r)*.04,r+rd*.04]);feature=np.r_[state[3:6],steer,speed,applied,steer-previous,base,hist[:10]].astype(np.float32);res=infer(feature,w)*residual_gates(vx,c);body=base+res*.04

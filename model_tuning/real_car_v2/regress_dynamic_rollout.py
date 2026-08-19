@@ -50,7 +50,7 @@ def rollout(params,x,starts,cfg,return_trace=False):
         tau=np.where(speed_cmd>=speed_ref,float(cfg['speed_reference_accel_time_constant']),float(cfg['speed_reference_brake_time_constant']))
         ref_rate=np.clip((speed_cmd-speed_ref)/np.maximum(tau,1e-3),-float(cfg['actuator_max_speed_reference_rate']),float(cfg['actuator_max_speed_reference_rate']))
         speed_ref+=ref_rate*dt
-        vx,vy,r=state.T;speed=np.hypot(vx,vy);ax=np.clip(float(cfg['speed_servo_kp'])*(speed_ref-speed),float(cfg['min_accel']),float(cfg['max_accel']))
+        vx,vy,r=state.T;ax=np.clip(float(cfg['speed_servo_kp'])*(speed_ref-vx),float(cfg['min_accel']),float(cfg['max_accel']))
         safe=np.maximum(np.abs(vx),.5);af=applied-np.arctan2(vy+lf*r,safe);ar=-np.arctan2(vy-lr*r,safe)
         baf=Bf*af;bar=Br*ar
         fyf=fzf*Df*np.sin(Cf*np.arctan(baf-Ef*(baf-np.arctan(baf))))

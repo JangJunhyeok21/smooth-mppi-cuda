@@ -249,6 +249,8 @@ private:
     }
 
     void mcl_pose_callback(const geometry_msgs::msg::PoseStamped::SharedPtr msg) {
+        rclcpp::Time stamp(msg->header.stamp);
+        if (stamp.nanoseconds() == 0) stamp = this->now();
         const auto &ori = msg->pose.orientation;
         const double yaw = std::atan2(
             2.0 * (ori.w * ori.z + ori.x * ori.y),
@@ -256,7 +258,64 @@ private:
         current_state_.x = static_cast<float>(msg->pose.position.x);
         current_state_.y = static_cast<float>(msg->pose.position.y);
         current_state_.yaw = static_cast<float>(yaw);
+        update_pose_velocity_observation(
+            stamp, msg->pose.position.x, msg->pose.position.y, yaw);
         pose_received_ = true;
+    }
+
+    void update_pose_velocity_observation(const rclcpp::Time &stamp, double x,
+                                          double y, double yaw) {
+        if (!kf_pose_vy_enabled_) return;
+        if (!pose_history_.empty()) {
+            const double gap = (stamp-pose_history_.back().stamp).seconds();
+            if (gap <= 0.0 || gap > kf_reset_gap_s_) pose_history_.clear();
+        }
+        pose_history_.push_back({stamp,x,y});
+        while (pose_history_.size()>2 &&
+               (stamp-pose_history_.front().stamp).seconds()>kf_pose_vy_window_s_)
+            pose_history_.pop_front();
+        if (pose_history_.size()<3) return;
+
+        const auto origin=pose_history_.front().stamp;
+        double mean_t=0.0,mean_x=0.0,mean_y=0.0;
+        for(const auto &sample:pose_history_) {
+            mean_t+=(sample.stamp-origin).seconds();
+            mean_x+=sample.x; mean_y+=sample.y;
+        }
+        const double inv_n=1.0/static_cast<double>(pose_history_.size());
+        mean_t*=inv_n; mean_x*=inv_n; mean_y*=inv_n;
+        double denominator=0.0,numerator_x=0.0,numerator_y=0.0;
+        for(const auto &sample:pose_history_) {
+            const double centered_t=(sample.stamp-origin).seconds()-mean_t;
+            denominator+=centered_t*centered_t;
+            numerator_x+=centered_t*(sample.x-mean_x);
+            numerator_y+=centered_t*(sample.y-mean_y);
+        }
+        if (denominator<=1.0e-8) return;
+        const double world_vx=numerator_x/denominator;
+        const double world_vy=numerator_y/denominator;
+        const float body_vy=static_cast<float>(
+            -std::sin(yaw)*world_vx+std::cos(yaw)*world_vy);
+        if (!std::isfinite(body_vy)) return;
+        pose_vy_buffer_.push_back({stamp,body_vy});
+        while(pose_vy_buffer_.size()>pose_vy_buffer_capacity_)
+            pose_vy_buffer_.pop_front();
+    }
+
+    float aligned_pose_vy(const rclcpp::Time &stamp) {
+        if (!kf_pose_vy_enabled_) return NAN;
+        const PoseVySample *chosen=nullptr;
+        for(const auto &sample:pose_vy_buffer_) {
+            if(sample.stamp<=stamp) chosen=&sample;
+            else break;
+        }
+        if(!chosen) return NAN;
+        const double age=(stamp-chosen->stamp).seconds();
+        if(age<0.0 || age>kf_pose_vy_max_age_s_) return NAN;
+        const float vy=chosen->vy;
+        while(pose_vy_buffer_.size()>1 && pose_vy_buffer_[1].stamp<=stamp)
+            pose_vy_buffer_.pop_front();
+        return vy;
     }
 
     void velocity_callback(const nav_msgs::msg::Odometry::SharedPtr msg) {
@@ -276,16 +335,13 @@ private:
         current_state_.v = static_cast<float>(measured_vx);
         current_state_.vy = static_cast<float>(measured_vy);
         current_state_.omega = static_cast<float>(measured_omega);
-        if (mppi_params_.dynamics_model == mppi::SLIP_KINEMATIC_WITH_IMU_DIRECT_SPEED ||
-            mppi_params_.dynamics_model == mppi::DYNAMIC_IMU_RECURSIVE ||
-            mppi_params_.dynamics_model == mppi::DYNAMIC_MLP_RESIDUAL ||
-            mppi_params_.dynamics_model == mppi::DYNAMIC_MLP_RESIDUAL_SERVO_LAG ||
-            mppi_params_.dynamics_model == mppi::DYNAMIC_MLP_RESIDUAL_SERVO_LAG_VX_DELTA_24D) {
+        if (uses_lateral_velocity_kf_) {
             const float steer = std::clamp(kf_steer_scale_ * last_steer_cmd_ + kf_steer_bias_,
                                            -kf_max_steer_, kf_max_steer_);
             const float wz = aligned_imu_valid_ ? aligned_imu_[0] : NAN;
             const float ay = aligned_imu_valid_ ? aligned_imu_[2] : NAN;
-            current_state_.vy = lateral_velocity_kf_.update(current_state_.v, steer, wz, ay);
+            current_state_.vy = lateral_velocity_kf_.update(
+                current_state_.v, steer, wz, ay, aligned_pose_vy(stamp));
             // vy is unobservable and comes from the KF. Yaw-rate is directly
             // observable: keep the signed/causally aligned IMU measurement.
             // The coupled KF yaw state was ~2x too small in the 08-08 turns.
@@ -365,6 +421,7 @@ private:
         current_state_.x   = static_cast<float>(x);
         current_state_.y   = static_cast<float>(y);
         current_state_.yaw = static_cast<float>(yaw);
+        update_pose_velocity_observation(pose_stamp,x,y,yaw);
 
         double estimated_vx = measured_vx;
         double estimated_vy = measured_vy;
@@ -396,16 +453,13 @@ private:
         current_state_.v     = static_cast<float>(estimated_vx);
         current_state_.vy    = static_cast<float>(estimated_vy);
         current_state_.omega = static_cast<float>(estimated_omega);
-        if (mppi_params_.dynamics_model == mppi::SLIP_KINEMATIC_WITH_IMU_DIRECT_SPEED ||
-            mppi_params_.dynamics_model == mppi::DYNAMIC_IMU_RECURSIVE ||
-            mppi_params_.dynamics_model == mppi::DYNAMIC_MLP_RESIDUAL ||
-            mppi_params_.dynamics_model == mppi::DYNAMIC_MLP_RESIDUAL_SERVO_LAG ||
-            mppi_params_.dynamics_model == mppi::DYNAMIC_MLP_RESIDUAL_SERVO_LAG_VX_DELTA_24D) {
+        if (uses_lateral_velocity_kf_) {
             const float steer = std::clamp(kf_steer_scale_*last_steer_cmd_+kf_steer_bias_,
                                            -kf_max_steer_,kf_max_steer_);
             const float wz = aligned_imu_valid_ ? aligned_imu_[0] : NAN;
             const float ay = aligned_imu_valid_ ? aligned_imu_[2] : NAN;
-            current_state_.vy = lateral_velocity_kf_.update(current_state_.v,steer,wz,ay);
+            current_state_.vy = lateral_velocity_kf_.update(
+                current_state_.v,steer,wz,ay,aligned_pose_vy(pose_stamp));
             current_state_.omega = aligned_imu_valid_ ? aligned_imu_[0]
                                                        : static_cast<float>(measured_omega);
         }
@@ -715,8 +769,6 @@ private:
         imu_ax_sign_=static_cast<float>(this->get_parameter("imu_ax_sign").as_double());
         this->declare_parameter("imu_ay_sign",1.0);
         imu_ay_sign_=static_cast<float>(this->get_parameter("imu_ay_sign").as_double());
-        this->declare_parameter("kf_cornering_stiffness_front",110.0);lateral_velocity_kf_params_.cornering_stiffness_front=this->get_parameter("kf_cornering_stiffness_front").as_double();
-        this->declare_parameter("kf_cornering_stiffness_rear",199.0);lateral_velocity_kf_params_.cornering_stiffness_rear=this->get_parameter("kf_cornering_stiffness_rear").as_double();
         this->declare_parameter("kf_min_vx",0.5);lateral_velocity_kf_params_.min_longitudinal_speed=this->get_parameter("kf_min_vx").as_double();
         this->declare_parameter("kf_low_speed_threshold",0.0);
         lateral_velocity_kf_params_.low_speed_threshold=this->get_parameter("kf_low_speed_threshold").as_double();
@@ -730,11 +782,15 @@ private:
         this->declare_parameter("kf_initial_p_vy",0.25);lateral_velocity_kf_params_.initial_var_vy=this->get_parameter("kf_initial_p_vy").as_double();
         this->declare_parameter("kf_initial_p_yaw_rate",0.10);lateral_velocity_kf_params_.initial_var_yaw_rate=this->get_parameter("kf_initial_p_yaw_rate").as_double();
         this->declare_parameter("imu_lateral_accel_sign",1.0);lateral_velocity_kf_params_.imu_lateral_accel_sign=this->get_parameter("imu_lateral_accel_sign").as_double();
-        this->declare_parameter("kf_nonlinear_dvy_threshold",1.5);lateral_velocity_kf_params_.nonlinear_dvy_threshold=this->get_parameter("kf_nonlinear_dvy_threshold").as_double();
-        this->declare_parameter("kf_nonlinear_dvy_width",1.0);lateral_velocity_kf_params_.nonlinear_dvy_width=this->get_parameter("kf_nonlinear_dvy_width").as_double();
-        this->declare_parameter("kf_nonlinear_inertial_blend",0.8);lateral_velocity_kf_params_.nonlinear_inertial_blend=this->get_parameter("kf_nonlinear_inertial_blend").as_double();
-        this->declare_parameter("kf_nonlinear_process_noise_scale",4.0);lateral_velocity_kf_params_.nonlinear_process_noise_scale=this->get_parameter("kf_nonlinear_process_noise_scale").as_double();
-        this->declare_parameter("kf_nonlinear_ay_noise_scale",10.0);lateral_velocity_kf_params_.nonlinear_ay_noise_scale=this->get_parameter("kf_nonlinear_ay_noise_scale").as_double();
+        this->declare_parameter("kf_q_ay_bias",2.8456300e-6);lateral_velocity_kf_params_.process_var_ay_bias=this->get_parameter("kf_q_ay_bias").as_double();
+        this->declare_parameter("kf_initial_p_ay_bias",0.008792814);lateral_velocity_kf_params_.initial_var_ay_bias=this->get_parameter("kf_initial_p_ay_bias").as_double();
+        this->declare_parameter("kf_max_abs_ay_bias",0.7880429);lateral_velocity_kf_params_.max_abs_ay_bias=this->get_parameter("kf_max_abs_ay_bias").as_double();
+        this->declare_parameter("kf_r_pose_vy",0.07933411);lateral_velocity_kf_params_.measurement_var_pose_vy=this->get_parameter("kf_r_pose_vy").as_double();
+        this->declare_parameter("kf_pose_vy_gate",1.3457935);lateral_velocity_kf_params_.pose_vy_gate=this->get_parameter("kf_pose_vy_gate").as_double();
+        this->declare_parameter("kf_pose_vy_enabled",true);kf_pose_vy_enabled_=this->get_parameter("kf_pose_vy_enabled").as_bool();
+        this->declare_parameter("kf_pose_vy_window_s",0.12);kf_pose_vy_window_s_=this->get_parameter("kf_pose_vy_window_s").as_double();
+        this->declare_parameter("kf_pose_vy_max_age_s",0.06);kf_pose_vy_max_age_s_=this->get_parameter("kf_pose_vy_max_age_s").as_double();
+        this->declare_parameter("kf_reset_gap_s",0.5);kf_reset_gap_s_=this->get_parameter("kf_reset_gap_s").as_double();
         this->declare_parameter("kf_steer_scale",1.1058064699);kf_steer_scale_=this->get_parameter("kf_steer_scale").as_double();
         this->declare_parameter("kf_steer_bias",-0.0300696939);kf_steer_bias_=this->get_parameter("kf_steer_bias").as_double();
         this->declare_parameter("kf_max_steer",0.4788);kf_max_steer_=this->get_parameter("kf_max_steer").as_double();
@@ -745,6 +801,14 @@ private:
         mppi_params_.control_dt    = mppi_params_.dt;
         lateral_velocity_kf_params_.mass=mppi_params_.mass;lateral_velocity_kf_params_.yaw_inertia=mppi_params_.I_z;
         lateral_velocity_kf_params_.l_f=mppi_params_.l_f;lateral_velocity_kf_params_.l_r=mppi_params_.l_r;
+        lateral_velocity_kf_params_.pacejka_b_front=mppi_params_.dynamic_mlp_B_f;
+        lateral_velocity_kf_params_.pacejka_c_front=mppi_params_.dynamic_mlp_C_f;
+        lateral_velocity_kf_params_.pacejka_d_front=mppi_params_.dynamic_mlp_D_f;
+        lateral_velocity_kf_params_.pacejka_e_front=mppi_params_.dynamic_mlp_E_f;
+        lateral_velocity_kf_params_.pacejka_b_rear=mppi_params_.dynamic_mlp_B_r;
+        lateral_velocity_kf_params_.pacejka_c_rear=mppi_params_.dynamic_mlp_C_r;
+        lateral_velocity_kf_params_.pacejka_d_rear=mppi_params_.dynamic_mlp_D_r;
+        lateral_velocity_kf_params_.pacejka_e_rear=mppi_params_.dynamic_mlp_E_r;
         lateral_velocity_kf_params_.dt=mppi_params_.dt;
         mppi_params_.num_obstacles = 0;
     }
@@ -1336,6 +1400,13 @@ private:
     float imu_ema_alpha_{0.25f};
     float imu_wz_sign_{1.f},imu_ax_sign_{1.f},imu_ay_sign_{1.f};
     bool imu_received_{false},aligned_imu_valid_{false},imu_ema_initialized_{false};
+    struct PoseSample { rclcpp::Time stamp; double x,y; };
+    struct PoseVySample { rclcpp::Time stamp; float vy; };
+    std::deque<PoseSample> pose_history_;
+    std::deque<PoseVySample> pose_vy_buffer_;
+    static constexpr std::size_t pose_vy_buffer_capacity_=100;
+    double kf_pose_vy_window_s_{0.12},kf_pose_vy_max_age_s_{0.06},kf_reset_gap_s_{0.5};
+    bool kf_pose_vy_enabled_{true};
 };
 
 int main(int argc, char **argv) {

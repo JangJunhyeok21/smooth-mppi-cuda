@@ -23,21 +23,25 @@ from helper_lateral_velocity_kf import LateralVelocityKFParams, estimate_dataset
 # USER SETTINGS. Add every bag storage file or rosbag2 directory here. Running
 # this script without arguments extracts them sequentially.
 NEW_DATA_ROOTS = (
+    Path("/mnt/nas_custom/F1tenth/2026 IFAC/0810"),
+    Path("/mnt/nas_custom/F1tenth/2026 IFAC/0812"),
+    Path("/mnt/nas_custom/F1tenth/2026 IFAC/0813"),
+    Path("/mnt/nas_custom/F1tenth/2026 IFAC/0815"),
     Path("/mnt/nas_custom/F1tenth/2026 IFAC/0817 (1)"),
     Path("/mnt/nas_custom/F1tenth/2026 IFAC/0818"),
+    Path("/mnt/nas_custom/F1tenth/2026 IFAC/0819"),
 )
 # Discover rosbag directories recursively. Bags without the required topics are
 # reported as SKIPPED by read_streams instead of silently entering the archive.
 BAG_PATH = sorted({metadata.parent for root in NEW_DATA_ROOTS
                    for metadata in root.rglob("metadata.yaml")})
-OUTPUT_PATH = PROJECT_ROOT / "model_tuning/data/ifac0817_0818_autonomous_physics_clean"
+OUTPUT_PATH = PROJECT_ROOT / "model_tuning/data/ifac0810_0819_autonomous_physics_clean"
 USE_PLOT = False
 # The sensor/body convention changed on 2026-08-17. Before that date IMU y/z
 # oppose MPPI FLU; from 0817 onward all axes already match MPPI.
 IMU_WZ_SIGN = 1.0; IMU_AX_SIGN = 1.0; IMU_AY_SIGN = 1.0; IMU_EMA_ALPHA = .25
 IMU_SIGN_CUTOVER = dtlib.date(2026, 8, 17)
 # Match the current runtime observer in config/params.yaml.
-KF_CF = 12.7222491; KF_CR = 75.0944752
 KF_LOW_SPEED_THRESHOLD = 0.5
 KF_STEER_SCALE = 1.1058064699; KF_STEER_BIAS = -0.0300696939; KF_MAX_STEER = .4788
 POSE_TOPIC = "/newmcl_pose"; VELOCITY_TOPIC = "/odom"; COMMAND_TOPIC = "/ackermann_cmd"; IMU_TOPIC = "/imu/data"
@@ -183,9 +187,7 @@ def plot_extracted(samples, columns, dt, title, command_topic, signs=(1.,1.,1.))
         wy[ii]=np.gradient(y[ii],local,edge_order=edge) if len(ii)>1 else 0.
     pose_vx=wx*np.cos(heading)+wy*np.sin(heading)
     pose_vy=-wx*np.sin(heading)+wy*np.cos(heading)
-    kf_params=LateralVelocityKFParams(cornering_stiffness_front=KF_CF,
-        cornering_stiffness_rear=KF_CR,dt=dt,
-        low_speed_threshold=KF_LOW_SPEED_THRESHOLD)
+    kf_params=LateralVelocityKFParams(dt=dt,low_speed_threshold=KF_LOW_SPEED_THRESHOLD)
     wz_sign,ax_sign,ay_sign=signs
     kf_vy,kf_w=estimate_dataset(samples,columns,dt,kf_params,
         steer_scale=KF_STEER_SCALE,steer_bias=KF_STEER_BIAS,max_steer=KF_MAX_STEER,
@@ -275,24 +277,25 @@ def extract_one(storage, out, args):
     columns=np.array(["t","x","y","yaw","vx","vy","omega","steer","accel","speed_cmd",
                       "split","bag_id","imu_wz","imu_ax","imu_ay"])
     out.parent.mkdir(parents=True,exist_ok=True)
-    np.savez_compressed(out,samples=samples,dt=args.dt,columns=columns,pose_topic=np.array(args.pose_topic),
+    np.savez_compressed(out,samples=samples,dt=args.dt,columns=columns,
+                        alignment_start_epoch_s=np.array(start,np.float64),
+                        pose_topic=np.array(args.pose_topic),
                         velocity_topic=np.array(args.velocity_topic),command_topic=np.array(args.command_topic),
                         imu_topic=np.array(args.imu_topic),
                         recording_date=np.array(date.isoformat()),
                         imu_sign_cutover=np.array(IMU_SIGN_CUTOVER.isoformat()),
                         imu_axis_signs=np.array(signs,np.float32),
                         imu_ema_alpha=np.array(IMU_EMA_ALPHA,np.float32),
-                        kf_cornering_stiffness=np.array([KF_CF,KF_CR],np.float32),
                         kf_low_speed_threshold=np.array(KF_LOW_SPEED_THRESHOLD,np.float32))
     meta={"source":str(storage.resolve()),"pose_topic":args.pose_topic,"velocity_topic":args.velocity_topic,
           "command_topic":args.command_topic,"imu_topic":args.imu_topic,"alignment":"causal_hold",
           "recording_date":date.isoformat(),"imu_sign_cutover":"2026-08-17",
           "imu_axis_signs":{"wz":signs[0],"ax":signs[1],"ay":signs[2]},
           "imu_ema_alpha":IMU_EMA_ALPHA,
-          "kf_parameters":{"cornering_stiffness_front":KF_CF,"cornering_stiffness_rear":KF_CR,
-                           "low_speed_threshold":KF_LOW_SPEED_THRESHOLD,"steer_scale":KF_STEER_SCALE,
+          "kf_parameters":{"low_speed_threshold":KF_LOW_SPEED_THRESHOLD,"steer_scale":KF_STEER_SCALE,
                            "steer_bias":KF_STEER_BIAS,"max_steer":KF_MAX_STEER},
-          "applied_command_topic":args.applied_command_topic,"raw_aligned_samples":len(base),
+          "applied_command_topic":args.applied_command_topic,
+          "alignment_start_epoch_s":float(start),"raw_aligned_samples":len(base),
           "removed_collision_samples":int(collision.sum()),"raw_command_mismatch_samples":int(command_mismatch.sum()),
           "removed_manual_with_margin_samples":int(manual.sum()),
           "removed_physical_inconsistency_samples":int(physical_bad.sum()),

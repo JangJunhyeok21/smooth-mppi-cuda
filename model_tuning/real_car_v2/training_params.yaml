@@ -1,0 +1,5 @@
+# MPPI 실행에는 쓰지 않고 학습·과거 모델 비교에만 사용하는 값
+training_parameters:
+  # 예전 선형 타이어 KF의 앞/뒤 코너링 강성 [N/rad]
+  kf_cornering_stiffness_front: 19.7144370
+  kf_cornering_stiffness_rear: 13.7858929

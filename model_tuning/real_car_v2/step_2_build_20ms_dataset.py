@@ -17,12 +17,11 @@ from contract import Contract, FEATURES, OUTPUTS, actuator_step, longitudinal_ac
 from offline_lateral_velocity_smoother import smooth_segment_vy
 from helper_lateral_velocity_kf import LateralVelocityKFParams,estimate_dataset
 
-SOURCE_DIRS=(
-    ROOT/"model_tuning/data/real_car_v2_drive",
-    ROOT/"model_tuning/results/effective_vs_dynamic_0813/data",
-    ROOT/"model_tuning/data/ifac0815_autonomous_physics_clean",
-    ROOT/"model_tuning/data/ifac0817_0818_autonomous_physics_clean",
+DEFAULT_SOURCE_DIRS=(
+    ROOT/"model_tuning/data/ifac0810_0819_autonomous_physics_clean",
 )
+SOURCE_DIRS=tuple(Path(value) for value in os.environ["DYNAMIC_SOURCE_DIRS"].split(os.pathsep)
+                  if value) if os.environ.get("DYNAMIC_SOURCE_DIRS") else DEFAULT_SOURCE_DIRS
 OUTPUT=Path(os.environ.get("DYNAMIC_SOURCE_OUTPUT",ROOT/"model_tuning/data/dynamic_40ms_all_drive_source_20ms.npz"))
 REPORT=OUTPUT.with_suffix(".json")
 # Runtime-visible causal KF vy is always used by the model input.  The offline
@@ -99,11 +98,15 @@ def main():
     # than memorization of the same run.
     test_names={"aggressive_boundary_run2.npz","codex_highspeed_run1.npz",
                 "rosbag2_2026_08_17-17_31_57.npz",
-                "rosbag2_2026_08_18-14_39_19.npz"}
+                "rosbag2_2026_08_18-14_39_19.npz",
+                "rosbag2_2026_08_19-20_20_24.npz",
+                "rosbag2_2026_08_19-20_23_43.npz"}
     val_names={"effective_speed30_run1.npz","rosbag2_2026_08_08-16_54_33.npz",
                "codex_effective_history_1200_run2_60s.npz",
                "rosbag2_2026_08_18-14_55_28.npz",
                "rosbag2_2026_08_18-15_26_00.npz"}
+    val_names.update({"rosbag2_2026_08_19-19_53_54.npz",
+                      "rosbag2_2026_08_19-20_02_26.npz"})
     for source_id,path in enumerate(files):
         z=np.load(path);a=z["samples"].astype(float);names={str(x):i for i,x in enumerate(z["columns"])};dt=float(z["dt"])
         if abs(dt-c.dt)>1e-9:raise RuntimeError(f"{path}: dt={dt}")
@@ -111,7 +114,7 @@ def main():
         for local in np.unique(local_ids):
             ii=np.flatnonzero(local_ids==local);s=a[ii];n=len(s)
             if n<12:continue
-            kfp=LateralVelocityKFParams(cornering_stiffness_front=float(cfg["kf_cornering_stiffness_front"]),cornering_stiffness_rear=float(cfg["kf_cornering_stiffness_rear"]),mass=float(cfg["mass"]),yaw_inertia=float(cfg["I_z"]),l_f=float(cfg["l_f"]),l_r=float(cfg["l_r"]),dt=dt,min_longitudinal_speed=float(cfg["kf_min_vx"]),low_speed_threshold=float(cfg["kf_low_speed_threshold"]),max_abs_vy=float(cfg["kf_max_abs_vy"]),process_var_vy=float(cfg["kf_q_vy"]),process_var_yaw_rate=float(cfg["kf_q_yaw_rate"]),measurement_var_lateral_accel=float(cfg["kf_r_lateral_accel"]),measurement_var_yaw_rate=float(cfg["kf_r_yaw_rate"]),initial_var_vy=float(cfg["kf_initial_p_vy"]),initial_var_yaw_rate=float(cfg["kf_initial_p_yaw_rate"]),imu_lateral_accel_sign=float(cfg["imu_lateral_accel_sign"]),nonlinear_dvy_threshold=float(cfg["kf_nonlinear_dvy_threshold"]),nonlinear_dvy_width=float(cfg["kf_nonlinear_dvy_width"]),nonlinear_inertial_blend=float(cfg["kf_nonlinear_inertial_blend"]),nonlinear_process_noise_scale=float(cfg["kf_nonlinear_process_noise_scale"]),nonlinear_ay_noise_scale=float(cfg["kf_nonlinear_ay_noise_scale"]))
+            kfp=LateralVelocityKFParams(mass=float(cfg["mass"]),yaw_inertia=float(cfg["I_z"]),l_f=float(cfg["l_f"]),l_r=float(cfg["l_r"]),dt=dt,min_longitudinal_speed=float(cfg["kf_min_vx"]),low_speed_threshold=float(cfg["kf_low_speed_threshold"]),max_abs_vy=float(cfg["kf_max_abs_vy"]),process_var_vy=float(cfg["kf_q_vy"]),process_var_yaw_rate=float(cfg["kf_q_yaw_rate"]),measurement_var_lateral_accel=float(cfg["kf_r_lateral_accel"]),measurement_var_yaw_rate=float(cfg["kf_r_yaw_rate"]),initial_var_vy=float(cfg["kf_initial_p_vy"]),initial_var_yaw_rate=float(cfg["kf_initial_p_yaw_rate"]),imu_lateral_accel_sign=float(cfg["imu_lateral_accel_sign"]),process_var_ay_bias=float(cfg["kf_q_ay_bias"]),initial_var_ay_bias=float(cfg["kf_initial_p_ay_bias"]),max_abs_ay_bias=float(cfg["kf_max_abs_ay_bias"]),measurement_var_pose_vy=float(cfg["kf_r_pose_vy"]),pose_vy_gate=float(cfg["kf_pose_vy_gate"]))
             # The installed IMU convention changed on 2026-08-17: before the
             # cutover sensor y/z oppose MPPI FLU, from 0817 onward they match.
             # Resolve this from the recording date and reject contradictory
@@ -120,7 +123,7 @@ def main():
             imu_wz_sign,imu_ax_sign,imu_ay_sign=source_signs
             source_ema_alpha=(float(z["imu_ema_alpha"]) if "imu_ema_alpha" in z.files
                               else float(cfg["imu_ema_alpha"]))
-            vy_input,r=estimate_dataset(s,z["columns"],dt,kfp,steer_scale=float(cfg["kf_steer_scale"]),steer_bias=float(cfg["kf_steer_bias"]),max_steer=float(cfg["kf_max_steer"]),imu_ema_alpha=source_ema_alpha,imu_wz_sign=imu_wz_sign,imu_ay_sign=imu_ay_sign)
+            vy_input,r=estimate_dataset(s,z["columns"],dt,kfp,steer_scale=float(cfg["kf_steer_scale"]),steer_bias=float(cfg["kf_steer_bias"]),max_steer=float(cfg["kf_max_steer"]),imu_ema_alpha=source_ema_alpha,imu_wz_sign=imu_wz_sign,imu_ay_sign=imu_ay_sign,use_pose_vy=bool(cfg["kf_pose_vy_enabled"]),pose_window_s=float(cfg["kf_pose_vy_window_s"]))
             vy_teacher=vy_input.copy()
             vx=s[:,names["vx"]];steer_cmd=s[:,names["steer"]]
             speed_cmd=np.clip(s[:,names["speed_cmd"]],float(cfg["min_speed"]),TRAINING_MAX_SPEED)
@@ -150,8 +153,8 @@ def main():
             for k in range(n):
                 prev=applied[k-1] if k else applied[0]
                 applied[k],_=actuator_step(prev,steer_cmd[k],speed_cmd[k],vx[k],c)
-                current_speed=np.hypot(vx[k],vy_input[k])
-                speed_reference,base_ax[k]=longitudinal_actuator_step(speed_reference,speed_cmd[k],current_speed,c)
+                speed_reference,base_ax[k]=longitudinal_actuator_step(
+                    speed_reference,speed_cmd[k],vx[k],c)
             Bf,Cf,Df,Ef=[float(cfg[f"dynamic_mlp_{x}"]) for x in ("B_f","C_f","D_f","E_f")]
             Br,Cr,Dr,Er=[float(cfg[f"dynamic_mlp_{x}"]) for x in ("B_r","C_r","D_r","E_r")]
             lf,lr,m,iz=float(cfg["l_f"]),float(cfg["l_r"]),float(cfg["mass"]),float(cfg["dynamic_mlp_I_z"]);wb=lf+lr
@@ -176,10 +179,10 @@ def main():
             # Every discontinuous segment needs its own id. Reusing source_id
             # made recursive windows cross localization/collision cuts.
             bag_id=next_bag
-            features.append(feat.astype(np.float32));targets.append(target.astype(np.float32));observations.append(np.c_[imu_ax,imu_ay,r].astype(np.float32));teacher_vys.append(vy_teacher.astype(np.float32));teacher_confidences.append(teacher_confidence.astype(np.float32));valids.append(ok);bag_ids.append(np.full(n,bag_id));split_ids.append(np.full(n,split));manifest.append({"bag_id":bag_id,"source":str(path),"recording_date":recording_date.isoformat(),"imu_sign_cutover":"2026-08-17","segment":int(local),"split":("train","val","test")[split],"samples":n,"valid":int(ok.sum()),"vy_input":"causal_kf","vy_teacher":("offline_mcl_imu_smoother" if smoother_diagnostics and smoother_diagnostics.get("usable") else "causal_kf_fallback"),"vy_smoother":smoother_diagnostics,"imu_ax_stationary_bias_removed":ax_bias,"imu_axis_signs":{"wz":imu_wz_sign,"ax":imu_ax_sign,"ay":imu_ay_sign},"imu_ema_alpha":source_ema_alpha,"command_topic":str(z["command_topic"])});next_bag+=1
+            features.append(feat.astype(np.float32));targets.append(target.astype(np.float32));observations.append(np.c_[imu_ax,imu_ay,r].astype(np.float32));teacher_vys.append(vy_teacher.astype(np.float32));teacher_confidences.append(teacher_confidence.astype(np.float32));valids.append(ok);bag_ids.append(np.full(n,bag_id));split_ids.append(np.full(n,split));manifest.append({"bag_id":bag_id,"source":str(path),"recording_date":recording_date.isoformat(),"imu_sign_cutover":"2026-08-17","segment":int(local),"split":("train","val","test")[split],"samples":n,"valid":int(ok.sum()),"vy_input":"causal_pacejka_mcl_ay_bias_ekf","vy_teacher":("offline_mcl_imu_smoother" if smoother_diagnostics and smoother_diagnostics.get("usable") else "causal_pacejka_mcl_ay_bias_ekf_fallback"),"vy_smoother":smoother_diagnostics,"imu_ax_stationary_bias_removed":ax_bias,"imu_axis_signs":{"wz":imu_wz_sign,"ax":imu_ax_sign,"ay":imu_ay_sign},"imu_ema_alpha":source_ema_alpha,"command_topic":str(z["command_topic"])});next_bag+=1
     X=np.concatenate(features);Y=np.concatenate(targets);O=np.concatenate(observations);TV=np.concatenate(teacher_vys);TC=np.concatenate(teacher_confidences);B=np.concatenate(bag_ids);S=np.concatenate(split_ids);V=np.concatenate(valids)
     assert X.shape[1]==20 and tuple(FEATURES)==("vx","vy","yaw_rate","steer_cmd","speed_cmd","applied_steer","steer_cmd_delta","base_next_vx","base_next_vy","base_next_yaw_rate","steer_t-4","speed_t-4","steer_t-3","speed_t-3","steer_t-2","speed_t-2","steer_t-1","speed_t-1","steer_t","speed_t")
-    np.savez_compressed(OUTPUT,features=X,targets=Y,observations=O,teacher_vy=TV,teacher_vy_confidence=TC,bag_id=B,split=S,valid=V,feature_names=np.array(FEATURES),target_names=np.array(OUTPUTS),observation_names=np.array(("imu_ax","imu_ay","imu_yaw_rate")),dt=c.dt,vy_input_contract="causal_kf",vy_teacher_contract="offline_smoother_with_causal_fallback")
-    REPORT.write_text(json.dumps({"output":str(OUTPUT),"samples":len(X),"valid":int(V.sum()),"bags":int(len(np.unique(B))),"vy_input":"causal_kf","vy_teacher":"offline_mcl_imu_smoother_with_causal_fallback","sources":manifest,"forbidden_training_source":FORBIDDEN},indent=2)+"\n")
+    np.savez_compressed(OUTPUT,features=X,targets=Y,observations=O,teacher_vy=TV,teacher_vy_confidence=TC,bag_id=B,split=S,valid=V,feature_names=np.array(FEATURES),target_names=np.array(OUTPUTS),observation_names=np.array(("imu_ax","imu_ay","imu_yaw_rate")),dt=c.dt,vy_input_contract="causal_pacejka_mcl_ay_bias_ekf",vy_teacher_contract="offline_smoother_with_causal_fallback")
+    REPORT.write_text(json.dumps({"output":str(OUTPUT),"samples":len(X),"valid":int(V.sum()),"bags":int(len(np.unique(B))),"vy_input":"causal_pacejka_mcl_ay_bias_ekf","vy_teacher":"offline_mcl_imu_smoother_with_causal_fallback","sources":manifest,"forbidden_training_source":FORBIDDEN},indent=2)+"\n")
     print(REPORT.read_text())
 if __name__=="__main__":main()

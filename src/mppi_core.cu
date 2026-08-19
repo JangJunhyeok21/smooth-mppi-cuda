@@ -349,11 +349,9 @@ namespace mppi
         const float steer_rate=fminf(p.actuator_max_steer_rate,fmaxf(-p.actuator_max_steer_rate,
             (steer_target-previous_delta)/fmaxf(p.steer_servo_time_constant,1e-3f)));
         const float steer=fminf(.55f,fmaxf(-.55f,previous_delta+steer_rate*p.dt));
-        const float speed=hypotf(s.v,s.vy);
         const float beta=atan2f(s.vy,s.v);
-        const float base_ax=fminf(p.max_accel,fmaxf(p.min_accel,p.speed_servo_kp*(speed_cmd-speed)));
-        const float base_speed=speed+base_ax*p.dt;
-        const float base_vx=base_speed*cosf(beta),base_vy=base_speed*sinf(beta);
+        const float base_ax=fminf(p.max_accel,fmaxf(p.min_accel,p.speed_servo_kp*(speed_cmd-s.v)));
+        const float base_vx=s.v+base_ax*p.dt,base_vy=s.vy;
         const float target_w=base_vx*tanf(steer)/(p.l_f+p.l_r);
         const float base_w=s.omega+fminf(p.kinematic_max_yaw_accel,fmaxf(-p.kinematic_max_yaw_accel,
             (target_w-s.omega)/fmaxf(p.kinematic_yaw_rate_time_constant,1e-3f)))*p.dt;
@@ -464,11 +462,11 @@ namespace mppi
         }
         const float longitudinal_speed_reference =
             use_servo_lag ? actuator_speed_reference : speed_command;
-        const float current_speed = hypotf(current_state.v, current_state.vy);
         const float classic_longitudinal_acceleration = fminf(
             params.max_accel,
             fmaxf(params.min_accel,
-                  params.speed_servo_kp * (longitudinal_speed_reference - current_speed)));
+                  params.speed_servo_kp *
+                    (longitudinal_speed_reference - current_state.v)));
         const float safe_longitudinal_velocity = fmaxf(
             fabsf(current_state.v), MIN_DYNAMIC_SPEED);
 

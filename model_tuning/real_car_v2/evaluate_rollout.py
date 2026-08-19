@@ -21,7 +21,7 @@ def main():
  def run(i,use_net):
   state=x[i,:3].astype(float).copy();applied=float(x[i,5]);speed_reference=float(state[0]);hist=x[i,10:20].reshape(5,2).copy();trace=[]
   for k in range(H):
-   cmd=x[i+k,3:5].copy();cmd[1]=np.clip(cmd[1],float(cfg["min_speed"]),float(cfg["max_speed"]));previous=hist[-1,0];applied,_=actuator_step(applied,*cmd,state[0],c);speed_reference,base_ax=longitudinal_actuator_step(speed_reference,cmd[1],np.hypot(state[0],state[1]),c)
+   cmd=x[i+k,3:5].copy();cmd[1]=np.clip(cmd[1],float(cfg["min_speed"]),float(cfg["max_speed"]));previous=hist[-1,0];applied,_=actuator_step(applied,*cmd,state[0],c);speed_reference,base_ax=longitudinal_actuator_step(speed_reference,cmd[1],state[0],c)
    vx,vy,r=state;safe=max(abs(vx),.5);af=applied-np.arctan2(vy+lf*r,safe);ar=-np.arctan2(vy-lr*r,safe);fzf=m*9.81*lr/wb;fzr=m*9.81*lf/wb
    fyf=fzf*Df*np.sin(Cf*np.arctan(Bf*af-Ef*(Bf*af-np.arctan(Bf*af))));fyr=fzr*Dr*np.sin(Cr*np.arctan(Br*ar-Er*(Br*ar-np.arctan(Br*ar))));bay=(fyf*np.cos(applied)+fyr)/m;brd=(lf*fyf*np.cos(applied)-lr*fyr)/iz
    base=np.array([vx+(base_ax+vy*r)*c.dt,vy+(bay-vx*r)*c.dt,r+brd*c.dt]);feat=np.r_[state,cmd,applied,cmd[0]-previous,base,hist.ravel()].astype(np.float32)

@@ -87,8 +87,6 @@ def main():
             s=samples[rows]; n=len(s)
             if n < 2*HORIZON_STEPS+6: continue
             kfp=LateralVelocityKFParams(
-                cornering_stiffness_front=float(cfg["kf_cornering_stiffness_front"]),
-                cornering_stiffness_rear=float(cfg["kf_cornering_stiffness_rear"]),
                 mass=float(cfg["mass"]), yaw_inertia=float(cfg["I_z"]),
                 l_f=lf,l_r=lr,dt=.02,min_longitudinal_speed=float(cfg["kf_min_vx"]),
                 low_speed_threshold=float(cfg["kf_low_speed_threshold"]))
@@ -109,7 +107,7 @@ def main():
             c20=Contract(**{**contract.__dict__,"dt":.02})
             for i in range(1,n):
                 applied[i],_=actuator_step(applied[i-1],command[i,0],command[i,1],vx[i],c20)
-                speed_reference[i],_=longitudinal_actuator_step(speed_reference[i-1],command[i,1],np.hypot(vx[i],vy[i]),c20)
+                speed_reference[i],_=longitudinal_actuator_step(speed_reference[i-1],command[i,1],vx[i],c20)
             for start in range(5,n-2*HORIZON_STEPS,WINDOW_STRIDE_20MS):
                 initial_xy=s[start,[names["x"],names["y"]]]; initial_yaw=s[start,names["yaw"]]
                 state=np.array((vx[start],vy[start],yaw_rate[start]),float)
@@ -124,7 +122,7 @@ def main():
                         previous_command=history[-1,0]
                         history=np.vstack((history[1:],cmd))
                         delta,_=actuator_step(delta,cmd[0],cmd[1],st[0],contract)
-                        sref,base_ax=longitudinal_actuator_step(sref,cmd[1],np.hypot(st[0],st[1]),contract)
+                        sref,base_ax=longitudinal_actuator_step(sref,cmd[1],st[0],contract)
                         safe=max(abs(st[0]),.5)
                         alpha_f=delta-np.arctan2(st[1]+lf*st[2],safe)
                         alpha_r=-np.arctan2(st[1]-lr*st[2],safe)

@@ -9,6 +9,7 @@
 ROS 2 bag
   -> step_1_extract_data.py
   -> per-bag 20 ms NPZ
+  -> step_2_regress_lateral_velocity_observer.py (필요할 때만)
   -> step_2_build_20ms_dataset.py
   -> dynamic_40ms_all_drive_source_20ms.npz
   -> step_3_regress_classic_model.py
@@ -34,6 +35,10 @@ ROS 2 bag
    - runtime과 같은 causal lateral-velocity KF를 실행한다.
    - offline smoother는 teacher target으로만 사용한다.
    - 출력: `model_tuning/data/dynamic_40ms_all_drive_source_20ms.npz`와 JSON manifest.
+
+   `step_2_regress_lateral_velocity_observer.py`는 observer를 다시 튜닝할 때만 먼저 실행한다.
+   현재 Pacejka는 고정하고 EKF Q/R, IMU ay bias, MCL vy gate만 회귀한다.
+   결과는 검토 후 `params.yaml`에 반영하며 자동 배포하지 않는다.
 
 3. `step_3_regress_classic_model.py`
    - 동일한 split에서 8-parameter Pacejka 후보를 회귀하고 validation score로 선택한다.

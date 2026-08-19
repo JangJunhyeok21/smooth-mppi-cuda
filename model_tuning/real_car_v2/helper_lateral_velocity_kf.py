@@ -8,12 +8,21 @@ import numpy as np
 
 @dataclass
 class LateralVelocityKFParams:
+    # 과거 선형 KF 비교 스크립트 전용이며 Pacejka EKF 계산에는 사용하지 않는다.
     cornering_stiffness_front: float = 110.0
     cornering_stiffness_rear: float = 199.0
     mass: float = 3.74
     yaw_inertia: float = 0.04712
     l_f: float = 0.163
     l_r: float = 0.161
+    pacejka_b_front: float = 2.9844349007584565
+    pacejka_c_front: float = 1.3
+    pacejka_d_front: float = 0.362611229414815
+    pacejka_e_front: float = 0.0
+    pacejka_b_rear: float = 0.3173165891873783
+    pacejka_c_rear: float = 1.3
+    pacejka_d_rear: float = 2.799999941680244
+    pacejka_e_rear: float = 0.0
     dt: float = 0.02
     min_longitudinal_speed: float = 0.5
     low_speed_threshold: float = 0.0
@@ -26,18 +35,15 @@ class LateralVelocityKFParams:
     initial_var_yaw_rate: float = 0.10
     # IMU linear_acceleration.y must be vehicle body +Y (left).
     imu_lateral_accel_sign: float = 1.0
-    # When |ay-vx*r| grows, the linear-tire model is no longer trustworthy.
-    # Blend the prediction toward inertial d(vy)/dt=ay-vx*r and downweight
-    # the linear-tire ay measurement equation.
-    nonlinear_dvy_threshold: float = 2.3911474
-    nonlinear_dvy_width: float = 1.5530068
-    nonlinear_inertial_blend: float = 0.6382294
-    nonlinear_process_noise_scale: float = 7.4273267
-    nonlinear_ay_noise_scale: float = 4.0024465
+    process_var_ay_bias: float = 0.0
+    initial_var_ay_bias: float = 1.0e-8
+    max_abs_ay_bias: float = 0.0
+    measurement_var_pose_vy: float = 0.08
+    pose_vy_gate: float = 0.8
 
 
 class LateralVelocityKF:
-    """No nonlinear tire calls and no matrix inverse/allocation in update()."""
+    """Two-state EKF using the same Pacejka lateral-force model as MPPI."""
 
     def __init__(self, params=LateralVelocityKFParams()):
         self.p = params
@@ -49,6 +55,8 @@ class LateralVelocityKF:
         self.yaw_rate = measured_yaw_rate if math.isfinite(measured_yaw_rate) else 0.0
         self.p00, self.p01 = max(self.p.initial_var_vy, 1e-8), 0.0
         self.p10, self.p11 = 0.0, max(self.p.initial_var_yaw_rate, 1e-8)
+        self.ay_bias = 0.0
+        self.p_bias = max(self.p.initial_var_ay_bias, 1e-8)
         self.initialized = True
 
     def _covariance(self, p00, p01, p10, p11):
@@ -61,8 +69,39 @@ class LateralVelocityKF:
             self.reset(0.0)
         self.vy = float(np.clip(self.vy, -self.p.max_abs_vy, self.p.max_abs_vy))
 
+    def _update_pose_vy(self, measured_pose_vy):
+        if not math.isfinite(measured_pose_vy):
+            return
+        residual = measured_pose_vy-self.vy
+        if abs(residual) > self.p.pose_vy_gate:
+            return
+        gain = self.p00/(self.p00+max(self.p.measurement_var_pose_vy, 1e-8))
+        self.vy += gain*residual
+        self.p00 = max((1.0-gain)*self.p00, 1e-8)
+        self.p01 *= 1.0-gain
+        self.p10 = self.p01
+
+    @staticmethod
+    def _force(slip, fz, b, c, d, e):
+        bs = b*slip
+        return fz*d*math.sin(c*math.atan(bs-e*(bs-math.atan(bs))))
+
+    def _dynamics(self, vx, steering, vy, yaw_rate):
+        p = self.p
+        safe_vx = max(abs(vx), p.min_longitudinal_speed)
+        af = steering-math.atan2(vy+p.l_f*yaw_rate, safe_vx)
+        ar = -math.atan2(vy-p.l_r*yaw_rate, safe_vx)
+        wheelbase = p.l_f+p.l_r
+        fzf, fzr = p.mass*9.81*p.l_r/wheelbase, p.mass*9.81*p.l_f/wheelbase
+        fyf = self._force(af, fzf, p.pacejka_b_front, p.pacejka_c_front,
+                          p.pacejka_d_front, p.pacejka_e_front)
+        fyr = self._force(ar, fzr, p.pacejka_b_rear, p.pacejka_c_rear,
+                          p.pacejka_d_rear, p.pacejka_e_rear)
+        ay = (fyf*math.cos(steering)+fyr)/p.mass
+        return ay-vx*yaw_rate, (p.l_f*fyf*math.cos(steering)-p.l_r*fyr)/p.yaw_inertia, ay
+
     def update(self, measured_vx, steering_angle, measured_yaw_rate,
-               measured_lateral_accel):
+               measured_lateral_accel, measured_pose_vy=math.nan):
         p = self.p
         abs_vx = abs(measured_vx) if math.isfinite(measured_vx) else 0.0
         yaw_ok, ay_ok = math.isfinite(measured_yaw_rate), math.isfinite(measured_lateral_accel)
@@ -76,50 +115,42 @@ class LateralVelocityKF:
             return self.vy
 
         vx = max(abs_vx, p.min_longitudinal_speed)
-        cf, cr, m, iz, lf, lr = (p.cornering_stiffness_front,
-                                  p.cornering_stiffness_rear, p.mass,
-                                  p.yaw_inertia, p.l_f, p.l_r)
-        iv = 1.0 / vx
-        a00 = -(cf + cr) * iv / m
-        a01 = -(vx + (lf * cf - lr * cr) * iv / m)
-        a10 = -(lf * cf - lr * cr) * iv / iz
-        a11 = -(lf * lf * cf + lr * lr * cr) * iv / iz
-        ad00, ad01 = 1 + p.dt*a00, p.dt*a01
-        ad10, ad11 = p.dt*a10, 1 + p.dt*a11
         vy0, w0 = self.vy, self.yaw_rate
-        linear_vy_prediction = ad00*vy0 + ad01*w0 + p.dt*cf/m*steering_angle
-        self.yaw_rate = ad10*vy0 + ad11*w0 + p.dt*lf*cf/iz*steering_angle
-        signed_ay = p.imu_lateral_accel_sign*measured_lateral_accel if ay_ok else 0.0
-        dvy_measurement = signed_ay-abs_vx*w0
-        nonlinear_gate = (float(np.clip((abs(dvy_measurement)-p.nonlinear_dvy_threshold) /
-                          max(p.nonlinear_dvy_width, 1e-4), 0.0, 1.0)) if ay_ok else 0.0)
-        blend = nonlinear_gate*float(np.clip(p.nonlinear_inertial_blend, 0.0, 1.0))
-        inertial_vy_prediction = vy0+p.dt*dvy_measurement
-        self.vy = (1.0-blend)*linear_vy_prediction+blend*inertial_vy_prediction
+        dvy, rdot, model_ay = self._dynamics(vx, steering_angle, vy0, w0)
+        pacejka_vy_prediction = vy0+p.dt*dvy
+        self.yaw_rate = w0+p.dt*rdot
+        eps = 1e-3
+        dvy_v, rdot_v, _ = self._dynamics(vx, steering_angle, vy0+eps, w0)
+        dvy_r, rdot_r, _ = self._dynamics(vx, steering_angle, vy0, w0+eps)
+        ad00, ad01 = 1+p.dt*(dvy_v-dvy)/eps, p.dt*(dvy_r-dvy)/eps
+        ad10, ad11 = p.dt*(rdot_v-rdot)/eps, 1+p.dt*(rdot_r-rdot)/eps
+        self.vy = pacejka_vy_prediction
 
         ap00, ap01 = ad00*self.p00 + ad01*self.p10, ad00*self.p01 + ad01*self.p11
         ap10, ap11 = ad10*self.p00 + ad11*self.p10, ad10*self.p01 + ad11*self.p11
-        process_scale = 1.0+nonlinear_gate*max(p.nonlinear_process_noise_scale-1.0, 0.0)
-        pp00 = ap00*ad00 + ap01*ad01 + p.process_var_vy*process_scale
+        pp00 = ap00*ad00 + ap01*ad01 + p.process_var_vy
         pp01 = ap00*ad10 + ap01*ad11
         pp10 = ap10*ad00 + ap11*ad01
         pp11 = ap10*ad10 + ap11*ad11 + p.process_var_yaw_rate
         if not (yaw_ok and ay_ok):
-            self._covariance(pp00, pp01, pp10, pp11); self._clamp(); return self.vy
+            self._covariance(pp00, pp01, pp10, pp11)
+            self._update_pose_vy(measured_pose_vy); self._clamp(); return self.vy
 
-        h00 = -(cf + cr)*iv/m
-        h01 = (-lf*cf + lr*cr)*iv/m
-        r0 = p.imu_lateral_accel_sign*measured_lateral_accel - (h00*self.vy + h01*self.yaw_rate + cf/m*steering_angle)
+        _, _, predicted_ay = self._dynamics(vx, steering_angle, self.vy, self.yaw_rate)
+        _, _, ay_v = self._dynamics(vx, steering_angle, self.vy+eps, self.yaw_rate)
+        _, _, ay_r = self._dynamics(vx, steering_angle, self.vy, self.yaw_rate+eps)
+        h00, h01 = (ay_v-predicted_ay)/eps, (ay_r-predicted_ay)/eps
+        r0 = p.imu_lateral_accel_sign*measured_lateral_accel - (predicted_ay+self.ay_bias)
         r1 = measured_yaw_rate - self.yaw_rate
         hp00, hp01 = h00*pp00 + h01*pp10, h00*pp01 + h01*pp11
-        ay_noise_scale = 1.0+nonlinear_gate*max(p.nonlinear_ay_noise_scale-1.0, 0.0)
-        s00 = hp00*h00 + hp01*h01 + p.measurement_var_lateral_accel*ay_noise_scale
+        s00 = hp00*h00 + hp01*h01 + p.measurement_var_lateral_accel
         s01 = hp01
         s10 = pp10*h00 + pp11*h01
         s11 = pp11 + p.measurement_var_yaw_rate
         det = s00*s11 - s01*s10
         if not math.isfinite(det) or abs(det) < 1e-10:
-            self._covariance(pp00, pp01, pp10, pp11); self._clamp(); return self.vy
+            self._covariance(pp00, pp01, pp10, pp11)
+            self._update_pose_vy(measured_pose_vy); self._clamp(); return self.vy
         si00, si01, si10, si11 = s11/det, -s01/det, -s10/det, s00/det
         ph00, ph01 = pp00*h00 + pp01*h01, pp01
         ph10, ph11 = pp10*h00 + pp11*h01, pp11
@@ -131,6 +162,12 @@ class LateralVelocityKF:
         ikh10, ikh11 = -k10*h00, 1-k10*h01-k11
         self._covariance(ikh00*pp00+ikh01*pp10, ikh00*pp01+ikh01*pp11,
                          ikh10*pp00+ikh11*pp10, ikh10*pp01+ikh11*pp11)
+        self.p_bias += max(p.process_var_ay_bias, 0.0)
+        bias_gain = self.p_bias / (self.p_bias + p.measurement_var_lateral_accel)
+        self.ay_bias = float(np.clip(self.ay_bias+bias_gain*r0,
+                                    -p.max_abs_ay_bias, p.max_abs_ay_bias))
+        self.p_bias = max((1.0-bias_gain)*self.p_bias, 1e-8)
+        self._update_pose_vy(measured_pose_vy)
         self._clamp()
         return self.vy
 
@@ -140,7 +177,8 @@ class LateralVelocityKF:
 
 def estimate_dataset(samples, columns, dt, params=None, steer_scale=1.1058064699,
                      steer_bias=-0.0300696939, max_steer=0.4788,
-                     imu_ema_alpha=0.25, imu_wz_sign=1.0, imu_ay_sign=1.0):
+                     imu_ema_alpha=0.25, imu_wz_sign=1.0, imu_ay_sign=1.0,
+                     use_pose_vy=False, pose_window_s=0.12):
     """Estimate causally and reset KF/IMU EMA at every data discontinuity."""
     names = {str(name): i for i, name in enumerate(columns)}
     required = ("t", "vx", "steer", "bag_id", "imu_wz", "imu_ay")
@@ -153,6 +191,7 @@ def estimate_dataset(samples, columns, dt, params=None, steer_scale=1.1058064699
     vy = np.zeros(len(samples)); yaw_rate = np.zeros(len(samples))
     previous_bag, previous_t = None, None
     filtered_wz = filtered_ay = 0.0
+    pose_history = []
     for i, row in enumerate(samples):
         bag, stamp = int(row[names["bag_id"]]), row[names["t"]]
         wz = imu_wz_sign * row[names["imu_wz"]]
@@ -162,12 +201,25 @@ def estimate_dataset(samples, columns, dt, params=None, steer_scale=1.1058064699
         if reset:
             filtered_wz, filtered_ay = wz, ay
             kf.reset(filtered_wz)
+            pose_history = []
         else:
             alpha = float(np.clip(imu_ema_alpha, 0.0, 1.0))
             filtered_wz = alpha*wz + (1.0-alpha)*filtered_wz
             filtered_ay = alpha*ay + (1.0-alpha)*filtered_ay
         delta = np.clip(steer_scale*row[names["steer"]] + steer_bias, -max_steer, max_steer)
-        vy[i] = kf.update(row[names["vx"]], delta, filtered_wz, filtered_ay)
+        pose_vy = math.nan
+        if use_pose_vy and all(name in names for name in ("x", "y", "yaw")):
+            pose_history.append((float(stamp),float(row[names["x"]]),float(row[names["y"]])))
+            while len(pose_history)>2 and stamp-pose_history[0][0]>pose_window_s:
+                pose_history.pop(0)
+            if len(pose_history)>=3:
+                ph=np.asarray(pose_history,float); tt=ph[:,0]-ph[:,0].mean(); denom=float(tt@tt)
+                if denom>1e-8:
+                    world_vx=float(tt@(ph[:,1]-ph[:,1].mean())/denom)
+                    world_vy=float(tt@(ph[:,2]-ph[:,2].mean())/denom)
+                    yaw=float(row[names["yaw"]])
+                    pose_vy=-math.sin(yaw)*world_vx+math.cos(yaw)*world_vy
+        vy[i] = kf.update(row[names["vx"]], delta, filtered_wz, filtered_ay, pose_vy)
         yaw_rate[i] = kf.get_yaw_rate()
         previous_bag, previous_t = bag, stamp
     return vy, yaw_rate

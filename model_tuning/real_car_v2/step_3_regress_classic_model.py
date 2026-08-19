@@ -85,7 +85,7 @@ def rollout_numpy(parameters, data, window_starts, config):
             float(config["actuator_max_speed_reference_rate"]))*dt
         vx, vy, yaw_rate = state.T
         ax = np.clip(float(config["speed_servo_kp"])
-                     *(speed_reference-np.hypot(vx, vy)),
+                     *(speed_reference-vx),
                      float(config["min_accel"]), float(config["max_accel"]))
         safe_vx = np.maximum(np.abs(vx), .5)
         alpha_front = applied_steer-np.arctan2(vy+lf*yaw_rate, safe_vx)
@@ -221,7 +221,7 @@ def torch_rollout_loss(raw_parameters, data, window_starts, config, device):
             -float(config["actuator_max_speed_reference_rate"]),
             float(config["actuator_max_speed_reference_rate"]))*dt
         vx,vy,yaw_rate=state.unbind(1)
-        ax=torch.clamp(float(config["speed_servo_kp"])*(speed_reference-torch.hypot(vx,vy)),
+        ax=torch.clamp(float(config["speed_servo_kp"])*(speed_reference-vx),
                        float(config["min_accel"]),float(config["max_accel"]))
         safe=torch.clamp(torch.abs(vx),min=.5)
         af=applied-torch.atan2(vy+lf*yaw_rate,safe); ar=-torch.atan2(vy-lr*yaw_rate,safe)

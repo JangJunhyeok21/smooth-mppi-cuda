@@ -1,22 +1,9 @@
 /**:
   ros__parameters:
-    # Recommended split models:
-    #   kinematic_noslip_noimu_direct_speed : no IMU/KF, /drive.speed setpoint
-    #   slip_kinematic_with_imu_direct_speed: IMU/KF supplies vy; signed IMU supplies yaw-rate
-    #   dynamic_imu_recursive        : IMU initializes ax/ay; future ax/ay are recursively predicted
-    # kinematic_residual은 아래 binary GRU checkpoint를 CUDA rollout 안에서 실행한다.
-    # Keep the controller rollout identical to the simulator plant. The MLP
-    # residual produced a persistent yaw-rate bias in closed-loop simulation.
+    # 사용 모델: dynamic_mlp_residual_servo_lag 또는 dynamic_residual_servo_lag
+    # MLP 모델만 아래 학습 가중치를 읽고, Classic 모델은 이 파일을 읽지 않는다.
     dynamics_model: dynamic_mlp_residual_servo_lag
-    residual_weights_path: config/kinematic_residual_gru.bin
-    kinematic_noslip_noimu_weights_path: config/ifac0807_strict_noslip_noimu_16d.bin
-    slip_kinematic_with_imu_weights_path: config/slip_kinmatic_MLP.bin
-    dynamic_imu_weights_path: config/ifac2026_dynamic_imu_recursive.bin
-    dynamic_mlp_weights_path: config/dynamic_MLP_ackermann_previous_steer.bin
     dynamic_mlp_servo_lag_weights_path: /home/a/smooth-mppi-cuda/config/dynamic_40ms_residual_servo_lag.bin
-    dynamic_mlp_vx_delta_weights_path: /home/a/smooth-mppi-cuda/config/dynamic_40ms_vx_delta_history_24d.bin
-    effective_history_weights_path: config/effective_history_state_residual.bin
-    e2e_weights_path: config/E2E.bin
     # IMU is causally aligned to odometry and is also used by the 2-state vy KF.
     imu_topic: /imu/data
     imu_sync_max_age_s: 0.05
@@ -95,7 +82,7 @@
     weighted_trajectory_safety_enabled: true
     q_progress: 85.0        # simulation lap-time tuning
     q_escape_vel: 28.0      # horizon 말단의 전진속도 보상
-    horizon_steps: 60       # model_dt=0.04 s 기준 2.4 s prediction horizon
+    horizon_steps: 80       # model_dt=0.04 s 기준 3.2 s prediction horizon
     # --- Obstacle Avoidance Params ---
     obstacle_avoidance_enabled: true
     # Simulation supplies one opponent as global odometry. Real-car perception
@@ -129,7 +116,7 @@
     max_accel_rate: 4.0
     lambda: 20.0
     num_samples: 3200        # desktop simulation: ~4 ms measured
-    visualize_candidates: true
+    visualize_candidates: false  # K*T state D2H 복사를 막아 horizon 80 solve 시간 절감
     # Slack-zero left/right boundary markers are separate from rollout markers.
     boundary_visualization_topic: /mppi_boundary_viz
     control_rate_hz: 50.0    # 20 ms timer; MPPI 계산도 이 주기보다 짧아야 함
@@ -190,14 +177,14 @@
     E_r: 0.0597
 
     # 0807 dynamic regression; used only by dynamic_mlp_residual.
-    dynamic_mlp_B_f: 2.7127948745693855
-    dynamic_mlp_C_f: 0.5000000000082053
-    dynamic_mlp_D_f: 1.0327432935487206
-    dynamic_mlp_E_f: 0.44678229194145397
-    dynamic_mlp_B_r: 0.24164362527162414
-    dynamic_mlp_C_r: 1.409468536674415
-    dynamic_mlp_D_r: 3.4899527865879763
-    dynamic_mlp_E_r: -0.999999999999992
+    dynamic_mlp_B_f: 9.12282176301589
+    dynamic_mlp_C_f: 0.5002347803506063
+    dynamic_mlp_D_f: 0.6650224707259669
+    dynamic_mlp_E_f: 0.6615091317133239
+    dynamic_mlp_B_r: 4.206913984108843
+    dynamic_mlp_C_r: 0.752008642861947
+    dynamic_mlp_D_r: 0.527046479337352
+    dynamic_mlp_E_r: -0.9977396148257512
     dynamic_mlp_I_z: 0.04712
     dynamic_mlp_min_speed: 0.8 # runtime low-speed kinematic yaw fallback / residual gate
 

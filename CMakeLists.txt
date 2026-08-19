@@ -80,6 +80,12 @@ target_include_directories(effective_history_parity PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
 target_link_libraries(effective_history_parity smppi_lib ${CUDA_LIBRARIES})
 
+add_executable(mppi_horizon80_benchmark
+  model_tuning/real_car_v2/benchmark_mppi_horizon80.cu)
+target_include_directories(mppi_horizon80_benchmark PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
+target_link_libraries(mppi_horizon80_benchmark smppi_lib ${CUDA_LIBRARIES})
+
 target_compile_options(smppi_node PRIVATE
   $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CXX_COMPILER_ID:Clang>>:-Xcompiler=-Wno-gnu-line-directive>
 )
@@ -134,6 +140,7 @@ ament_target_dependencies(path_publisher
 )
 
 install(TARGETS smppi_node path_publisher mppi_step_parity effective_history_parity
+  mppi_horizon80_benchmark
   RUNTIME DESTINATION lib/${PROJECT_NAME})
 install(TARGETS smppi_lib
   ARCHIVE DESTINATION lib

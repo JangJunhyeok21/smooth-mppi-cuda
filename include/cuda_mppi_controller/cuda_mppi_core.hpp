@@ -43,6 +43,7 @@ enum DynamicsModel : int {
     DYNAMIC_MLP_RESIDUAL_SERVO_LAG = 9,
     EFFECTIVE_HISTORY_STATE_RESIDUAL = 10,
     DYNAMIC_MLP_RESIDUAL_SERVO_LAG_VX_DELTA_24D = 11,
+    DYNAMIC_RESIDUAL_SERVO_LAG = 12,
 };
 
 struct alignas(16) ButterworthCoeffs {
@@ -133,6 +134,7 @@ struct Params {
     float sudden_obstacle_cost_multiplier;
     float q_obs;
     bool sudden_obstacle_replan;
+    bool rollout_obstacle_ahead;
 
     // Noise & Tuning
     float noise_steer_std;
@@ -279,6 +281,7 @@ private:
     State* d_weighted_states_;
     Control* d_weighted_controls_;
     float* d_costs_;         
+    float* d_weights_;
     float* d_residual_history_;
     float* d_residual_hidden_;
     

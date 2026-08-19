@@ -36,28 +36,8 @@ public:
         }
 
         solver_ = std::make_unique<mppi::MPPISolver>(num_samples_, horizon_steps_, mppi_params_);
-        if (mppi_params_.dynamics_model == mppi::KINEMATIC_RESIDUAL)
-            solver_->load_residual_weights(residual_weights_path_);
-        if (mppi_params_.dynamics_model == mppi::KINEMATIC_MLP_RESIDUAL)
-            solver_->load_mlp_residual_weights(mlp_weights_path_);
-        if (mppi_params_.dynamics_model == mppi::KINEMATIC_MLP_NO_IMU_RESIDUAL)
-            solver_->load_mlp_no_imu_residual_weights(mlp_weights_path_);
-        if (mppi_params_.dynamics_model == mppi::KINEMATIC_NOSLIP_NO_IMU_DIRECT_SPEED)
-            solver_->load_kinematic_noslip_noimu_direct_weights(kinematic_noslip_noimu_weights_path_);
-        if (mppi_params_.dynamics_model == mppi::SLIP_KINEMATIC_WITH_IMU_DIRECT_SPEED)
-            solver_->load_slip_kinematic_with_imu_direct_weights(slip_kinematic_with_imu_weights_path_);
-        if (mppi_params_.dynamics_model == mppi::DYNAMIC_IMU_RECURSIVE)
-            solver_->load_dynamic_imu_recursive_weights(
-                dynamics_model_name_ == "e2e_mlp" ? e2e_weights_path_ : dynamic_imu_weights_path_);
-        if (mppi_params_.dynamics_model == mppi::DYNAMIC_MLP_RESIDUAL ||
-            mppi_params_.dynamics_model == mppi::DYNAMIC_MLP_RESIDUAL_SERVO_LAG)
-            solver_->load_dynamic_mlp_residual_weights(
-                mppi_params_.dynamics_model == mppi::DYNAMIC_MLP_RESIDUAL
-                    ? dynamic_mlp_weights_path_ : dynamic_mlp_servo_lag_weights_path_);
-        if (mppi_params_.dynamics_model == mppi::DYNAMIC_MLP_RESIDUAL_SERVO_LAG_VX_DELTA_24D)
-            solver_->load_dynamic_mlp_vx_delta_residual_weights(dynamic_mlp_vx_delta_weights_path_);
-        if (mppi_params_.dynamics_model == mppi::EFFECTIVE_HISTORY_STATE_RESIDUAL)
-            solver_->load_effective_history_state_residual_weights(effective_history_weights_path_);
+        if (mppi_params_.dynamics_model == mppi::DYNAMIC_MLP_RESIDUAL_SERVO_LAG)
+            solver_->load_dynamic_mlp_residual_weights(dynamic_mlp_servo_lag_weights_path_);
 
         load_track_csv();
 
@@ -108,13 +88,8 @@ public:
         }
         // The no-IMU rollout neither subscribes to nor waits for IMU.  Keep the
         // subscription only for the legacy 21-feature MLP checkpoint.
-        if (mppi_params_.dynamics_model == mppi::KINEMATIC_MLP_RESIDUAL ||
-            mppi_params_.dynamics_model == mppi::SLIP_KINEMATIC_WITH_IMU_DIRECT_SPEED ||
-            mppi_params_.dynamics_model == mppi::DYNAMIC_IMU_RECURSIVE ||
-            mppi_params_.dynamics_model == mppi::DYNAMIC_MLP_RESIDUAL ||
-            mppi_params_.dynamics_model == mppi::DYNAMIC_MLP_RESIDUAL_SERVO_LAG ||
-            mppi_params_.dynamics_model == mppi::DYNAMIC_MLP_RESIDUAL_SERVO_LAG_VX_DELTA_24D ||
-            mppi_params_.dynamics_model == mppi::EFFECTIVE_HISTORY_STATE_RESIDUAL) {
+        if (mppi_params_.dynamics_model == mppi::DYNAMIC_MLP_RESIDUAL_SERVO_LAG ||
+            mppi_params_.dynamics_model == mppi::DYNAMIC_RESIDUAL_SERVO_LAG) {
             imu_sub_ = this->create_subscription<sensor_msgs::msg::Imu>(
                 imu_topic_, 20, std::bind(&MPPINode::imu_callback,this,std::placeholders::_1));
         }
@@ -220,30 +195,12 @@ private:
     }
 
     void cache_fixed_model_properties() {
-        const int model = mppi_params_.dynamics_model;
-        is_kinematic_residual_model_ = model == mppi::KINEMATIC_RESIDUAL;
-        uses_legacy_mlp_imu_ = model == mppi::KINEMATIC_MLP_RESIDUAL;
-        direct_speed_model_ =
-            model == mppi::KINEMATIC_NOSLIP_NO_IMU_DIRECT_SPEED ||
-            model == mppi::SLIP_KINEMATIC_WITH_IMU_DIRECT_SPEED ||
-            model == mppi::DYNAMIC_IMU_RECURSIVE ||
-            model == mppi::DYNAMIC_MLP_RESIDUAL ||
-            model == mppi::DYNAMIC_MLP_RESIDUAL_SERVO_LAG ||
-            model == mppi::DYNAMIC_MLP_RESIDUAL_SERVO_LAG_VX_DELTA_24D ||
-            model == mppi::EFFECTIVE_HISTORY_STATE_RESIDUAL;
-        uses_command_history_ = uses_legacy_mlp_imu_ || direct_speed_model_ ||
-            model == mppi::KINEMATIC_MLP_NO_IMU_RESIDUAL;
-        uses_actuator_state_ =
-            model == mppi::SLIP_KINEMATIC_WITH_IMU_DIRECT_SPEED ||
-            model == mppi::DYNAMIC_MLP_RESIDUAL_SERVO_LAG ||
-            model == mppi::DYNAMIC_MLP_RESIDUAL_SERVO_LAG_VX_DELTA_24D;
-        uses_lateral_velocity_kf_ =
-            model == mppi::SLIP_KINEMATIC_WITH_IMU_DIRECT_SPEED ||
-            model == mppi::DYNAMIC_IMU_RECURSIVE ||
-            model == mppi::DYNAMIC_MLP_RESIDUAL ||
-            model == mppi::DYNAMIC_MLP_RESIDUAL_SERVO_LAG ||
-            model == mppi::DYNAMIC_MLP_RESIDUAL_SERVO_LAG_VX_DELTA_24D ||
-            model == mppi::EFFECTIVE_HISTORY_STATE_RESIDUAL;
+        is_kinematic_residual_model_ = false;
+        uses_legacy_mlp_imu_ = false;
+        direct_speed_model_ = true;
+        uses_command_history_ = true;
+        uses_actuator_state_ = true;
+        uses_lateral_velocity_kf_ = true;
         wheelbase_ = mppi_params_.l_f + mppi_params_.l_r;
         direct_speed_step_ = mppi_params_.max_accel_rate * mppi_params_.dt;
     }
@@ -549,54 +506,14 @@ private:
     }
 
     void load_parameters() {
-        this->declare_parameter("dynamics_model", "legacy_hybrid");
+        this->declare_parameter("dynamics_model", "dynamic_mlp_residual_servo_lag");
         dynamics_model_name_ = this->get_parameter("dynamics_model").as_string();
-        this->declare_parameter("residual_weights_path", "/home/a/smooth-mppi-cuda/config/kinematic_residual_gru.bin");
-        residual_weights_path_ = this->get_parameter("residual_weights_path").as_string();
-        this->declare_parameter("mlp_weights_path", "/home/a/smooth-mppi-cuda/config/kinematic_mlp_residual.bin");
-        mlp_weights_path_=this->get_parameter("mlp_weights_path").as_string();
-        this->declare_parameter("kinematic_noslip_noimu_weights_path", "/home/a/smooth-mppi-cuda/config/kinematic_noslip_noimu_direct_speed.bin");
-        kinematic_noslip_noimu_weights_path_=this->get_parameter("kinematic_noslip_noimu_weights_path").as_string();
-        this->declare_parameter("slip_kinematic_with_imu_weights_path", "/home/a/smooth-mppi-cuda/config/slip_kinematic_with_imu_direct_speed.bin");
-        slip_kinematic_with_imu_weights_path_=this->get_parameter("slip_kinematic_with_imu_weights_path").as_string();
-        this->declare_parameter("dynamic_imu_weights_path", "/home/a/smooth-mppi-cuda/config/dynamic_imu_recursive.bin");
-        dynamic_imu_weights_path_=this->get_parameter("dynamic_imu_weights_path").as_string();
-        this->declare_parameter("dynamic_mlp_weights_path", "/home/a/smooth-mppi-cuda/config/dynamic_MLP.bin");
-        dynamic_mlp_weights_path_=this->get_parameter("dynamic_mlp_weights_path").as_string();
-        this->declare_parameter("dynamic_mlp_servo_lag_weights_path", "/home/a/smooth-mppi-cuda/config/dynamic_MLP_all_drive_fixed_iz.bin");
+        this->declare_parameter("dynamic_mlp_servo_lag_weights_path", "/home/a/smooth-mppi-cuda/config/dynamic_40ms_residual_servo_lag.bin");
         dynamic_mlp_servo_lag_weights_path_=this->get_parameter("dynamic_mlp_servo_lag_weights_path").as_string();
-        this->declare_parameter("dynamic_mlp_vx_delta_weights_path", "/home/a/smooth-mppi-cuda/config/dynamic_40ms_vx_delta_history_24d.bin");
-        dynamic_mlp_vx_delta_weights_path_=this->get_parameter("dynamic_mlp_vx_delta_weights_path").as_string();
-        this->declare_parameter("e2e_weights_path", "/home/a/smooth-mppi-cuda/config/E2E.bin");
-        e2e_weights_path_=this->get_parameter("e2e_weights_path").as_string();
-        this->declare_parameter("effective_history_weights_path", "/home/a/smooth-mppi-cuda/model_tuning/results/effective_history_recursive_correct_history_seed31/effective_history_state_residual.bin");
-        effective_history_weights_path_=this->get_parameter("effective_history_weights_path").as_string();
-        if (dynamics_model_name_ == "legacy_hybrid") {
-            mppi_params_.dynamics_model = mppi::LEGACY_HYBRID;
-        } else if (dynamics_model_name_ == "kinematic") {
-            mppi_params_.dynamics_model = mppi::KINEMATIC;
-        } else if (dynamics_model_name_ == "kinematic_residual") {
-            mppi_params_.dynamics_model = mppi::KINEMATIC_RESIDUAL;
-        } else if (dynamics_model_name_ == "kinematic_mlp_residual") {
-            mppi_params_.dynamics_model = mppi::KINEMATIC_MLP_RESIDUAL;
-        } else if (dynamics_model_name_ == "kinematic_mlp_no_imu_residual") {
-            mppi_params_.dynamics_model = mppi::KINEMATIC_MLP_NO_IMU_RESIDUAL;
-        } else if (dynamics_model_name_ == "kinematic_noslip_noimu_direct_speed") {
-            mppi_params_.dynamics_model = mppi::KINEMATIC_NOSLIP_NO_IMU_DIRECT_SPEED;
-        } else if (dynamics_model_name_ == "slip_kinematic_with_imu_direct_speed") {
-            mppi_params_.dynamics_model = mppi::SLIP_KINEMATIC_WITH_IMU_DIRECT_SPEED;
-        } else if (dynamics_model_name_ == "dynamic_imu_recursive") {
-            mppi_params_.dynamics_model = mppi::DYNAMIC_IMU_RECURSIVE;
-        } else if (dynamics_model_name_ == "e2e_mlp") {
-            mppi_params_.dynamics_model = mppi::DYNAMIC_IMU_RECURSIVE;
-        } else if (dynamics_model_name_ == "dynamic_mlp_residual") {
-            mppi_params_.dynamics_model = mppi::DYNAMIC_MLP_RESIDUAL;
-        } else if (dynamics_model_name_ == "dynamic_mlp_residual_servo_lag") {
+        if (dynamics_model_name_ == "dynamic_mlp_residual_servo_lag") {
             mppi_params_.dynamics_model = mppi::DYNAMIC_MLP_RESIDUAL_SERVO_LAG;
-        } else if (dynamics_model_name_ == "dynamic_mlp_residual_servo_lag_vx_delta_24d") {
-            mppi_params_.dynamics_model = mppi::DYNAMIC_MLP_RESIDUAL_SERVO_LAG_VX_DELTA_24D;
-        } else if (dynamics_model_name_ == "effective_history_state_residual") {
-            mppi_params_.dynamics_model = mppi::EFFECTIVE_HISTORY_STATE_RESIDUAL;
+        } else if (dynamics_model_name_ == "dynamic_residual_servo_lag") {
+            mppi_params_.dynamics_model = mppi::DYNAMIC_RESIDUAL_SERVO_LAG;
         } else {
             throw std::invalid_argument("Unknown dynamics_model: " + dynamics_model_name_);
         }
@@ -830,20 +747,10 @@ private:
             mppi_params_.q_boundary_terminal_slack = 0.0f;
         if (mppi_params_.dynamic_mlp_min_speed < 0.0f)
             mppi_params_.dynamic_mlp_min_speed = 0.0f;
-        if(mppi_params_.dynamics_model==mppi::EFFECTIVE_HISTORY_STATE_RESIDUAL &&
-           (std::abs(mppi_params_.control_dt-.02f)>1e-6f || std::abs(mppi_params_.model_dt-.04f)>1e-6f))
-            throw std::invalid_argument("effective_history_state_residual requires control_dt=0.02 and model_dt=0.04");
         if((mppi_params_.dynamics_model==mppi::DYNAMIC_MLP_RESIDUAL_SERVO_LAG ||
-            mppi_params_.dynamics_model==mppi::DYNAMIC_MLP_RESIDUAL_SERVO_LAG_VX_DELTA_24D) &&
+            mppi_params_.dynamics_model==mppi::DYNAMIC_RESIDUAL_SERVO_LAG) &&
            (std::abs(mppi_params_.control_dt-.02f)>1e-6f || std::abs(mppi_params_.model_dt-.04f)>1e-6f))
-            throw std::invalid_argument("dynamic_mlp_residual_servo_lag requires control_dt=0.02 and model_dt=0.04");
-        if(mppi_params_.dynamics_model==mppi::EFFECTIVE_HISTORY_STATE_RESIDUAL &&
-           (mppi_params_.effective_yaw_response_tau<=0.f ||
-            mppi_params_.effective_max_yaw_accel<=0.f ||
-            mppi_params_.effective_speed_response_gain<=0.f ||
-            mppi_params_.effective_max_accel<=0.f ||
-            mppi_params_.effective_vy_decay_tau<=0.f))
-            throw std::invalid_argument("effective_history_state_residual effective response parameters must be positive");
+            throw std::invalid_argument("servo-lag models require control_dt=0.02 and model_dt=0.04");
     }
 
     bool path_received_{false}, left_bnd_received_{false}, right_bnd_received_{false};
@@ -1346,11 +1253,11 @@ private:
 
     std::string simulation_odom_topic_, simulation_drive_topic_;
     std::string real_pose_topic_, real_odom_topic_, real_drive_topic_;
-    std::string selected_drive_topic_, csv_file_path_, imu_topic_, dynamics_model_name_, residual_weights_path_,mlp_weights_path_;
+    std::string selected_drive_topic_, csv_file_path_, imu_topic_, dynamics_model_name_;
     std::string boundary_visualization_topic_;
     std::string simulation_obstacle_odom_topic_;
     std::string real_perception_obstacles_topic_, real_perception_obstacles_frame_;
-    std::string kinematic_noslip_noimu_weights_path_,slip_kinematic_with_imu_weights_path_,dynamic_imu_weights_path_,dynamic_mlp_weights_path_,dynamic_mlp_servo_lag_weights_path_,dynamic_mlp_vx_delta_weights_path_,e2e_weights_path_,effective_history_weights_path_;
+    std::string dynamic_mlp_servo_lag_weights_path_;
     mppi::LateralVelocityKF lateral_velocity_kf_;
     mppi::LateralVelocityKFParams lateral_velocity_kf_params_;
     float kf_steer_scale_{1.1058064699f},kf_steer_bias_{-0.0300696939f},kf_max_steer_{0.4788f};

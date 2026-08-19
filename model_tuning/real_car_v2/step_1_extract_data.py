@@ -37,10 +37,10 @@ BAG_PATH = sorted({metadata.parent for root in NEW_DATA_ROOTS
                    for metadata in root.rglob("metadata.yaml")})
 OUTPUT_PATH = PROJECT_ROOT / "model_tuning/data/ifac0810_0819_autonomous_physics_clean"
 USE_PLOT = False
-# The sensor/body convention changed on 2026-08-17. Before that date IMU y/z
-# oppose MPPI FLU; from 0817 onward all axes already match MPPI.
+# Bag-to-pose verification shows that the sensor/body convention changed by
+# 2026-08-15. 0810--0813 y/z oppose MPPI FLU; 0815 onward already match it.
 IMU_WZ_SIGN = 1.0; IMU_AX_SIGN = 1.0; IMU_AY_SIGN = 1.0; IMU_EMA_ALPHA = .25
-IMU_SIGN_CUTOVER = dtlib.date(2026, 8, 17)
+IMU_SIGN_CUTOVER = dtlib.date(2026, 8, 15)
 # Match the current runtime observer in config/params.yaml.
 KF_LOW_SPEED_THRESHOLD = 0.5
 KF_STEER_SCALE = 1.1058064699; KF_STEER_BIAS = -0.0300696939; KF_MAX_STEER = .4788
@@ -289,7 +289,7 @@ def extract_one(storage, out, args):
                         kf_low_speed_threshold=np.array(KF_LOW_SPEED_THRESHOLD,np.float32))
     meta={"source":str(storage.resolve()),"pose_topic":args.pose_topic,"velocity_topic":args.velocity_topic,
           "command_topic":args.command_topic,"imu_topic":args.imu_topic,"alignment":"causal_hold",
-          "recording_date":date.isoformat(),"imu_sign_cutover":"2026-08-17",
+          "recording_date":date.isoformat(),"imu_sign_cutover":IMU_SIGN_CUTOVER.isoformat(),
           "imu_axis_signs":{"wz":signs[0],"ax":signs[1],"ay":signs[2]},
           "imu_ema_alpha":IMU_EMA_ALPHA,
           "kf_parameters":{"low_speed_threshold":KF_LOW_SPEED_THRESHOLD,"steer_scale":KF_STEER_SCALE,

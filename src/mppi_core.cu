@@ -239,6 +239,7 @@ namespace mppi
 
     __host__ __device__ inline bool uses_40ms_rollout_knot(int dynamics_model) {
         return dynamics_model == DYNAMIC_MLP_RESIDUAL_SERVO_LAG ||
+               dynamics_model == DYNAMIC_RESIDUAL_SERVO_LAG ||
                dynamics_model == DYNAMIC_MLP_RESIDUAL_SERVO_LAG_VX_DELTA_24D ||
                dynamics_model == EFFECTIVE_HISTORY_STATE_RESIDUAL;
     }
@@ -395,7 +396,8 @@ namespace mppi
         const Params &params,
         float *command_history,
         bool use_servo_lag,
-        float *vx_history = nullptr)
+        float *vx_history = nullptr,
+        bool apply_residual = true)
     {
         constexpr float MAX_STEERING_ANGLE = 0.55f;
         constexpr float MIN_DYNAMIC_SPEED = 0.5f;
@@ -534,7 +536,11 @@ namespace mppi
 
         // MLP outputs residual derivatives [delta_ax, delta_ay, delta_yaw_accel].
         float residual_derivatives[3];
-        if (vx_history != nullptr) {
+        if (!apply_residual) {
+            residual_derivatives[0]=0.0f;
+            residual_derivatives[1]=0.0f;
+            residual_derivatives[2]=0.0f;
+        } else if (vx_history != nullptr) {
             float features_24d[24];
             for (int i=0;i<20;++i) features_24d[i]=mlp_features[i];
             for (int i=0;i<4;++i) features_24d[20+i]=vx_history[i+1]-vx_history[i];
@@ -1002,13 +1008,14 @@ namespace mppi
         if (idx < K * T) curand_init(seed, idx, 0, &states[idx]);
     }
 
+    template <bool APPLY_RESIDUAL>
     __global__ void rollout_kernel(
         State *states, Control *controls, float *costs, curandState *rng_states,
         const State start_state, const Control *prev_controls, const Params p,
         const float *ref_xs, const float *ref_ys, const float *ref_yaws, int path_len,
         const float *left_bnd_xs, const float *left_bnd_ys,
         const float *right_bnd_xs, const float *right_bnd_ys,
-        const float *residual_hidden,
+        const float *,
         int bnd_len,
         int K, int T, int start_path_idx)
     {
@@ -1025,19 +1032,7 @@ namespace mppi
         // the population completely standard and reserve only one lane per
         // side (2/16 total) for coherent lateral exploration. Do not inject a
         // forced speed reduction: speed remains an MPPI optimization result.
-        bool obstacle_ahead = false;
-        for (int obstacle_index = 0; obstacle_index < p.num_obstacles; ++obstacle_index) {
-            const float obstacle_dx = p.obs_x[obstacle_index] - start_state.x;
-            const float obstacle_dy = p.obs_y[obstacle_index] - start_state.y;
-            const float forward_distance = obstacle_dx * cosf(start_state.yaw)
-                                         + obstacle_dy * sinf(start_state.yaw);
-            const float distance_sq = obstacle_dx * obstacle_dx + obstacle_dy * obstacle_dy;
-            if (forward_distance > -0.25f && distance_sq < 36.0f) {
-                obstacle_ahead = true;
-                break;
-            }
-        }
-        if (obstacle_ahead) {
+        if (p.rollout_obstacle_ahead) {
             const int avoidance_lane = k & 15;
             if (p.sudden_obstacle_replan && avoidance_lane >= 4) {
                 const int magnitude_index = ((avoidance_lane-4) >> 1) % 3;
@@ -1062,22 +1057,13 @@ namespace mppi
         }
         int local_path_idx = start_path_idx;
         int initial_path_idx = start_path_idx; 
-        float gru_hidden[RESIDUAL_HIDDEN];
-        float mlp_command_history[20];
-        float mlp_vx_history[5];
-        if(p.dynamics_model==KINEMATIC_RESIDUAL)
-            for(int i=0;i<RESIDUAL_HIDDEN;++i) gru_hidden[i]=residual_hidden[i];
-        if(p.dynamics_model==EFFECTIVE_HISTORY_STATE_RESIDUAL)
-            for(int i=0;i<20;++i) mlp_command_history[i]=p.effective_command_history[i];
-        else if(p.dynamics_model==KINEMATIC_MLP_RESIDUAL || p.dynamics_model==KINEMATIC_MLP_NO_IMU_RESIDUAL ||
-           p.dynamics_model==KINEMATIC_NOSLIP_NO_IMU_DIRECT_SPEED ||
-           p.dynamics_model==SLIP_KINEMATIC_WITH_IMU_DIRECT_SPEED || p.dynamics_model==DYNAMIC_IMU_RECURSIVE ||
-           p.dynamics_model==DYNAMIC_MLP_RESIDUAL || p.dynamics_model==DYNAMIC_MLP_RESIDUAL_SERVO_LAG ||
-           p.dynamics_model==DYNAMIC_MLP_RESIDUAL_SERVO_LAG_VX_DELTA_24D)
+        // Runtime supports only the two servo-lag models. Keeping this array
+        // at its actual size avoids hundreds of bytes of unused thread-local
+        // storage from the legacy GRU/history implementations.
+        float mlp_command_history[12];
         for(int i=0;i<10;++i) mlp_command_history[i]=p.residual_command_history[i];
         mlp_command_history[10]=p.actuator_steer_state;
         mlp_command_history[11]=p.actuator_speed_reference_state;
-        for(int i=0;i<5;++i) mlp_vx_history[i]=p.residual_vx_history[i];
         
         float x_steer_prev1 = 0.0f, x_steer_prev2 = 0.0f;
         float y_steer_prev1 = 0.0f, y_steer_prev2 = 0.0f;
@@ -1115,56 +1101,23 @@ namespace mppi
             y_accel_prev2 = y_accel_prev1; y_accel_prev1 = filtered_accel;
 
             // 4. 부드러워진 노이즈에 dt를 곱해 최종 변화량 산출
-            const float knot_dt=uses_40ms_rollout_knot(p.dynamics_model)?p.model_dt:p.dt;
+            const float knot_dt=p.model_dt;
             float noise_delta_steer = filtered_steer * knot_dt;
             float noise_delta_accel = filtered_accel * knot_dt;
 
-            const bool direct_speed=(p.dynamics_model==KINEMATIC_NOSLIP_NO_IMU_DIRECT_SPEED ||
-                                     p.dynamics_model==SLIP_KINEMATIC_WITH_IMU_DIRECT_SPEED ||
-                                     p.dynamics_model==DYNAMIC_IMU_RECURSIVE || p.dynamics_model==DYNAMIC_MLP_RESIDUAL ||
-                                     p.dynamics_model==DYNAMIC_MLP_RESIDUAL_SERVO_LAG ||
-                                     p.dynamics_model==DYNAMIC_MLP_RESIDUAL_SERVO_LAG_VX_DELTA_24D ||
-                                     p.dynamics_model==EFFECTIVE_HISTORY_STATE_RESIDUAL);
             current_action.steer += fminf(fmaxf(mean_delta_steer + noise_delta_steer, -p.max_steer_rate * knot_dt), p.max_steer_rate * knot_dt);
             current_action.accel += fminf(fmaxf(mean_delta_accel + noise_delta_accel, -p.max_accel_rate * knot_dt), p.max_accel_rate * knot_dt);
 
             Control u_clamped = current_action;
             u_clamped.steer = fminf(fmaxf(u_clamped.steer, -p.max_steer), p.max_steer);
 
-            if(direct_speed) {
-                const float speed_lower_bound=fminf(p.min_speed,prev_controls[0].accel);
-                u_clamped.accel=fminf(p.max_speed,fmaxf(speed_lower_bound,u_clamped.accel));
-            }
-            else {
-                float v_next = x.v + u_clamped.accel * p.dt;
-                if (v_next >= p.max_speed && u_clamped.accel > 0.0f) u_clamped.accel = 0.0;
-                else if (v_next <= p.min_speed + 0.1f && u_clamped.accel < 0.0f) u_clamped.accel = 0.0;
-                else u_clamped.accel = fminf(fmaxf(u_clamped.accel, p.min_accel), p.max_accel);
-            }
+            const float speed_lower_bound=fminf(p.min_speed,prev_controls[0].accel);
+            u_clamped.accel=fminf(p.max_speed,fmaxf(speed_lower_bound,u_clamped.accel));
 
             current_action = u_clamped; 
 
-            if(p.dynamics_model==KINEMATIC_RESIDUAL)
-                x=update_kinematic_residual(x,u_clamped,p,gru_hidden);
-            else if(p.dynamics_model==KINEMATIC_MLP_RESIDUAL)
-                x=update_kinematic_mlp_residual(x,u_clamped,p,mlp_command_history);
-            else if(p.dynamics_model==KINEMATIC_MLP_NO_IMU_RESIDUAL)
-                x=update_kinematic_mlp_no_imu_residual(x,u_clamped,p,mlp_command_history);
-            else if(p.dynamics_model==KINEMATIC_NOSLIP_NO_IMU_DIRECT_SPEED)
-                x=update_kinematic_noslip_noimu_direct(x,u_clamped,p,mlp_command_history);
-            else if(p.dynamics_model==SLIP_KINEMATIC_WITH_IMU_DIRECT_SPEED)
-                x=update_slip_kinematic_with_imu_direct(x,u_clamped,p,mlp_command_history);
-            else if(p.dynamics_model==DYNAMIC_IMU_RECURSIVE)
-                x=update_dynamic_imu_recursive(x,u_clamped,p,mlp_command_history);
-            else if(p.dynamics_model==DYNAMIC_MLP_RESIDUAL || p.dynamics_model==DYNAMIC_MLP_RESIDUAL_SERVO_LAG ||
-                    p.dynamics_model==DYNAMIC_MLP_RESIDUAL_SERVO_LAG_VX_DELTA_24D)
-                x=update_dynamic_mlp_residual(x,u_clamped,p,mlp_command_history,
-                    p.dynamics_model!=DYNAMIC_MLP_RESIDUAL,
-                    p.dynamics_model==DYNAMIC_MLP_RESIDUAL_SERVO_LAG_VX_DELTA_24D
-                        ? mlp_vx_history : nullptr);
-            else if(p.dynamics_model==EFFECTIVE_HISTORY_STATE_RESIDUAL)
-                x=update_effective_history_state_residual(x,u_clamped,p,mlp_command_history);
-            else x=update_dynamics(x,u_clamped,p);
+            x=update_dynamic_mlp_residual(x,u_clamped,p,mlp_command_history,
+                true,nullptr,APPLY_RESIDUAL);
             apply_rollout_low_speed_vy_prior(x, p);
             states[idx] = x;
             controls[idx] = u_clamped; 
@@ -1238,6 +1191,8 @@ namespace mppi
                 x=update_slip_kinematic_with_imu_direct(x,u,p,command_history);
             else if(p.dynamics_model==DYNAMIC_IMU_RECURSIVE)
                 x=update_dynamic_imu_recursive(x,u,p,command_history);
+            else if(p.dynamics_model==DYNAMIC_RESIDUAL_SERVO_LAG)
+                x=update_dynamic_mlp_residual(x,u,p,command_history,true,nullptr,false);
             else if(p.dynamics_model==DYNAMIC_MLP_RESIDUAL || p.dynamics_model==DYNAMIC_MLP_RESIDUAL_SERVO_LAG ||
                     p.dynamics_model==DYNAMIC_MLP_RESIDUAL_SERVO_LAG_VX_DELTA_24D)
                 x=update_dynamic_mlp_residual(x,u,p,command_history,
@@ -1251,6 +1206,24 @@ namespace mppi
             apply_rollout_low_speed_vy_prior(x, p);
             states[t]=x;
         }
+    }
+
+    // Each horizon knot is independent. Accumulate its importance-weighted
+    // control on the GPU and transfer only T controls instead of K*T controls.
+    __global__ void weighted_controls_kernel(
+        const Control* controls, const float* weights, Control* output,
+        int K, int T, float inverse_weight_sum)
+    {
+        const int t=blockIdx.x*blockDim.x+threadIdx.x;
+        if(t>=T)return;
+        float steer=0.0f,speed=0.0f;
+        for(int k=0;k<K;++k) {
+            const float w=weights[k]*inverse_weight_sum;
+            const Control u=controls[k*T+t];
+            steer=fmaf(w,u.steer,steer);
+            speed=fmaf(w,u.accel,speed);
+        }
+        output[t]={steer,speed};
     }
 
     // --- Host Functions ---
@@ -1293,6 +1266,7 @@ namespace mppi
                                  params_.dynamics_model==DYNAMIC_IMU_RECURSIVE ||
                                  params_.dynamics_model==DYNAMIC_MLP_RESIDUAL ||
                                  params_.dynamics_model==DYNAMIC_MLP_RESIDUAL_SERVO_LAG ||
+                                 params_.dynamics_model==DYNAMIC_RESIDUAL_SERVO_LAG ||
                                  params_.dynamics_model==DYNAMIC_MLP_RESIDUAL_SERVO_LAG_VX_DELTA_24D ||
                                  params_.dynamics_model==EFFECTIVE_HISTORY_STATE_RESIDUAL);
         const float initial_accel = direct_speed ? params_.min_speed :
@@ -1312,6 +1286,7 @@ namespace mppi
         CUDA_CHECK(cudaMalloc(&d_weighted_states_, T_ * sizeof(State)));
         CUDA_CHECK(cudaMalloc(&d_weighted_controls_, T_ * sizeof(Control)));
         CUDA_CHECK(cudaMalloc(&d_costs_, K_ * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&d_weights_, K_ * sizeof(float)));
         CUDA_CHECK(cudaMalloc(&d_rng_states_, K_ * T_ * sizeof(curandState)));
         CUDA_CHECK(cudaMalloc(&d_residual_history_, RESIDUAL_HISTORY*RESIDUAL_FEATURES*sizeof(float)));
         CUDA_CHECK(cudaMalloc(&d_residual_hidden_, RESIDUAL_HIDDEN*sizeof(float)));
@@ -1346,7 +1321,7 @@ namespace mppi
     void MPPISolver::cleanup_cuda_memory() {
         cudaFree(d_states_); cudaFree(d_controls_); cudaFree(d_prev_controls_);
         cudaFree(d_weighted_states_); cudaFree(d_weighted_controls_);
-        cudaFree(d_costs_); cudaFree(d_rng_states_);
+        cudaFree(d_costs_); cudaFree(d_weights_); cudaFree(d_rng_states_);
         cudaFree(d_residual_history_); cudaFree(d_residual_hidden_);
         cudaFree(d_ref_xs_); cudaFree(d_ref_ys_); cudaFree(d_ref_yaws_);
         cudaFree(d_left_bnd_xs_); cudaFree(d_left_bnd_ys_);
@@ -1590,15 +1565,18 @@ namespace mppi
     }
 
     Control MPPISolver::solve(const State &current_state) {
-        const bool direct_speed=(params_.dynamics_model==KINEMATIC_NOSLIP_NO_IMU_DIRECT_SPEED ||
-                                 params_.dynamics_model==SLIP_KINEMATIC_WITH_IMU_DIRECT_SPEED ||
-                                 params_.dynamics_model==DYNAMIC_IMU_RECURSIVE ||
-                                 params_.dynamics_model==DYNAMIC_MLP_RESIDUAL ||
-                                 params_.dynamics_model==DYNAMIC_MLP_RESIDUAL_SERVO_LAG ||
-                                 params_.dynamics_model==DYNAMIC_MLP_RESIDUAL_SERVO_LAG_VX_DELTA_24D ||
-                                 params_.dynamics_model==EFFECTIVE_HISTORY_STATE_RESIDUAL);
-        const bool first_direct_speed_solve=direct_speed &&
-            !direct_speed_warm_start_initialized_;
+        const bool first_direct_speed_solve=!direct_speed_warm_start_initialized_;
+        params_.rollout_obstacle_ahead=false;
+        const float start_cos=std::cos(current_state.yaw);
+        const float start_sin=std::sin(current_state.yaw);
+        for(int i=0;i<params_.num_obstacles;++i) {
+            const float dx=params_.obs_x[i]-current_state.x;
+            const float dy=params_.obs_y[i]-current_state.y;
+            if(dx*start_cos+dy*start_sin>-0.25f && dx*dx+dy*dy<36.0f) {
+                params_.rollout_obstacle_ahead=true;
+                break;
+            }
+        }
         int start_path_idx = 0;
         if (!h_ref_xs_.empty()) {
             float min_dist_sq = 1e9f;
@@ -1677,13 +1655,21 @@ namespace mppi
         if(params_.dynamics_model==KINEMATIC_RESIDUAL)
             encode_residual_history<<<1,1>>>(d_residual_history_,d_residual_hidden_);
 
-        rollout_kernel<<<blocksPerGrid, threadsPerBlock>>>(
-            d_states_, d_controls_, d_costs_, (curandState *)d_rng_states_,
-            current_state, d_prev_controls_, params_,
-            d_ref_xs_, d_ref_ys_, d_ref_yaws_, ref_path_len_,
-            d_left_bnd_xs_, d_left_bnd_ys_, d_right_bnd_xs_, d_right_bnd_ys_,
-            d_residual_hidden_, bnd_len_,
-            K_, T_, start_path_idx);
+        if (params_.dynamics_model==DYNAMIC_MLP_RESIDUAL_SERVO_LAG) {
+            rollout_kernel<true><<<blocksPerGrid, threadsPerBlock>>>(
+                d_states_, d_controls_, d_costs_, (curandState *)d_rng_states_,
+                current_state, d_prev_controls_, params_,
+                d_ref_xs_, d_ref_ys_, d_ref_yaws_, ref_path_len_,
+                d_left_bnd_xs_, d_left_bnd_ys_, d_right_bnd_xs_, d_right_bnd_ys_,
+                d_residual_hidden_, bnd_len_, K_, T_, start_path_idx);
+        } else {
+            rollout_kernel<false><<<blocksPerGrid, threadsPerBlock>>>(
+                d_states_, d_controls_, d_costs_, (curandState *)d_rng_states_,
+                current_state, d_prev_controls_, params_,
+                d_ref_xs_, d_ref_ys_, d_ref_yaws_, ref_path_len_,
+                d_left_bnd_xs_, d_left_bnd_ys_, d_right_bnd_xs_, d_right_bnd_ys_,
+                d_residual_hidden_, bnd_len_, K_, T_, start_path_idx);
+        }
         
         CUDA_CHECK(cudaGetLastError());
         CUDA_CHECK(cudaMemcpy(h_costs_.data(), d_costs_, K_ * sizeof(float), cudaMemcpyDeviceToHost));
@@ -1691,8 +1677,6 @@ namespace mppi
         if (params_.visualize_candidates) {
             CUDA_CHECK(cudaMemcpy(h_states_.data(), d_states_, K_ * T_ * sizeof(State), cudaMemcpyDeviceToHost));
         }
-        CUDA_CHECK(cudaMemcpy(h_controls_.data(), d_controls_, K_ * T_ * sizeof(Control), cudaMemcpyDeviceToHost));
-
         return compute_optimal_control(current_state);
     }
 
@@ -1791,15 +1775,16 @@ namespace mppi
         }
         if (sum_weights < 1e-6) sum_weights = 1e-6;
 
-        std::vector<Control> weighted_controls(T_, {0.0f, 0.0f});
-        for (int k = 0; k < K_; ++k) {
-            float w = h_weights_[k] / sum_weights;
-            for (int t = 0; t < T_; ++t) {
-                Control u_k = h_controls_[k * T_ + t];
-                weighted_controls[t].steer += w * u_k.steer;
-                weighted_controls[t].accel += w * u_k.accel;
-            }
-        }
+        std::vector<Control> weighted_controls(T_);
+        CUDA_CHECK(cudaMemcpy(d_weights_,h_weights_.data(),K_*sizeof(float),
+                              cudaMemcpyHostToDevice));
+        constexpr int weighted_threads=128;
+        weighted_controls_kernel<<<(T_+weighted_threads-1)/weighted_threads,
+            weighted_threads>>>(d_controls_,d_weights_,d_weighted_controls_,
+                                 K_,T_,1.0f/sum_weights);
+        CUDA_CHECK(cudaGetLastError());
+        CUDA_CHECK(cudaMemcpy(weighted_controls.data(),d_weighted_controls_,
+                              T_*sizeof(Control),cudaMemcpyDeviceToHost));
         
         optimal_controls_ = weighted_controls; 
         Control output = weighted_controls[0];
@@ -1823,6 +1808,8 @@ namespace mppi
                     ? std::max(params_.car_radius,params_.sudden_obstacle_candidate_clearance)
                     : params_.car_radius)) {
             CUDA_CHECK(cudaMemcpy(h_states_.data(),d_states_,K_*T_*sizeof(State),
+                                  cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpy(h_controls_.data(),d_controls_,K_*T_*sizeof(Control),
                                   cudaMemcpyDeviceToHost));
             std::vector<int> candidates(K_);
             for(int k=0;k<K_;++k)candidates[k]=k;
@@ -1965,27 +1952,9 @@ namespace mppi
             h_prev_controls_=weighted_controls;
         }
 
-        best_trajectory_.resize(T_);
-        State sim_state = current_state;
-        if((params_.dynamics_model==KINEMATIC_RESIDUAL || params_.dynamics_model==KINEMATIC_MLP_RESIDUAL ||
-            params_.dynamics_model==KINEMATIC_MLP_NO_IMU_RESIDUAL ||
-            params_.dynamics_model==KINEMATIC_NOSLIP_NO_IMU_DIRECT_SPEED ||
-            params_.dynamics_model==SLIP_KINEMATIC_WITH_IMU_DIRECT_SPEED ||
-            params_.dynamics_model==DYNAMIC_IMU_RECURSIVE ||
-            (params_.dynamics_model==DYNAMIC_MLP_RESIDUAL ||
-             params_.dynamics_model==DYNAMIC_MLP_RESIDUAL_SERVO_LAG ||
-             params_.dynamics_model==DYNAMIC_MLP_RESIDUAL_SERVO_LAG_VX_DELTA_24D) ||
-            params_.dynamics_model==EFFECTIVE_HISTORY_STATE_RESIDUAL) && params_.visualize_candidates) {
-            // Host update_dynamics has no recurrent state. Use the actual
-            // residual CUDA rollout selected by minimum cost for visualization
-            // instead of drawing a misleading pure-kinematic trajectory.
-            for(int t=0;t<T_;++t) best_trajectory_[t]=h_states_[best_k_*T_+t];
-        } else {
-            for (int t = 0; t < T_; ++t) {
-                sim_state = update_dynamics(sim_state, weighted_controls[t], params_);
-                best_trajectory_[t] = sim_state;
-            }
-        }
+        // The weighted sequence was already rolled out on CUDA above. Reuse
+        // it instead of running a second, legacy host dynamics loop.
+        best_trajectory_ = weighted_control_trajectory_;
         return output;
     }
 

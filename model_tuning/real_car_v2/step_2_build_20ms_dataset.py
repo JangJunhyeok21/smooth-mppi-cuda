@@ -31,7 +31,7 @@ FORBIDDEN="prediction_vs_actual_run12_reconstructed.csv"
 TRAINING_MAX_SPEED=4.0  # retain high-speed bag samples even during 2 m/s shakedown deployment
 LEGACY_IMU_SIGNS=np.array((-1.0,1.0,-1.0),dtype=float)
 CURRENT_IMU_SIGNS=np.array((1.0,1.0,1.0),dtype=float)
-IMU_CONVENTION_CUTOFF=dtlib.date(2026,8,17)
+IMU_CONVENTION_CUTOFF=dtlib.date(2026,8,15)
 
 def source_date(path,archive=None):
     """Return the recording date encoded in an IFAC folder or bag name."""
@@ -55,7 +55,7 @@ def source_date(path,archive=None):
     return None
 
 def imu_signs_for_source(path,archive):
-    """Apply the verified 0817 sensor-frame cutover, independent of YAML."""
+    """Apply the MCL-yaw-verified 0815 sensor-frame cutover."""
     date=source_date(path,archive)
     if date is None:
         raise RuntimeError(f"{path}: cannot infer recording date for IMU sign convention")
@@ -63,7 +63,7 @@ def imu_signs_for_source(path,archive):
     stored=archive["imu_axis_signs"].astype(float) if "imu_axis_signs" in archive.files else None
     if stored is not None and not np.array_equal(stored,expected):
         raise RuntimeError(f"{path}: stored imu_axis_signs={stored.tolist()} conflict with "
-                           f"date contract {expected.tolist()} (cutover=2026-08-17)")
+                           f"date contract {expected.tolist()} (cutover=2026-08-15)")
     return expected.copy(),date
 
 def ema(x,alpha=.25):
@@ -115,8 +115,8 @@ def main():
             ii=np.flatnonzero(local_ids==local);s=a[ii];n=len(s)
             if n<12:continue
             kfp=LateralVelocityKFParams(mass=float(cfg["mass"]),yaw_inertia=float(cfg["I_z"]),l_f=float(cfg["l_f"]),l_r=float(cfg["l_r"]),dt=dt,min_longitudinal_speed=float(cfg["kf_min_vx"]),low_speed_threshold=float(cfg["kf_low_speed_threshold"]),max_abs_vy=float(cfg["kf_max_abs_vy"]),process_var_vy=float(cfg["kf_q_vy"]),process_var_yaw_rate=float(cfg["kf_q_yaw_rate"]),measurement_var_lateral_accel=float(cfg["kf_r_lateral_accel"]),measurement_var_yaw_rate=float(cfg["kf_r_yaw_rate"]),initial_var_vy=float(cfg["kf_initial_p_vy"]),initial_var_yaw_rate=float(cfg["kf_initial_p_yaw_rate"]),imu_lateral_accel_sign=float(cfg["imu_lateral_accel_sign"]),process_var_ay_bias=float(cfg["kf_q_ay_bias"]),initial_var_ay_bias=float(cfg["kf_initial_p_ay_bias"]),max_abs_ay_bias=float(cfg["kf_max_abs_ay_bias"]),measurement_var_pose_vy=float(cfg["kf_r_pose_vy"]),pose_vy_gate=float(cfg["kf_pose_vy_gate"]))
-            # The installed IMU convention changed on 2026-08-17: before the
-            # cutover sensor y/z oppose MPPI FLU, from 0817 onward they match.
+            # Bag/MCL verification places the convention change at 2026-08-15:
+            # 0810--0813 sensor y/z oppose MPPI FLU, 0815 onward they match.
             # Resolve this from the recording date and reject contradictory
             # per-file metadata instead of silently mixing body frames.
             source_signs,recording_date=imu_signs_for_source(path,z)
@@ -179,7 +179,7 @@ def main():
             # Every discontinuous segment needs its own id. Reusing source_id
             # made recursive windows cross localization/collision cuts.
             bag_id=next_bag
-            features.append(feat.astype(np.float32));targets.append(target.astype(np.float32));observations.append(np.c_[imu_ax,imu_ay,r].astype(np.float32));teacher_vys.append(vy_teacher.astype(np.float32));teacher_confidences.append(teacher_confidence.astype(np.float32));valids.append(ok);bag_ids.append(np.full(n,bag_id));split_ids.append(np.full(n,split));manifest.append({"bag_id":bag_id,"source":str(path),"recording_date":recording_date.isoformat(),"imu_sign_cutover":"2026-08-17","segment":int(local),"split":("train","val","test")[split],"samples":n,"valid":int(ok.sum()),"vy_input":"causal_pacejka_mcl_ay_bias_ekf","vy_teacher":("offline_mcl_imu_smoother" if smoother_diagnostics and smoother_diagnostics.get("usable") else "causal_pacejka_mcl_ay_bias_ekf_fallback"),"vy_smoother":smoother_diagnostics,"imu_ax_stationary_bias_removed":ax_bias,"imu_axis_signs":{"wz":imu_wz_sign,"ax":imu_ax_sign,"ay":imu_ay_sign},"imu_ema_alpha":source_ema_alpha,"command_topic":str(z["command_topic"])});next_bag+=1
+            features.append(feat.astype(np.float32));targets.append(target.astype(np.float32));observations.append(np.c_[imu_ax,imu_ay,r].astype(np.float32));teacher_vys.append(vy_teacher.astype(np.float32));teacher_confidences.append(teacher_confidence.astype(np.float32));valids.append(ok);bag_ids.append(np.full(n,bag_id));split_ids.append(np.full(n,split));manifest.append({"bag_id":bag_id,"source":str(path),"recording_date":recording_date.isoformat(),"imu_sign_cutover":IMU_CONVENTION_CUTOFF.isoformat(),"segment":int(local),"split":("train","val","test")[split],"samples":n,"valid":int(ok.sum()),"vy_input":"causal_pacejka_mcl_ay_bias_ekf","vy_teacher":("offline_mcl_imu_smoother" if smoother_diagnostics and smoother_diagnostics.get("usable") else "causal_pacejka_mcl_ay_bias_ekf_fallback"),"vy_smoother":smoother_diagnostics,"imu_ax_stationary_bias_removed":ax_bias,"imu_axis_signs":{"wz":imu_wz_sign,"ax":imu_ax_sign,"ay":imu_ay_sign},"imu_ema_alpha":source_ema_alpha,"command_topic":str(z["command_topic"])});next_bag+=1
     X=np.concatenate(features);Y=np.concatenate(targets);O=np.concatenate(observations);TV=np.concatenate(teacher_vys);TC=np.concatenate(teacher_confidences);B=np.concatenate(bag_ids);S=np.concatenate(split_ids);V=np.concatenate(valids)
     assert X.shape[1]==20 and tuple(FEATURES)==("vx","vy","yaw_rate","steer_cmd","speed_cmd","applied_steer","steer_cmd_delta","base_next_vx","base_next_vy","base_next_yaw_rate","steer_t-4","speed_t-4","steer_t-3","speed_t-3","steer_t-2","speed_t-2","steer_t-1","speed_t-1","steer_t","speed_t")
     np.savez_compressed(OUTPUT,features=X,targets=Y,observations=O,teacher_vy=TV,teacher_vy_confidence=TC,bag_id=B,split=S,valid=V,feature_names=np.array(FEATURES),target_names=np.array(OUTPUTS),observation_names=np.array(("imu_ax","imu_ay","imu_yaw_rate")),dt=c.dt,vy_input_contract="causal_pacejka_mcl_ay_bias_ekf",vy_teacher_contract="offline_smoother_with_causal_fallback")

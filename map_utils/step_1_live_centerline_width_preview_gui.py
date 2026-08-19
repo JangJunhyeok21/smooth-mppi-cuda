@@ -14,14 +14,16 @@ from matplotlib.backend_bases import Event, KeyEvent, MouseEvent
 from matplotlib.collections import LineCollection
 from matplotlib.lines import Line2D
 
-MAP_NAME = "berlin"
-DEFAULT_MAP_YAML = Path(f"/home/a/RL-RACER/simulators/maps/{MAP_NAME}/{MAP_NAME}.yaml")
-DEFAULT_CENTERLINE_OUTPUT = Path(f"/home/a/RL-RACER/simulators/map_paths/{MAP_NAME}/centerline.csv")
-DEFAULT_WIDTH_OUTPUT = Path(f"/home/a/RL-RACER/simulators/map_paths/{MAP_NAME}/width_profile.csv")
+MAP_NAME = "icra2025"
+ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_MAP_YAML = Path(f"{ROOT}/data/{MAP_NAME}/{MAP_NAME}.yaml")
+DEFAULT_CENTERLINE_OUTPUT = Path(f"{ROOT}/data/{MAP_NAME}/centerline.csv")
+DEFAULT_WIDTH_OUTPUT = Path(f"{ROOT}/data/{MAP_NAME}/width_profile.csv")
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MAP_UTILS_DIR = Path(__file__).resolve().parent
+MPPI_DATA_DIR = MAP_UTILS_DIR.parent / "data"
 WIDTH_SCRIPT_PATH = MAP_UTILS_DIR / "compute_track_width_profile.py"
 SPLINE1D_PATH = MAP_UTILS_DIR / "CubicSpline1D.py"
 SPLINE2D_PATH = MAP_UTILS_DIR / "CubicSpline2D.py"
@@ -57,6 +59,7 @@ build_traversable_mask = WIDTH_MODULE.build_traversable_mask
 compute_width_profile = WIDTH_MODULE.compute_width_profile
 save_width_profile = WIDTH_MODULE.save_width_profile
 save_sample_points = WIDTH_MODULE.save_sample_points
+save_mppi_track_csv = WIDTH_MODULE.save_mppi_track_csv
 
 @dataclass
 class PathPoint:
@@ -86,10 +89,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--centerline-output", type=Path, default=DEFAULT_CENTERLINE_OUTPUT, help="Output centerline.csv path")
     parser.add_argument("--width-output", type=Path, default=DEFAULT_WIDTH_OUTPUT, help="Output width_profile.csv path")
     parser.add_argument("--xy-output", type=Path, default=None, help="Optional output width_profile_xy.csv path (default: <width_output_stem>_xy.csv)")
+    parser.add_argument("--mppi-output", type=Path, default=None, help="MPPI centerline+lane CSV (default: ../data/<map-name>_centerline.csv)")
     parser.add_argument("--sample-step", type=float, default=0.01, help="Arc-length spacing for sampled spline output and width preview")
     parser.add_argument("--ray-step", type=float, default=0.01, help="Ray marching step for width extraction preview")
-    parser.add_argument("--max-width", type=float, default=20.0, help="Maximum half-width to search on each side")
-    parser.add_argument("--fallback-hit-distance", type=float, default=3.0, help="Boundary-hit search distance; misses are interpolated from neighboring valid hits")
+    parser.add_argument("--preview-sample-step", type=float, default=0.05, help="Coarser centerline/width spacing used only while clicking")
+    parser.add_argument("--preview-ray-step", type=float, default=0.04, help="Coarser boundary ray step used only while clicking")
+    parser.add_argument("--max-width", type=float, default=3.0, help="Maximum half-width to search on each side")
+    parser.add_argument(
+        "--missing-width-fallback",
+        choices=("previous_boundary", "nearest_boundary", "max_width"),
+        default="max_width",
+        help="On a missed ray: reuse previous x,y, find a nearby map boundary, or use max-width",
+    )
+    parser.add_argument("--fallback-hit-distance", type=float, default=3.0, help="Search radius around the previous point for nearest_boundary fallback")
     parser.add_argument("--occupied-margin", type=float, default=0.0, help="Optional margin subtracted from measured widths")
     parser.add_argument("--tangent-window", type=float, default=1.0, help="Window for estimating local tangent during width extraction")
     parser.add_argument("--point-size", type=float, default=18.0, help="Representative clicked point marker size")
@@ -187,6 +199,7 @@ class LiveWidthPreviewEditor:
         centerline_output: Path,
         width_output: Path,
         xy_output: Path,
+        mppi_output: Path,
         args: argparse.Namespace,
         centerline_input: Path | None = None,
     ) -> None:
@@ -196,9 +209,13 @@ class LiveWidthPreviewEditor:
         self.centerline_output = centerline_output
         self.width_output = width_output
         self.xy_output = xy_output
+        self.mppi_output = mppi_output
         self.sample_step = float(args.sample_step)
         self.ray_step = float(args.ray_step)
+        self.preview_sample_step = max(float(args.preview_sample_step), self.sample_step)
+        self.preview_ray_step = max(float(args.preview_ray_step), self.ray_step)
         self.max_width = float(args.max_width)
+        self.missing_width_fallback = str(args.missing_width_fallback)
         self.fallback_hit_distance = float(args.fallback_hit_distance)
         self.occupied_margin = float(args.occupied_margin)
         self.tangent_window = float(args.tangent_window)
@@ -265,11 +282,11 @@ class LiveWidthPreviewEditor:
         return (
             f"source={'loaded' if self.clicked_points.shape[0] < 4 and self.loaded_centerline.size else 'clicked'} "
             f"clicked={self.clicked_points.shape[0]} centerline_pts={self.current_centerline.shape[0]} "
-            f"width_rows={len(self.current_rows)} interpolated_misses(L/R)={left_misses}/{right_misses} "
+            f"width_rows={len(self.current_rows)} previous-boundary fallbacks(L/R)={left_misses}/{right_misses} "
             f"centerline_out={self.centerline_output.name} width_out={self.width_output.name}"
         )
 
-    def _compute_width_preview(self, centerline: np.ndarray) -> None:
+    def _compute_width_preview(self, centerline: np.ndarray, *, precise: bool = False) -> None:
         self.current_centerline = np.asarray(centerline, dtype=np.float32).copy()
         track_map = TrackMap(centerline=self.current_centerline, track_width=1.0, name="live_preview")
         self.current_rows = compute_width_profile(
@@ -277,19 +294,23 @@ class LiveWidthPreviewEditor:
             traversable_mask=self.traversable_mask,
             origin=np.asarray(self.map_cfg["origin"][:2], dtype=np.float32),
             resolution=float(self.map_cfg["resolution"]),
-            s_step=self.sample_step,
-            ray_step=self.ray_step,
+            s_step=self.sample_step if precise else self.preview_sample_step,
+            ray_step=self.ray_step if precise else self.preview_ray_step,
             max_width=self.max_width,
             fallback_hit_distance=self.fallback_hit_distance,
             occupied_margin=self.occupied_margin,
             tangent_window=self.tangent_window,
+            missing_width_fallback=self.missing_width_fallback,
         )
         self.left_boundary, self.right_boundary = rows_to_boundary_arrays(self.current_rows)
 
     def _rebuild_preview(self) -> None:
         if self.clicked_points.shape[0] < 4:
             if self.loaded_centerline.size:
-                self._compute_width_preview(self.loaded_centerline)
+                # The loaded-track preview was already computed at startup.
+                # Do not repeat the full width scan for clicks 1--3.
+                if not np.array_equal(self.current_centerline, self.loaded_centerline):
+                    self._compute_width_preview(self.loaded_centerline)
             else:
                 self.current_centerline = np.empty((0, 2), dtype=np.float32)
                 self.current_rows = []
@@ -298,7 +319,7 @@ class LiveWidthPreviewEditor:
             return
         try:
             self._compute_width_preview(
-                spline_centerline(self.clicked_points, sample_step=self.sample_step)
+                spline_centerline(self.clicked_points, sample_step=self.preview_sample_step)
             )
         except Exception as exc:
             print(f"Could not rebuild preview: {exc}")
@@ -372,16 +393,26 @@ class LiveWidthPreviewEditor:
             preserving_loaded_centerline = (
                 self.loaded_centerline.size > 0 and self.clicked_points.shape[0] < 4
             )
+            # Clicking uses a coarse preview for responsiveness. Rebuild once
+            # at the requested output resolution immediately before saving.
+            precise_centerline = (
+                self.loaded_centerline
+                if preserving_loaded_centerline
+                else spline_centerline(self.clicked_points, sample_step=self.sample_step)
+            )
+            self._compute_width_preview(precise_centerline, precise=True)
             if not preserving_loaded_centerline:
                 save_centerline(self.centerline_output, self.current_centerline)
             save_width_profile(self.width_output, self.current_rows)
             save_sample_points(self.xy_output, self.current_rows)
+            save_mppi_track_csv(self.mppi_output, self.current_rows)
             if preserving_loaded_centerline:
                 print(f"Preserved loaded centerline without rewriting {self.centerline_output}")
             else:
                 print(f"Saved {self.current_centerline.shape[0]} centerline points to {self.centerline_output}")
             print(f"Saved {len(self.current_rows)} width rows to {self.width_output}")
             print(f"Saved {len(self.current_rows)} boundary rows to {self.xy_output}")
+            print(f"Saved {len(self.current_rows)} MPPI track rows to {self.mppi_output}")
 
     def show(self) -> None:
         plt.show()
@@ -398,6 +429,10 @@ def main() -> None:
         free_thresh=float(map_cfg["free_thresh"]),
     )
     xy_output = default_xy_output_path(args.width_output) if args.xy_output is None else args.xy_output
+    mppi_output = (
+        MPPI_DATA_DIR / f"{args.map_yaml.stem}_centerline.csv"
+        if args.mppi_output is None else args.mppi_output
+    )
     centerline_input = None
     if not args.no_load_centerline:
         candidate = args.centerline_output if args.centerline_input is None else args.centerline_input
@@ -423,12 +458,15 @@ def main() -> None:
             fallback_hit_distance=float(args.fallback_hit_distance),
             occupied_margin=float(args.occupied_margin),
             tangent_window=float(args.tangent_window),
+            missing_width_fallback=str(args.missing_width_fallback),
         )
         save_width_profile(args.width_output, rows)
         save_sample_points(xy_output, rows)
+        save_mppi_track_csv(mppi_output, rows)
         print(f"Preserved loaded centerline without rewriting {centerline_input}")
         print(f"Saved {len(rows)} width rows to {args.width_output}")
         print(f"Saved {len(rows)} boundary rows to {xy_output}")
+        print(f"Saved {len(rows)} MPPI track rows to {mppi_output}")
         return
     editor = LiveWidthPreviewEditor(
         map_cfg=map_cfg,
@@ -437,6 +475,7 @@ def main() -> None:
         centerline_output=args.centerline_output,
         width_output=args.width_output,
         xy_output=xy_output,
+        mppi_output=mppi_output,
         args=args,
         centerline_input=centerline_input,
     )

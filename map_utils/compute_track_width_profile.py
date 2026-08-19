@@ -12,8 +12,16 @@ import numpy as np
 import yaml
 
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-TRACK_MAP_PATH = REPO_ROOT / "multi_car_rl" / "track_map.py"
+_TRACK_MAP_CANDIDATES = [
+    Path(__file__).resolve().parents[1] / "multi_car_rl" / "track_map.py",
+    Path("/home/a/RL-RACER/multi_car_rl/track_map.py"),
+]
+TRACK_MAP_PATH = next((path for path in _TRACK_MAP_CANDIDATES if path.is_file()), None)
+if TRACK_MAP_PATH is None:
+    raise FileNotFoundError(
+        "Could not find multi_car_rl/track_map.py in: "
+        + ", ".join(str(path) for path in _TRACK_MAP_CANDIDATES)
+    )
 TRACK_MAP_SPEC = importlib.util.spec_from_file_location("track_map_module", TRACK_MAP_PATH)
 if TRACK_MAP_SPEC is None or TRACK_MAP_SPEC.loader is None:
     raise ImportError(f"Could not load TrackMap module from {TRACK_MAP_PATH}")
@@ -188,7 +196,9 @@ def trace_half_width(
 ) -> tuple[float, bool]:
     last_free = 0.0
     distance = ray_step
-    search_limit = min(max_width, fallback_hit_distance)
+    # Search the full user-requested range. Boundary fallback is handled after
+    # all samples are traced, using the previous valid boundary point.
+    search_limit = max_width
     while distance <= search_limit:
         probe = center + normal * (direction * distance)
         if not is_traversable(probe, traversable_mask, origin, resolution):
@@ -237,6 +247,25 @@ def interpolate_missing_widths_circular(
     return np.where(valid, values, filled).astype(np.float32)
 
 
+def traversable_boundary_points(
+    traversable_mask: np.ndarray,
+    origin: np.ndarray,
+    resolution: float,
+) -> np.ndarray:
+    """World coordinates of free grid cells touching a non-free cell."""
+    free = np.asarray(traversable_mask, dtype=bool)
+    interior = free.copy()
+    interior[1:, :] &= free[:-1, :]
+    interior[:-1, :] &= free[1:, :]
+    interior[:, 1:] &= free[:, :-1]
+    interior[:, :-1] &= free[:, 1:]
+    rows, cols = np.nonzero(free & ~interior)
+    height = free.shape[0]
+    xs = float(origin[0]) + (cols.astype(np.float64) + 0.5) * resolution
+    ys = float(origin[1]) + (height - 1 - rows.astype(np.float64) + 0.5) * resolution
+    return np.column_stack((xs, ys)).astype(np.float32)
+
+
 def compute_width_profile(
     track_map: TrackMap,
     traversable_mask: np.ndarray,
@@ -248,7 +277,14 @@ def compute_width_profile(
     fallback_hit_distance: float,
     occupied_margin: float,
     tangent_window: float,
+    missing_width_fallback: str = "previous_boundary",
 ) -> list[dict[str, float]]:
+    if missing_width_fallback not in {"previous_boundary", "nearest_boundary", "max_width"}:
+        raise ValueError(
+            "missing_width_fallback must be 'previous_boundary', "
+            "'nearest_boundary', or 'max_width', "
+            f"got {missing_width_fallback!r}"
+        )
     rows: list[dict[str, float]] = []
     centers: list[np.ndarray] = []
     normals: list[np.ndarray] = []
@@ -278,6 +314,11 @@ def compute_width_profile(
             max_width,
             fallback_hit_distance,
         )
+        if missing_width_fallback == "max_width":
+            if not left_hit:
+                left_width = max_width
+            if not right_hit:
+                right_width = max_width
         left_width = max(0.0, left_width - occupied_margin)
         right_width = max(0.0, right_width - occupied_margin)
         centers.append(center)
@@ -296,30 +337,59 @@ def compute_width_profile(
 
     if not rows:
         return rows
-    s_values = np.asarray([row["s"] for row in rows], dtype=np.float64)
-    left_widths = interpolate_missing_widths_circular(
-        s_values,
-        np.asarray([row["left_width"] for row in rows]),
-        np.asarray(left_hits),
-        track_map.total_length,
-    )
-    right_widths = interpolate_missing_widths_circular(
-        s_values,
-        np.asarray([row["right_width"] for row in rows]),
-        np.asarray(right_hits),
-        track_map.total_length,
-    )
     for idx, row in enumerate(rows):
         center = centers[idx]
         normal = normals[idx]
-        left_width = float(left_widths[idx])
-        right_width = float(right_widths[idx])
+        left_width = float(row["left_width"])
+        right_width = float(row["right_width"])
         row["left_width"] = left_width
         row["right_width"] = right_width
         row["left_x"] = float(center[0] + normal[0] * left_width)
         row["left_y"] = float(center[1] + normal[1] * left_width)
         row["right_x"] = float(center[0] - normal[0] * right_width)
         row["right_y"] = float(center[1] - normal[1] * right_width)
+
+    # If a ray finds no boundary within max_width, retain the previous valid
+    # boundary x,y on that side and measure the width from the current center
+    # to that retained point. Start from a real hit and wrap once, so misses at
+    # the CSV seam correctly inherit the last valid point of the lap.
+    map_boundary_points = (
+        traversable_boundary_points(traversable_mask, origin, resolution)
+        if missing_width_fallback == "nearest_boundary" else None
+    )
+    fallback_sides = (
+        (("left", left_hits), ("right", right_hits))
+        if missing_width_fallback in {"previous_boundary", "nearest_boundary"} else ()
+    )
+    for side, hit_mask in fallback_sides:
+        valid_indices = [idx for idx, hit in enumerate(hit_mask) if hit]
+        if not valid_indices:
+            continue
+        start = valid_indices[0]
+        previous = np.asarray(
+            [rows[start][f"{side}_x"], rows[start][f"{side}_y"]], dtype=np.float64
+        )
+        for offset in range(1, len(rows)):
+            idx = (start + offset) % len(rows)
+            if hit_mask[idx]:
+                previous = np.asarray(
+                    [rows[idx][f"{side}_x"], rows[idx][f"{side}_y"]], dtype=np.float64
+                )
+                continue
+            center = np.asarray(centers[idx], dtype=np.float64)
+            if map_boundary_points is not None and map_boundary_points.size:
+                candidates = map_boundary_points.astype(np.float64, copy=False)
+                near_previous = np.linalg.norm(candidates - previous, axis=1) <= fallback_hit_distance
+                direction = 1.0 if side == "left" else -1.0
+                lateral = (candidates - center) @ np.asarray(normals[idx], dtype=np.float64)
+                valid = near_previous & (lateral * direction > 0.0)
+                if bool(valid.any()):
+                    local_candidates = candidates[valid]
+                    distances = np.linalg.norm(local_candidates - center, axis=1)
+                    previous = local_candidates[int(np.argmin(distances))]
+            rows[idx][f"{side}_x"] = float(previous[0])
+            rows[idx][f"{side}_y"] = float(previous[1])
+            rows[idx][f"{side}_width"] = float(np.linalg.norm(previous - center))
     return rows
 
 
@@ -341,6 +411,47 @@ def save_sample_points(csv_path: Path, rows: list[dict[str, float]]) -> None:
         writer.writeheader()
         for row in rows:
             writer.writerow({key: f"{row[key]:.8f}" for key in fieldnames})
+
+
+def save_mppi_track_csv(csv_path: Path, rows: list[dict[str, float]]) -> None:
+    """Save the single-file centerline/lane format consumed by PathPublisher.
+
+    The center point is reconstructed from the two boundary points and their
+    asymmetric widths, so the output remains consistent with the exact
+    boundary samples produced by the map extraction/refinement steps.
+    """
+    fieldnames = [
+        "x_m", "y_m", "w_tr_left_m", "w_tr_right_m", "w_total_m",
+        "left_x_m", "left_y_m", "right_x_m", "right_y_m",
+    ]
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    with csv_path.open("w", encoding="utf-8", newline="") as fp:
+        writer = csv.DictWriter(fp, fieldnames=fieldnames, lineterminator="\n")
+        writer.writeheader()
+        for row in rows:
+            left_width = float(row["left_width"])
+            right_width = float(row["right_width"])
+            total_width = left_width + right_width
+            left_x, left_y = float(row["left_x"]), float(row["left_y"])
+            right_x, right_y = float(row["right_x"]), float(row["right_y"])
+            if total_width > 1e-9:
+                center_x = (right_width * left_x + left_width * right_x) / total_width
+                center_y = (right_width * left_y + left_width * right_y) / total_width
+            else:
+                center_x = 0.5 * (left_x + right_x)
+                center_y = 0.5 * (left_y + right_y)
+            output = {
+                "x_m": center_x,
+                "y_m": center_y,
+                "w_tr_left_m": left_width,
+                "w_tr_right_m": right_width,
+                "w_total_m": total_width,
+                "left_x_m": left_x,
+                "left_y_m": left_y,
+                "right_x_m": right_x,
+                "right_y_m": right_y,
+            }
+            writer.writerow({key: f"{output[key]:.8f}" for key in fieldnames})
 
 
 def main() -> None:

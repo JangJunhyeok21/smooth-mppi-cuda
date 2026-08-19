@@ -32,6 +32,7 @@ if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
 endif()
 
 find_package(ament_cmake REQUIRED)
+find_package(ament_index_cpp REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(ackermann_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
@@ -99,6 +100,7 @@ rosidl_get_typesupport_target(cpp_typesupport_target ${PROJECT_NAME} "rosidl_typ
 target_link_libraries(smppi_node "${cpp_typesupport_target}")
 
 ament_target_dependencies(smppi_node
+  ament_index_cpp
   rclcpp
   ackermann_msgs
   nav_msgs
@@ -125,6 +127,7 @@ target_include_directories(path_publisher PUBLIC
 )
 
 ament_target_dependencies(path_publisher
+  ament_index_cpp
   rclcpp
   nav_msgs
   geometry_msgs

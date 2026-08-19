@@ -13,18 +13,21 @@ from matplotlib.backend_bases import Event, KeyEvent, MouseEvent
 from matplotlib.lines import Line2D
 
 
-MAP_NAME = "berlin" # icra2025
-USE_EQUAL = True
+
+MAP_NAME = "icra2025"
+ROOT = Path(__file__).resolve().parents[1]
+
+USE_EQUAL = False
 if USE_EQUAL:
     DEFAULT_MAP_YAML = Path(f"/home/a/RL-RACER/simulators/maps/{MAP_NAME}/{MAP_NAME}.yaml")
     DEFAULT_INPUT = Path(f"/home/a/RL-RACER/simulators/map_paths/{MAP_NAME}/width_profile_xy.csv")
     DEFAULT_CENTERLINE = Path(f"/home/a/RL-RACER/simulators/map_paths/{MAP_NAME}/centerline_equal.csv")
     DEFAULT_OUTPUT = Path(f"/home/a/RL-RACER/simulators/map_paths/{MAP_NAME}/refined_width_profile_xy.csv")
 else:
-    DEFAULT_MAP_YAML = Path(f"/home/a/RL-RACER/simulators/maps/{MAP_NAME}/{MAP_NAME}.yaml")
-    DEFAULT_INPUT = Path(f"/home/a/RL-RACER/simulators/map_paths/{MAP_NAME}/width_profile_xy.csv")
-    DEFAULT_CENTERLINE = Path(f"/home/a/RL-RACER/simulators/map_paths/{MAP_NAME}/centerline.csv")
-    DEFAULT_OUTPUT = Path(f"/home/a/RL-RACER/simulators/map_paths/{MAP_NAME}/refined_width_profile_xy.csv")
+    DEFAULT_MAP_YAML = Path(f"{ROOT}/data/{MAP_NAME}/{MAP_NAME}.yaml")
+    DEFAULT_INPUT = Path(f"{ROOT}/data/{MAP_NAME}/width_profile_xy.csv")
+    DEFAULT_CENTERLINE = Path(f"{ROOT}/data/{MAP_NAME}/centerline.csv")
+    DEFAULT_OUTPUT = Path(f"{ROOT}/data/{MAP_NAME}/refined_width_profile_xy.csv")
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 WIDTH_SCRIPT_PATH = Path(__file__).resolve().with_name("compute_track_width_profile.py")

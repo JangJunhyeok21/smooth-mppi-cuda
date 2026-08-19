@@ -13,6 +13,7 @@ DEFAULT_OUTPUT = Path("/home/a/RL-RACER/simulators/map_paths/berlin/width_profil
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 WIDTH_SCRIPT_PATH = Path(__file__).resolve().with_name("compute_track_width_profile.py")
+MPPI_DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 
 
 def _load_module(module_path: Path, module_name: str):
@@ -29,6 +30,7 @@ WIDTH_MODULE = _load_module(WIDTH_SCRIPT_PATH, "compute_track_width_profile_modu
 TrackMap = WIDTH_MODULE.TrackMap
 save_width_profile = WIDTH_MODULE.save_width_profile
 save_sample_points = WIDTH_MODULE.save_sample_points
+save_mppi_track_csv = WIDTH_MODULE.save_mppi_track_csv
 sample_centerline_pose = WIDTH_MODULE.sample_centerline_pose
 
 def default_xy_output_path(width_output: Path) -> Path:
@@ -43,6 +45,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--width-profile-csv", type=Path, default=DEFAULT_WIDTH_PROFILE, help="Input width_profile.csv path")
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT, help="Output equalized width_profile.csv path")
     parser.add_argument("--xy-output", type=Path, default=None, help="Optional output equalized width_profile_xy.csv path")
+    parser.add_argument("--mppi-output", type=Path, default=None, help="MPPI centerline+lane CSV (default: ../data/<map>_centerline.csv)")
     parser.add_argument("--tangent-window", type=float, default=1.0, help="Frenet arc-length window used to estimate local tangent for left/right normals")
     parser.add_argument("--interp-multiplier", type=int, default=8, help="Dense interpolation multiplier applied before smoothing")
     parser.add_argument("--smooth-window", type=int, default=31, help="Odd closed-loop moving-average window on the dense equal-width profile")
@@ -59,6 +62,10 @@ def load_width_profile(csv_path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarr
     if values.ndim != 2 or values.shape[1] < 3:
         raise ValueError(f"Width profile must have at least 3 columns (s,left_width,right_width): {csv_path}")
     return values[:, 0], values[:, 1], values[:, 2]
+
+
+def infer_map_name(centerline_csv: Path) -> str:
+    return centerline_csv.parent.name if centerline_csv.stem in {"centerline", "centerline_equal"} else centerline_csv.stem
 
 
 def smooth_closed_1d(values: np.ndarray, window: int) -> np.ndarray:
@@ -146,8 +153,14 @@ def main() -> None:
     save_width_profile(args.output, rows)
     xy_output = default_xy_output_path(args.output) if args.xy_output is None else args.xy_output
     save_sample_points(xy_output, rows)
+    mppi_output = (
+        MPPI_DATA_DIR / f"{infer_map_name(args.centerline_csv)}_centerline.csv"
+        if args.mppi_output is None else args.mppi_output
+    )
+    save_mppi_track_csv(mppi_output, rows)
     print(f"Saved {len(rows)} equal-width rows to {args.output}")
     print(f"Saved {len(rows)} equal-width boundary rows to {xy_output}")
+    print(f"Saved {len(rows)} MPPI track rows to {mppi_output}")
 
 
 if __name__ == "__main__":

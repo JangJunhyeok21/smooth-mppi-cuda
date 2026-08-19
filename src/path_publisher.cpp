@@ -1,4 +1,5 @@
 #include <rclcpp/rclcpp.hpp>
+#include <ament_index_cpp/get_package_share_directory.hpp>
 #include <nav_msgs/msg/path.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <fstream>
@@ -13,7 +14,10 @@ class PathPublisher : public rclcpp::Node
 public:
     PathPublisher() : Node("path_publisher")
     {
-        declare_parameter<std::string>("csv_file_path", "/home/a/capstone_ws/src/control/smppi_cuda_controller/data/map1/map1_centerline.csv");
+        // Absolute paths are accepted. Relative paths are resolved from this
+        // package's installed share directory, so params.yaml remains portable
+        // between the development PC and the Orin deployment.
+        declare_parameter<std::string>("csv_file_path", "data/map1/map1_centerline.csv");
         declare_parameter<std::string>("frame_id", "map");
         declare_parameter<double>("publish_rate", 10.0);
         
@@ -22,8 +26,11 @@ public:
         get_parameter("publish_rate", publish_rate_);
 
         if (csv_path_.empty()) {
-            RCLCPP_WARN(get_logger(), "csv_file_path not set, using default");
-            csv_path_ = "map1_centerline.csv";
+            throw std::invalid_argument("csv_file_path must not be empty");
+        }
+        if (csv_path_.front() != '/') {
+            csv_path_ = ament_index_cpp::get_package_share_directory(
+                "smppi_cuda_controller") + "/" + csv_path_;
         }
 
         auto qos = rclcpp::QoS(rclcpp::KeepLast(1)).reliable().transient_local();
@@ -71,6 +78,14 @@ private:
 
         if (ix < 0 || iy < 0) {
             RCLCPP_FATAL(get_logger(), "CSV must have X and Y columns");
+            rclcpp::shutdown();
+            return;
+        }
+        if (ileft < 0 || iright < 0) {
+            RCLCPP_FATAL(
+                get_logger(),
+                "CSV must contain left/right lane widths "
+                "(w_tr_left_m and w_tr_right_m) for MPPI boundary constraints");
             rclcpp::shutdown();
             return;
         }
@@ -130,7 +145,10 @@ private:
 
         buildPath(xs, ys, psis, lefts, rights, path_center_, path_left_, path_right_);
 
-        RCLCPP_INFO(get_logger(), "Loaded %zu waypoints from %s", xs.size(), csv_path_.c_str());
+        RCLCPP_INFO(
+            get_logger(),
+            "Loaded %zu waypoints with left/right lane widths from %s",
+            xs.size(), csv_path_.c_str());
     }
 
     void buildPath(

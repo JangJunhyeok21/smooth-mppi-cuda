@@ -60,7 +60,7 @@
     min_accel: -1.0          # m/s^2
     max_accel: 1.0           # m/s^2
     min_speed: 0.5
-    max_speed: 3.5  # fastest validated Map1 setting
+    max_speed: 10.0  # fastest validated Map1 setting
     # Racing-line 자유도를 위해 중앙선 오차 기반 publish 속도 제한은 사용하지 않는다.
     heading_speed_limit_gain: 0.0
     contour_speed_limit_gain: 0.0
@@ -204,6 +204,13 @@
     dynamic_mlp_min_speed: 0.8 # runtime low-speed kinematic yaw fallback / residual gate
 
     # --- Runtime environment and topics ---
+    # Required CSV columns: x_m, y_m, w_tr_left_m, w_tr_right_m.
+    # Despite the filename, map1_centerline.csv contains both the centerline
+    # and lane widths. PathPublisher converts them to center/left/right paths.
+    # Relative paths are resolved from the installed package share directory.
+    csv_file_path: data/map1/map1_centerline.csv
+    frame_id: map
+    publish_rate: 1.0
     # true : simulator pose + twist come from simulation_odom_topic
     # false: real_pose_topic supplies map pose and real_odom_topic supplies velocity
     is_simulation: true
@@ -212,4 +219,3 @@
     real_pose_topic: /newmcl_pose
     real_odom_topic: /odom
     real_drive_topic: /drive
-    path_topic: /mppi_target_path

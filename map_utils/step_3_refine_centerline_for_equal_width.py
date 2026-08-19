@@ -4,16 +4,33 @@ import argparse
 import csv
 import importlib.util
 import sys
+import types
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 
-try:
-    from simulators.map_utils.CubicSpline2D import CubicSpline2D
-except ModuleNotFoundError:  # Support direct execution via `python path/to/script.py`.
-    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-    from simulators.map_utils.CubicSpline2D import CubicSpline2D
+MAP_UTILS_DIR = Path(__file__).resolve().parent
+MPPI_DATA_DIR = MAP_UTILS_DIR.parent / "data"
+
+
+def _load_local_cubic_spline_2d():
+    package_name = "map_utils_runtime_centerline_refinement"
+    package = types.ModuleType(package_name)
+    package.__path__ = [str(MAP_UTILS_DIR)]
+    sys.modules[package_name] = package
+    for module_name in ("CubicSpline1D", "CubicSpline2D"):
+        full_name = f"{package_name}.{module_name}"
+        spec = importlib.util.spec_from_file_location(full_name, MAP_UTILS_DIR / f"{module_name}.py")
+        if spec is None or spec.loader is None:
+            raise ImportError(f"Could not load local {module_name}")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[full_name] = module
+        spec.loader.exec_module(module)
+    return sys.modules[f"{package_name}.CubicSpline2D"].CubicSpline2D
+
+
+CubicSpline2D = _load_local_cubic_spline_2d()
 
 MAP_NAME = "berlin"
 DEFAULT_CENTERLINE = Path(f"/home/a/RL-RACER/simulators/map_paths/{MAP_NAME}/centerline.csv")
@@ -40,6 +57,8 @@ WIDTH_MODULE = _load_module(WIDTH_SCRIPT_PATH, "compute_track_width_profile_modu
 TrackMap = WIDTH_MODULE.TrackMap
 sample_centerline_pose = WIDTH_MODULE.sample_centerline_pose
 save_width_profile = WIDTH_MODULE.save_width_profile
+save_sample_points = WIDTH_MODULE.save_sample_points
+save_mppi_track_csv = WIDTH_MODULE.save_mppi_track_csv
 
 
 def parse_args() -> argparse.Namespace:
@@ -53,6 +72,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--width-profile-csv", type=Path, default=DEFAULT_WIDTH_PROFILE, help="Input asymmetric width profile")
     parser.add_argument("--centerline-output", type=Path, default=DEFAULT_CENTERLINE_OUTPUT, help="Output midpoint centerline CSV")
     parser.add_argument("--width-output", type=Path, default=DEFAULT_WIDTH_OUTPUT, help="Output equal-width profile CSV")
+    parser.add_argument("--xy-output", type=Path, default=None, help="Output refined boundary-point CSV (default: <width-output-stem>_xy.csv)")
+    parser.add_argument("--mppi-output", type=Path, default=None, help="MPPI centerline+lane CSV (default: ../data/<map>_centerline.csv)")
     parser.add_argument(
         "--tangent-window",
         type=float,
@@ -105,6 +126,10 @@ def load_width_profile(csv_path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarr
     if bool((np.diff(values[:, 0]) <= 0.0).any()):
         raise ValueError(f"Width profile s values must be strictly increasing: {csv_path}")
     return values[:, 0], values[:, 1], values[:, 2]
+
+
+def infer_map_name(centerline_csv: Path) -> str:
+    return centerline_csv.parent.name if centerline_csv.stem in {"centerline", "centerline_equal"} else centerline_csv.stem
 
 
 def equalize_centerline_samples(
@@ -306,6 +331,28 @@ def build_width_rows(s_values: np.ndarray, equal_width: np.ndarray) -> list[dict
     ]
 
 
+def build_boundary_rows(
+    centerline: np.ndarray,
+    s_values: np.ndarray,
+    equal_width: np.ndarray,
+    tangent_window: float,
+) -> list[dict[str, float]]:
+    track = TrackMap(centerline=np.asarray(centerline, dtype=np.float32), track_width=1.0, name="refined")
+    rows: list[dict[str, float]] = []
+    for s_value, width in zip(s_values, equal_width):
+        center, normal = sample_centerline_pose(track, float(s_value), tangent_window=tangent_window)
+        rows.append({
+            "s": float(s_value),
+            "left_width": float(width),
+            "right_width": float(width),
+            "left_x": float(center[0] + normal[0] * width),
+            "left_y": float(center[1] + normal[1] * width),
+            "right_x": float(center[0] - normal[0] * width),
+            "right_y": float(center[1] - normal[1] * width),
+        })
+    return rows
+
+
 def main() -> None:
     args = parse_args()
     if args.tangent_window <= 0.0:
@@ -340,11 +387,26 @@ def main() -> None:
 
     new_s = centerline_arc_lengths(new_centerline)
     width_rows = build_width_rows(new_s, equal_width)
+    boundary_rows = build_boundary_rows(
+        new_centerline, new_s, equal_width, tangent_window=float(args.tangent_window)
+    )
 
     save_centerline(args.centerline_output, new_centerline)
     save_width_profile(args.width_output, width_rows)
+    xy_output = (
+        args.width_output.with_name(f"{args.width_output.stem}_xy.csv")
+        if args.xy_output is None else args.xy_output
+    )
+    mppi_output = (
+        MPPI_DATA_DIR / f"{infer_map_name(args.centerline_csv)}_centerline.csv"
+        if args.mppi_output is None else args.mppi_output
+    )
+    save_sample_points(xy_output, boundary_rows)
+    save_mppi_track_csv(mppi_output, boundary_rows)
     print(f"Saved {len(new_centerline)} midpoint centerline points to {args.centerline_output}")
     print(f"Saved {len(width_rows)} equal-width rows to {args.width_output}")
+    print(f"Saved {len(boundary_rows)} refined boundary rows to {xy_output}")
+    print(f"Saved {len(boundary_rows)} MPPI track rows to {mppi_output}")
     if args.spline_refine:
         raw_metrics = curvature_summary(raw_centerline)
         refined_metrics = curvature_summary(new_centerline)

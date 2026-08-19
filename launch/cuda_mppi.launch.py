@@ -6,8 +6,6 @@ from ament_index_python.packages import get_package_share_directory
 import os
 
 def generate_launch_description():
-    map_name = "map1"
-    
     default_param_file = os.path.join(
         get_package_share_directory("smppi_cuda_controller"),
         "config",
@@ -16,12 +14,6 @@ def generate_launch_description():
 
     param_file = LaunchConfiguration("param_file")
 
-    data_dir = os.path.join(
-        get_package_share_directory("smppi_cuda_controller"),
-        "data",
-        map_name,
-    )
-    centerline_csv = os.path.join(data_dir, f"{map_name}_centerline.csv")
     config_dir = os.path.join(
         get_package_share_directory("smppi_cuda_controller"), "config")
 
@@ -53,17 +45,6 @@ def generate_launch_description():
                 "param_file",
                 default_value=default_param_file,
                 description="Path to the MPPI parameters YAML file",
-            ),
-            Node(
-                package="smppi_cuda_controller",
-                executable="path_publisher",
-                name="path_publisher",
-                output="screen",
-                parameters=[param_file, {
-                    "csv_file_path": centerline_csv,
-                    "frame_id": "map",
-                    "publish_rate": 1.0,
-                }],
             ),
             Node(
                 package="smppi_cuda_controller",

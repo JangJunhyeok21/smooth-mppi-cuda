@@ -1,7 +1,6 @@
 #include "rclcpp/rclcpp.hpp"
 #include "ackermann_msgs/msg/ackermann_drive_stamped.hpp"
 #include "nav_msgs/msg/odometry.hpp"
-#include "nav_msgs/msg/path.hpp"
 #include "sensor_msgs/msg/laser_scan.hpp"
 #include "sensor_msgs/msg/imu.hpp"
 #include "visualization_msgs/msg/marker_array.hpp"
@@ -12,11 +11,16 @@
 #include "cuda_mppi_controller/kinematic_residual_weights.hpp"
 #include "cuda_mppi_controller/lateral_velocity_kf.hpp"
 #include "smppi_cuda_controller/msg/mppi_trajectory.hpp"
+#include <ament_index_cpp/get_package_share_directory.hpp>
 #include <algorithm>
 #include <cmath>
 #include <array>
 #include <deque>
 #include <limits>
+#include <fstream>
+#include <sstream>
+#include <stdexcept>
+#include <cctype>
 
 using namespace std::chrono_literals;
 
@@ -55,6 +59,8 @@ public:
         if (mppi_params_.dynamics_model == mppi::EFFECTIVE_HISTORY_STATE_RESIDUAL)
             solver_->load_effective_history_state_residual_weights(effective_history_weights_path_);
 
+        load_track_csv();
+
         selected_drive_topic_ = is_simulation_
             ? simulation_drive_topic_ : real_drive_topic_;
         drive_pub_ = this->create_publisher<ackermann_msgs::msg::AckermannDriveStamped>(
@@ -64,19 +70,6 @@ public:
             boundary_visualization_topic_,
             rclcpp::QoS(rclcpp::KeepLast(5)).reliable().transient_local());
         traj_pub_  = this->create_publisher<smppi_cuda_controller::msg::MppiTrajectory>("/mppi_optimal_trajectory", 10);
-
-        auto path_qos = rclcpp::QoS(rclcpp::KeepLast(1)).reliable().transient_local();
-        path_sub_ = this->create_subscription<nav_msgs::msg::Path>(
-            path_topic_, path_qos,
-            std::bind(&MPPINode::path_callback, this, std::placeholders::_1));
-
-        auto qos = rclcpp::QoS(rclcpp::KeepLast(1)).reliable().transient_local();
-        left_bnd_sub_ = this->create_subscription<nav_msgs::msg::Path>(
-            "/mppi_left_boundary", qos,
-            std::bind(&MPPINode::left_bnd_callback, this, std::placeholders::_1));
-        right_bnd_sub_ = this->create_subscription<nav_msgs::msg::Path>(
-            "/mppi_right_boundary", qos,
-            std::bind(&MPPINode::right_bnd_callback, this, std::placeholders::_1));
 
         if (!is_simulation_) {
             // Real car: localization pose is in map frame, while wheel odom
@@ -745,8 +738,8 @@ private:
         this->declare_parameter("kf_steer_scale",1.1058064699);kf_steer_scale_=this->get_parameter("kf_steer_scale").as_double();
         this->declare_parameter("kf_steer_bias",-0.0300696939);kf_steer_bias_=this->get_parameter("kf_steer_bias").as_double();
         this->declare_parameter("kf_max_steer",0.4788);kf_max_steer_=this->get_parameter("kf_max_steer").as_double();
-        this->declare_parameter("path_topic",   "/mppi_target_path");
-        path_topic_  = this->get_parameter("path_topic").as_string();
+        this->declare_parameter("csv_file_path", "data/map1/map1_centerline.csv");
+        csv_file_path_ = this->get_parameter("csv_file_path").as_string();
 
         mppi_params_.dt            = 1.0 / std::max(1.0, control_rate_hz_);
         mppi_params_.control_dt    = mppi_params_.dt;
@@ -792,44 +785,111 @@ private:
     bool path_received_{false}, left_bnd_received_{false}, right_bnd_received_{false};
     int slack_boundary_publish_remaining_{0};
 
-    void path_callback(const nav_msgs::msg::Path::SharedPtr msg) {
-        if (path_received_ || msg->poses.empty()) return;
-        std::vector<float> xs, ys, yaws;
-        xs.reserve(msg->poses.size()); ys.reserve(msg->poses.size());
-        yaws.reserve(msg->poses.size());
-        for (const auto &p : msg->poses) {
-            xs.push_back(p.pose.position.x); ys.push_back(p.pose.position.y);
-            double yaw = atan2(2.0*(p.pose.orientation.w*p.pose.orientation.z
-                                  + p.pose.orientation.x*p.pose.orientation.y),
-                               1.0 - 2.0*(p.pose.orientation.y*p.pose.orientation.y
-                                         + p.pose.orientation.z*p.pose.orientation.z));
-            yaws.push_back((float)yaw);
+    static std::string trim_csv_cell(const std::string &value) {
+        const auto first = value.find_first_not_of(" \t\r\n");
+        if (first == std::string::npos) return {};
+        const auto last = value.find_last_not_of(" \t\r\n");
+        return value.substr(first, last-first+1);
+    }
+
+    static std::vector<std::string> split_csv_row(const std::string &line) {
+        std::vector<std::string> cells;
+        std::stringstream stream(line);
+        std::string cell;
+        while(std::getline(stream,cell,',')) cells.push_back(trim_csv_cell(cell));
+        return cells;
+    }
+
+    static int csv_column(const std::vector<std::string> &headers,
+                          std::initializer_list<const char*> names) {
+        for(const char *name:names)
+            for(std::size_t i=0;i<headers.size();++i)
+                if(headers[i]==name) return static_cast<int>(i);
+        return -1;
+    }
+
+    static float csv_float(const std::vector<std::string> &cells,int column,
+                           const std::string &path,std::size_t line_number) {
+        if(column<0 || column>=static_cast<int>(cells.size()))
+            throw std::runtime_error("Missing CSV value at "+path+":"+std::to_string(line_number));
+        try { return std::stof(cells[column]); }
+        catch(const std::exception&) {
+            throw std::runtime_error("Invalid CSV number at "+path+":"+std::to_string(line_number));
         }
-        ref_path_xs_ = xs; ref_path_ys_ = ys; ref_path_yaws_ = yaws;
-        solver_->set_reference_path(xs, ys, yaws);
-        RCLCPP_INFO_ONCE(this->get_logger(), "Path received: %zu points", xs.size());
-        path_received_ = true;
     }
 
-    void left_bnd_callback(const nav_msgs::msg::Path::SharedPtr msg) {
-        if (left_bnd_received_ || msg->poses.empty()) return;
-        left_xs_.clear(); left_ys_.clear();
-        for (const auto &p : msg->poses) { left_xs_.push_back(p.pose.position.x); left_ys_.push_back(p.pose.position.y); }
-        update_boundaries(); left_bnd_received_ = true;
-    }
+    void load_track_csv() {
+        if(csv_file_path_.empty()) throw std::invalid_argument("csv_file_path must not be empty");
+        std::string path=csv_file_path_;
+        if(path.front()!='/')
+            path=ament_index_cpp::get_package_share_directory("smppi_cuda_controller")+"/"+path;
+        std::ifstream file(path);
+        if(!file) throw std::runtime_error("Cannot open MPPI track CSV: "+path);
 
-    void right_bnd_callback(const nav_msgs::msg::Path::SharedPtr msg) {
-        if (right_bnd_received_ || msg->poses.empty()) return;
-        right_xs_.clear(); right_ys_.clear();
-        for (const auto &p : msg->poses) { right_xs_.push_back(p.pose.position.x); right_ys_.push_back(p.pose.position.y); }
-        update_boundaries(); right_bnd_received_ = true;
-    }
+        std::string line;
+        if(!std::getline(file,line)) throw std::runtime_error("Empty MPPI track CSV: "+path);
+        auto headers=split_csv_row(line);
+        for(auto &header:headers)
+            std::transform(header.begin(),header.end(),header.begin(),
+                [](unsigned char c){return static_cast<char>(std::tolower(c));});
+        const int ix=csv_column(headers,{"x_m","x","x_map"});
+        const int iy=csv_column(headers,{"y_m","y","y_map"});
+        const int iyaw=csv_column(headers,{"psi_rad","psi","yaw","heading_rad"});
+        const int iwl=csv_column(headers,{"w_tr_left_m","w_left_m","left_width_m"});
+        const int iwr=csv_column(headers,{"w_tr_right_m","w_right_m","right_width_m"});
+        const int ilx=csv_column(headers,{"left_x_m","left_x"});
+        const int ily=csv_column(headers,{"left_y_m","left_y"});
+        const int irx=csv_column(headers,{"right_x_m","right_x"});
+        const int iry=csv_column(headers,{"right_y_m","right_y"});
+        if(ix<0 || iy<0 || iwl<0 || iwr<0)
+            throw std::runtime_error("Track CSV requires x_m,y_m,w_tr_left_m,w_tr_right_m: "+path);
 
-    void update_boundaries() {
-        if (!left_xs_.empty() && !right_xs_.empty() && left_xs_.size() == right_xs_.size()) {
-            solver_->set_boundaries(left_xs_, left_ys_, right_xs_, right_ys_);
-            slack_boundary_publish_remaining_ = 5;
+        std::vector<float> xs,ys,yaws,wl,wr,lx,ly,rx,ry;
+        std::size_t line_number=1;
+        while(std::getline(file,line)) {
+            ++line_number;
+            if(trim_csv_cell(line).empty() || trim_csv_cell(line).front()=='#') continue;
+            const auto cells=split_csv_row(line);
+            xs.push_back(csv_float(cells,ix,path,line_number));
+            ys.push_back(csv_float(cells,iy,path,line_number));
+            wl.push_back(csv_float(cells,iwl,path,line_number));
+            wr.push_back(csv_float(cells,iwr,path,line_number));
+            yaws.push_back(iyaw>=0?csv_float(cells,iyaw,path,line_number):0.0f);
+            if(ilx>=0 && ily>=0 && irx>=0 && iry>=0) {
+                lx.push_back(csv_float(cells,ilx,path,line_number));
+                ly.push_back(csv_float(cells,ily,path,line_number));
+                rx.push_back(csv_float(cells,irx,path,line_number));
+                ry.push_back(csv_float(cells,iry,path,line_number));
+            }
         }
+        if(xs.size()<3) throw std::runtime_error("Track CSV needs at least 3 rows: "+path);
+        if(iyaw<0) for(std::size_t i=0;i<xs.size();++i) {
+            const std::size_t prev=(i+xs.size()-1)%xs.size(),next=(i+1)%xs.size();
+            yaws[i]=std::atan2(ys[next]-ys[prev],xs[next]-xs[prev]);
+        }
+        if(lx.size()!=xs.size()) for(std::size_t i=0;i<xs.size();++i) {
+            const float nx=-std::sin(yaws[i]),ny=std::cos(yaws[i]);
+            lx.push_back(xs[i]+nx*wl[i]); ly.push_back(ys[i]+ny*wl[i]);
+            rx.push_back(xs[i]-nx*wr[i]); ry.push_back(ys[i]-ny*wr[i]);
+        }
+
+        constexpr std::size_t MAX_CUDA_PATH_POINTS=1000;
+        const std::size_t source_count=xs.size();
+        const std::size_t output_count=std::min(source_count,MAX_CUDA_PATH_POINTS);
+        auto sample=[&](const std::vector<float>& source) {
+            std::vector<float> output; output.reserve(output_count);
+            for(std::size_t i=0;i<output_count;++i)
+                output.push_back(source[(i*source_count)/output_count]);
+            return output;
+        };
+        ref_path_xs_=sample(xs); ref_path_ys_=sample(ys); ref_path_yaws_=sample(yaws);
+        left_xs_=sample(lx); left_ys_=sample(ly); right_xs_=sample(rx); right_ys_=sample(ry);
+        solver_->set_reference_path(ref_path_xs_,ref_path_ys_,ref_path_yaws_);
+        solver_->set_boundaries(left_xs_,left_ys_,right_xs_,right_ys_);
+        path_received_=left_bnd_received_=right_bnd_received_=true;
+        slack_boundary_publish_remaining_=5;
+        RCLCPP_INFO(this->get_logger(),"Loaded MPPI track CSV: %s (%zu -> %zu points)",
+                    path.c_str(),source_count,output_count);
     }
 
     void publish_slack_boundaries() {
@@ -914,11 +974,6 @@ private:
             RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
                 "Waiting for simulator odom (%s)...",
                 simulation_odom_topic_.c_str());
-            return;
-        }
-        if (!path_received_ || !left_bnd_received_ || !right_bnd_received_) {
-            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
-                "Waiting for path/boundaries (%s)...", path_topic_.c_str());
             return;
         }
         auto start = std::chrono::high_resolution_clock::now();
@@ -1211,9 +1266,6 @@ private:
     std::vector<float> left_xs_, left_ys_, right_xs_, right_ys_;
     std::vector<float> ref_path_xs_, ref_path_ys_, ref_path_yaws_;
 
-    rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr     path_sub_;
-    rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr     left_bnd_sub_;
-    rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr     right_bnd_sub_;
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;  // 단일 구독
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr obstacle_odom_sub_;
     rclcpp::Subscription<f1_msgs::msg::F1stateArr>::SharedPtr perception_obstacles_sub_;
@@ -1230,7 +1282,7 @@ private:
 
     std::string simulation_odom_topic_, simulation_drive_topic_;
     std::string real_pose_topic_, real_odom_topic_, real_drive_topic_;
-    std::string selected_drive_topic_, path_topic_, imu_topic_, dynamics_model_name_, residual_weights_path_,mlp_weights_path_;
+    std::string selected_drive_topic_, csv_file_path_, imu_topic_, dynamics_model_name_, residual_weights_path_,mlp_weights_path_;
     std::string boundary_visualization_topic_;
     std::string simulation_obstacle_odom_topic_;
     std::string real_perception_obstacles_topic_, real_perception_obstacles_frame_;

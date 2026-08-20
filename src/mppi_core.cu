@@ -560,12 +560,12 @@ namespace mppi
         // Longitudinal response is identified directly from vx_cmd -> vx.
         // Keep the network exclusively as a lateral/yaw correction model so
         // its delta_ax cannot fight the deterministic speed-servo dynamics.
-        residual_derivatives[0] = 0.0f;
-        residual_derivatives[1] = fminf(8.0f, fmaxf(-8.0f, residual_derivatives[1]));
+        residual_derivatives[0] = 0.0f; // Delta ax
+        residual_derivatives[1] = fminf(8.0f, fmaxf(-8.0f, residual_derivatives[1])); // Delta ay
         residual_derivatives[2] = fminf(
             params.dynamic_mlp_max_residual_yaw_accel,
             fmaxf(-params.dynamic_mlp_max_residual_yaw_accel,
-                  residual_derivatives[2]));
+                  residual_derivatives[2])); // Delta yaw acceleration
 
         // Smoothly suppress a poorly observable residual around standstill;
         // this is identical to real_car_v2/contract.py::low_speed_gate.
@@ -783,6 +783,7 @@ namespace mppi
         const Control &u, const Control &u_prev,
         const Params &p,
         float min_bnd_dist,
+        float applied_steering_angle,
         bool terminal_step,
         int* last_idx)
     {
@@ -857,6 +858,20 @@ namespace mppi
         const float friction_excess = fmaxf(0.0f, tire_utilization - 1.0f);
         const float friction_ellipse_cost = p.q_lat_g * friction_excess * friction_excess;
 
+        // Front-tire slip soft constraint. Use the same servo-lagged steering
+        // angle and sign convention as update_dynamic_mlp_residual().
+        constexpr float MIN_FRONT_SLIP_SPEED = 0.5f;
+        const float safe_front_vx = fmaxf(fabsf(s.v), MIN_FRONT_SLIP_SPEED);
+        const float front_tire_slip_angle = applied_steering_angle - atan2f(
+            s.vy + p.l_f * s.omega, safe_front_vx);
+        const float front_slip_excess =
+            fabsf(s.v) >= p.front_slip_cost_min_speed
+                ? fmaxf(0.0f,
+                        fabsf(front_tire_slip_angle) - p.front_slip_soft_limit)
+                : 0.0f;
+        const float front_slip_cost =
+            p.q_front_slip * front_slip_excess * front_slip_excess;
+
         // Rear-tire slip soft constraint. Unlike the GG ellipse, this catches
         // rear-axle saturation/oversteer even when total vehicle acceleration
         // remains inside the combined-grip boundary. Disable it at low speed,
@@ -896,21 +911,25 @@ namespace mppi
         const float boundary_cost = boundary_slack_weight
             * boundary_slack * boundary_slack;
 
-        // 7. Obstacle soft constraint.
-        // s_obs=max(0,required_clearance-center_distance), J=q_obs*s_obs^2.
-        // The post-rollout collision guard remains a separate safety layer.
+        // 7. Obstacle soft constraint. car_radius remains the hard physical
+        // guard, but the smooth cost begins outside it. Without this margin the
+        // cost is exactly zero until the hard post-selection suddenly replaces
+        // the entire weighted sequence.
         float obs_cost = 0.0f;
+        const float obstacle_soft_radius =
+            p.car_radius + p.obstacle_soft_margin;
         for (int i = 0; i < p.num_obstacles; ++i) {
             float dx = s.x - p.obs_x[i];
             float dy = s.y - p.obs_y[i];
             float dist = sqrtf(dx * dx + dy * dy);
-            const float obstacle_slack=fmaxf(0.0f,p.car_radius-dist);
+            const float obstacle_slack=fmaxf(0.0f,obstacle_soft_radius-dist);
             obs_cost += p.q_obs*obstacle_slack*obstacle_slack;
         }
 
         const float tracking_cost=p.objective_mode==LMPC_OBJECTIVE
             ? 0.0f : path_cost+vel_cost+error_speed_cost;
         return tracking_cost + friction_ellipse_cost
+             + front_slip_cost
              + rear_slip_cost
              + steer_cost + rate_cost + boundary_cost + obs_cost;
     }
@@ -1166,7 +1185,20 @@ namespace mppi
             u_clamped.steer = fminf(fmaxf(u_clamped.steer, -p.max_steer), p.max_steer);
 
             const float speed_lower_bound=fminf(p.min_speed,prev_controls[0].accel);
-            u_clamped.accel=fminf(p.max_speed,fmaxf(speed_lower_bound,u_clamped.accel));
+            float curve_speed_limit=p.max_speed;
+            if(p.curve_lateral_accel_limit>0.0f && path_len>2) {
+                constexpr int curvature_window=4;
+                const int before=(local_path_idx+path_len-curvature_window)%path_len;
+                const int after=(local_path_idx+curvature_window)%path_len;
+                const float chord=hypotf(ref_xs[after]-ref_xs[before],
+                                         ref_ys[after]-ref_ys[before]);
+                const float curvature=fabsf(angle_normalize(
+                    ref_yaws[after]-ref_yaws[before]))/fmaxf(chord,1.0e-3f);
+                curve_speed_limit=fminf(p.max_speed,sqrtf(
+                    p.curve_lateral_accel_limit/fmaxf(curvature,1.0e-3f)));
+            }
+            u_clamped.accel=fminf(curve_speed_limit,
+                fmaxf(speed_lower_bound,u_clamped.accel));
 
             current_action = u_clamped; 
 
@@ -1184,7 +1216,8 @@ namespace mppi
                 total_cost += compute_cost_cuda(
                     x,
                     ref_xs, ref_ys, ref_yaws, path_len,
-                    u_clamped, last_u, p, min_dist, t == T - 1,
+                    u_clamped, last_u, p, min_dist, mlp_command_history[10],
+                    t == T - 1,
                     &local_path_idx);
             }
 

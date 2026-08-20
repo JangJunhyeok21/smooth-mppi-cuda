@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Compare runtime 2-state KF vy against offline MCL-pose differentiated vy."""
 from pathlib import Path
+import argparse
 import json
 import sys
 
@@ -52,10 +53,18 @@ def stats(reference, estimate):
 
 
 def main():
-    OUTPUT.mkdir(parents=True, exist_ok=True)
+    global POSE_DERIVATIVE_WINDOW_S
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--data",type=Path,default=DATA_DIR)
+    parser.add_argument("--output",type=Path,default=OUTPUT)
+    parser.add_argument("--pose-derivative-window",type=float,
+                        default=POSE_DERIVATIVE_WINDOW_S)
+    args=parser.parse_args();data_dir=args.data;output=args.output
+    POSE_DERIVATIVE_WINDOW_S=args.pose_derivative_window
+    output.mkdir(parents=True, exist_ok=True)
     cfg = yaml.safe_load(PARAMS.read_text())["/**"]["ros__parameters"]
     records = []
-    for path in sorted(DATA_DIR.glob("*.npz")):
+    for path in sorted(data_dir.glob("*.npz")):
         data = np.load(path); samples = data["samples"].astype(float)
         names = {str(name): index for index, name in enumerate(data["columns"])}
         dt = float(data["dt"])
@@ -73,7 +82,20 @@ def main():
             measurement_var_yaw_rate=float(cfg["kf_r_yaw_rate"]),
             initial_var_vy=float(cfg["kf_initial_p_vy"]),
             initial_var_yaw_rate=float(cfg["kf_initial_p_yaw_rate"]),
-            imu_lateral_accel_sign=float(cfg["imu_lateral_accel_sign"]))
+            imu_lateral_accel_sign=float(cfg["imu_lateral_accel_sign"]),
+            pacejka_b_front=float(cfg["dynamic_mlp_B_f"]),
+            pacejka_c_front=float(cfg["dynamic_mlp_C_f"]),
+            pacejka_d_front=float(cfg["dynamic_mlp_D_f"]),
+            pacejka_e_front=float(cfg["dynamic_mlp_E_f"]),
+            pacejka_b_rear=float(cfg["dynamic_mlp_B_r"]),
+            pacejka_c_rear=float(cfg["dynamic_mlp_C_r"]),
+            pacejka_d_rear=float(cfg["dynamic_mlp_D_r"]),
+            pacejka_e_rear=float(cfg["dynamic_mlp_E_r"]),
+            process_var_ay_bias=float(cfg["kf_q_ay_bias"]),
+            initial_var_ay_bias=float(cfg["kf_initial_p_ay_bias"]),
+            max_abs_ay_bias=float(cfg["kf_max_abs_ay_bias"]),
+            measurement_var_pose_vy=float(cfg["kf_r_pose_vy"]),
+            pose_vy_gate=float(cfg["kf_pose_vy_gate"]))
         kf_vy, _ = estimate_dataset(
             samples, data["columns"], dt, params,
             steer_scale=float(cfg["kf_steer_scale"]),
@@ -81,7 +103,9 @@ def main():
             max_steer=float(cfg["kf_max_steer"]),
             imu_ema_alpha=float(data["imu_ema_alpha"] if "imu_ema_alpha" in data.files
                                 else cfg["imu_ema_alpha"]),
-            imu_wz_sign=float(signs[0]), imu_ay_sign=float(signs[2]))
+            imu_wz_sign=float(signs[0]), imu_ay_sign=float(signs[2]),
+            use_pose_vy=bool(cfg["kf_pose_vy_enabled"]),
+            pose_window_s=float(cfg["kf_pose_vy_window_s"]))
         for segment_id in np.unique(samples[:, names["bag_id"]].astype(int)):
             indices = np.flatnonzero(samples[:, names["bag_id"]].astype(int) == segment_id)
             if len(indices) < int(round(MIN_SEGMENT_DURATION_S/dt)):
@@ -99,13 +123,13 @@ def main():
                             "y": samples[indices, names["y"]][valid],
                             "mcl_vy": pose_vy[valid], "kf_vy": kf_vy[indices][valid]})
     if not records:
-        raise RuntimeError(f"no usable NPZ in {DATA_DIR}")
+        raise RuntimeError(f"no usable NPZ in {data_dir}")
 
     mcl = np.concatenate([record["mcl_vy"] for record in records])
     kf = np.concatenate([record["kf_vy"] for record in records])
     vx = np.concatenate([record["vx"] for record in records])
     moving = np.abs(vx) >= .5
-    report = {"data_directory": str(DATA_DIR), "npz_files": len({r["path"] for r in records}),
+    report = {"data_directory": str(data_dir), "npz_files": len({r["path"] for r in records}),
               "segments": len(records), "pose_derivative":
               f"centered Savitzky-Golay, {POSE_DERIVATIVE_WINDOW_S:.2f} s",
               "all_speed": stats(mcl, kf), "moving_vx_ge_0p5": stats(mcl[moving], kf[moving])}
@@ -118,7 +142,7 @@ def main():
         metric = stats(reference, estimate); metric["bag"] = path.stem
         per_bag.append(metric)
     report["per_bag"] = sorted(per_bag, key=lambda item: item["mae_mps"])
-    (OUTPUT/"metrics.json").write_text(json.dumps(report, indent=2)+"\n")
+    (output/"metrics.json").write_text(json.dumps(report, indent=2)+"\n")
 
     # Aggregate distribution and bag-to-bag variation.
     fig, axes = plt.subplots(2, 2, figsize=(16, 11), constrained_layout=True)
@@ -151,7 +175,7 @@ def main():
                    ylabel="|KF vy - MCL vy| [m/s]"); axes[1, 1].legend()
     for axis in axes.ravel(): axis.grid(alpha=.25)
     fig.suptitle("2-state runtime KF vy versus offline MCL pose-differentiated vy")
-    fig.savefig(OUTPUT/"aggregate_comparison.png", dpi=180); plt.close(fig)
+    fig.savefig(output/"aggregate_comparison.png", dpi=180); plt.close(fig)
 
     # Time traces for best/median/worst segment, ranked by MAE.
     ranked = sorted(records, key=lambda record: np.mean(abs(record["kf_vy"]-record["mcl_vy"])))
@@ -172,7 +196,7 @@ def main():
         axes[row, 1].axis("equal"); fig.colorbar(points, ax=axes[row, 1], label="|error| [m/s]")
         for axis in axes[row]: axis.grid(alpha=.25)
     axes[0, 0].legend()
-    fig.savefig(OUTPUT/"best_median_worst_segments.png", dpi=180); plt.close(fig)
+    fig.savefig(output/"best_median_worst_segments.png", dpi=180); plt.close(fig)
     print(json.dumps({key: value for key, value in report.items() if key != "per_bag"}, indent=2))
 
 

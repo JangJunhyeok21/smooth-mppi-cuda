@@ -90,8 +90,9 @@ class Recorder(Node):
         p=m.pose.pose.position
         self.obstacle.append((self.rel(),p.x,p.y))
     def pred_cb(self,m):
-        self.pred.append((self.rel(),np.asarray(m.predicted_x),np.asarray(m.predicted_y),
-                          np.asarray(m.steer),np.asarray(m.accel)))
+        self.pred.append((self.rel(),m.tracking_cost,m.friction_ellipse_cost,
+                          m.front_slip_cost,m.rear_slip_cost,m.steer_cost,
+                          m.rate_cost,m.boundary_cost,m.obs_cost,m.progress_cost))
     def mlp_input_cb(self,m):
         self.mlp_input.append((self.rel(),*m.features,m.published_steer,
                                m.published_speed,float(m.imu_valid)))
@@ -112,9 +113,8 @@ class Recorder(Node):
         obstacle=np.asarray(self.obstacle)
         np.savez_compressed(self.out/"map1_lap_data.npz",odom=od,drive=dr,obstacle=obstacle,
             mlp_input=np.asarray(self.mlp_input,dtype=np.float32),
-            prediction_t=np.asarray([p[0] for p in self.pred]),
-            prediction_x=np.asarray([p[1] for p in self.pred],dtype=object),
-            prediction_y=np.asarray([p[2] for p in self.pred],dtype=object),status=self.status)
+            mppi_cost=np.asarray(self.pred,dtype=np.float32),
+            status=self.status)
         minimum_obstacle_distance=float("nan")
         if len(od) and len(obstacle):
             center=np.median(obstacle[:,1:3],axis=0)

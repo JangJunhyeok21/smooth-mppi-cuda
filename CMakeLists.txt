@@ -1,6 +1,14 @@
 cmake_minimum_required(VERSION 3.8)
 project(smppi_cuda_controller LANGUAGES C CXX CUDA)
 
+# ROS 2 Humble's rosidl generators are installed for the system Python.  A
+# shell with Conda active may otherwise select Conda's incompatible empy
+# package and fail while generating this package's messages.
+set(Python3_EXECUTABLE "/usr/bin/python3" CACHE FILEPATH
+  "Python interpreter used by ROS 2 code generation" FORCE)
+set(PYTHON_EXECUTABLE "/usr/bin/python3" CACHE FILEPATH
+  "Legacy Python interpreter used by ROS 2 code generation" FORCE)
+
 # colcon / VS Code tasks 에서 Debug 또는 Release 를 선택할 수 있도록
 # 사용자가 지정하지 않은 경우에만 Release 를 기본값으로 둔다.
 if(NOT CMAKE_BUILD_TYPE)
@@ -42,7 +50,10 @@ find_package(sensor_msgs REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 # [수정 3] fastrtps_cpp 종속성 제거 (기본 typesupport가 알아서 처리함)
 find_package(std_msgs REQUIRED)
-find_package(f1_msgs REQUIRED)
+# f1_msgs is only used by the real-car perception obstacle subscriber.  Keep
+# simulator/controller builds usable on machines that do not have that
+# integration workspace installed.
+find_package(f1_msgs QUIET)
 
 # CUDA 라이브러리 찾기
 find_package(CUDAToolkit REQUIRED)
@@ -99,6 +110,7 @@ target_include_directories(smppi_node PUBLIC
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/MppiTrajectory.msg"
   "msg/MlpModelInput.msg"
+  "msg/KfState.msg"
   DEPENDENCIES std_msgs
 )
 
@@ -106,7 +118,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
 rosidl_get_typesupport_target(cpp_typesupport_target ${PROJECT_NAME} "rosidl_typesupport_cpp")
 target_link_libraries(smppi_node "${cpp_typesupport_target}")
 
-ament_target_dependencies(smppi_node
+set(SMPPI_NODE_DEPENDENCIES
   ament_index_cpp
   rclcpp
   ackermann_msgs
@@ -114,8 +126,15 @@ ament_target_dependencies(smppi_node
   visualization_msgs
   geometry_msgs
   sensor_msgs
-  f1_msgs
 )
+if(f1_msgs_FOUND)
+  list(APPEND SMPPI_NODE_DEPENDENCIES f1_msgs)
+  target_compile_definitions(smppi_node PRIVATE SMPPI_HAS_F1_MSGS=1)
+  message(STATUS "f1_msgs found: real-car perception obstacle input enabled")
+else()
+  message(WARNING "f1_msgs not found: real-car perception obstacle input disabled")
+endif()
+ament_target_dependencies(smppi_node ${SMPPI_NODE_DEPENDENCIES})
 
 # 라이브러리 링크 (CUDA 링크)
 target_link_libraries(smppi_node

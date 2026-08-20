@@ -4,7 +4,7 @@
     # MLP 모델만 아래 학습 가중치를 읽고, Classic 모델은 이 파일을 읽지 않는다.
     dynamics_model: dynamic_mlp_residual_servo_lag
     dynamic_mlp_servo_lag_weights_path: /home/a/smooth-mppi-cuda/config/dynamic_40ms_residual_servo_lag.bin
-    # IMU is causally aligned to odometry and is also used by the 2-state vy KF.
+    # IMU는 odom 시각에 causal 정렬되어 7-state vy EKF 입력으로 사용된다.
     imu_topic: /imu/data
     imu_sync_max_age_s: 0.05
     imu_ema_alpha: 0.25
@@ -12,73 +12,79 @@
     imu_wz_sign: 1.0
     imu_ax_sign: 1.0
     imu_ay_sign: 1.0
-    # MPPI 입력 vy를 만드는 Pacejka EKF 설정
-    kf_min_vx: 0.5
+    # 0817~0820 정지구간 robust median; FLU 변환 후 제거한다.
+    imu_wz_bias: 0.00073408385
+    imu_ax_bias: -0.40832535
+    imu_ay_bias: -0.14516330
+    # MCL(x,y,yaw) + odom(vx) + IMU(ax,ay,yaw-rate) EKF 설정
     kf_low_speed_threshold: 0.5  # CUDA rollout: below 0.5 m/s force vy=0
     kf_max_abs_vy: 2.0
-    kf_q_vy: 0.0201115585
-    kf_q_yaw_rate: 0.02
-    kf_r_lateral_accel: 2.3163064
-    kf_r_yaw_rate: 0.01
-    kf_initial_p_vy: 0.25
-    kf_initial_p_yaw_rate: 0.10
-    kf_reset_gap_s: 0.5
-    # +1 assumes sensor_msgs/Imu.linear_acceleration.y is vehicle body +Y (left).
-    # Set -1 only if the installed IMU's +Y axis points to vehicle right.
-    imu_lateral_accel_sign: 1.0
-    # Random-walk accelerometer bias and causal map-pose lateral-velocity update.
-    # MCL velocity uses only samples at or before the odometry timestamp.
-    kf_q_ay_bias: 0.00000284563005
-    kf_initial_p_ay_bias: 0.0087928143
-    kf_max_abs_ay_bias: 0.7880429
-    kf_pose_vy_enabled: true
-    kf_pose_vy_window_s: 0.12
-    kf_pose_vy_max_age_s: 0.06
-    kf_r_pose_vy: 0.0793341074
-    kf_pose_vy_gate: 1.3457935
-    # Must match model_tuning/real_car_v2/helper_lateral_velocity_kf.py::estimate_dataset.
-    kf_steer_scale: 1.1058064699
-    kf_steer_bias: -0.0300696939
-    kf_max_steer: 0.4788
+    # Q: 각 상태 모델의 한 step 불확실성
+    kf_q_x: 0.00002
+    kf_q_y: 0.00002
+    kf_q_yaw: 0.00002
+    kf_q_vx: 0.002
+    kf_q_vy: 0.008
+    kf_q_ax_bias: 0.000002
+    kf_q_ay_bias: 0.000002
+    # R: MCL pose와 바퀴 odom vx 측정 노이즈
+    kf_r_mcl_x: 0.004
+    kf_r_mcl_y: 0.004
+    kf_r_mcl_yaw: 0.008
+    kf_r_odom_vx: 0.03
+    # 초기 상태 covariance
+    kf_p0_x: 0.02
+    kf_p0_y: 0.02
+    kf_p0_yaw: 0.02
+    kf_p0_vx: 0.10
+    kf_p0_vy: 0.25
+    kf_p0_ax_bias: 0.10
+    kf_p0_ay_bias: 0.10
     # --- Limits ---
     max_steer: 0.4788        # rad
-    min_accel: -1.0          # m/s^2
-    max_accel: 1.0           # m/s^2
+    # 현재 배포 모델의 학습 계약. ±4 후보는 tail 평가 미통과로 아직 배포하지 않는다.
+    min_accel: -2.0          # m/s^2
+    max_accel: 2.0           # m/s^2
     min_speed: 0.5
-    max_speed: 10.0  # fastest validated Map1 setting
+    max_speed: 5.0  # 직선에서 허용하는 최고속도; 코너는 아래 횡가속도 한계로 감속
+    curve_lateral_accel_limit: 6.5  # 코너 진입속도를 횡가속도 4.5 m/s^2 기준으로 제한
     # Racing-line 자유도를 위해 중앙선 오차 기반 publish 속도 제한은 사용하지 않는다.
     heading_speed_limit_gain: 0.0
     contour_speed_limit_gain: 0.0
 
     # --- Costs (최적화 결과 반영) ---
-    q_v: 16.0
+    q_v: 16.0 # vs 크기에 비례해서 
     q_dist: 0.0             # legacy Euclidean path cost (MPCC에서는 0 유지)
     q_contour: 0.0          # 중앙선 고정 대신 track boundary 안에서 racing line 허용
     q_lag: 0.0              # 중앙선 접선방향 위치 오차는 랩타임 목적에 사용하지 않음
     q_heading: 1.0          # 역주행/불안정 억제를 위한 약한 방향 regularization만 유지
     q_error_speed: 0.0      # 중앙선 오차에 따른 속도 억제 비활성화
     q_du: 0.12
-    q_steer: 0.50
-    q_lat_g: 30.0
-    lat_g_soft_limit: 9.5                 # soft combined-grip ceiling
-    longitudinal_accel_soft_limit: 2.8    # friction ellipse ax axis [m/s^2]
+    q_steer: 0.10
+    q_lat_g: 60.0 # friction ellipse 초과 비용
+    lat_g_soft_limit: 6.5                 # soft combined-grip ceiling # DD-diagram ay max 제한
+    longitudinal_accel_soft_limit: 2.0    # friction ellipse ax axis [m/s^2] #DD-diagram ax max 제한
+    # 전륜 slip soft constraint: applied steer를 사용한 alpha_f 비용
+    q_front_slip: 300.0
+    front_slip_soft_limit_deg: 8.0
+    front_slip_cost_min_speed: 1.5
     # Rear-slip soft constraint: q * max(0, |alpha_r|-limit)^2.
     # alpha_r = -atan2(vy-l_r*yaw_rate, |vx|). It complements the GG ellipse
     # by detecting rear-axle saturation while total ax/ay is still moderate.
-    q_rear_slip: 300.0
-    rear_slip_soft_limit_deg: 7.0
+    q_rear_slip: 800.0
+    rear_slip_soft_limit_deg: 5.0
     rear_slip_cost_min_speed: 1.5         # disable ill-conditioned low-vx slip cost
     # MPC-style lane-boundary slack:
     # s_k=max(0, collision_radius-min_boundary_clearance), cost=q_s*s_k^2.
     # Boundary violation remains finite/selectable; only physical obstacles
     # retain post-rollout hard candidate rejection.
-    collision_radius: 0.30
-    q_boundary_slack: 1000.0
-    q_boundary_terminal_slack: 15000.0
+    collision_radius: 0.40
+    q_boundary_slack: 2000.0
+    q_boundary_terminal_slack: 20000.0
     # true: reject an off-track weighted-control rollout and use the
     # lowest-cost safe sampled sequence. false: publish standard MPPI weighted
     # controls without this post-optimization replacement.
-    weighted_trajectory_safety_enabled: true
+    weighted_trajectory_safety_enabled: false
     # LMPC와 같은 terminal safe set: 최근 2개 완주 lap에서 진행도 주변 20점씩 사용.
     # 목적함수 전환: mpcc=contour/progress, lmpc=terminal safe-set/cost-to-go.
     # 현재 2 m/s safe set은 느리므로 랩타임 주행 기본값은 mpcc이다.
@@ -90,8 +96,8 @@
     safe_set_state_scale_x: 1.0        # x 오차 정규화 크기 [m]
     safe_set_state_scale_y: 1.0        # y 오차 정규화 크기 [m]
     safe_set_state_scale_yaw: 0.5      # yaw 오차 정규화 크기 [rad]
-    q_progress: 85.0        # simulation lap-time tuning
-    q_escape_vel: 56.0      # horizon 말단의 전진속도 보상
+    q_progress: 100.0        # 경계를 가로지르는 가짜 progress가 지배하지 않도록 제한
+    q_escape_vel: 0.0      # horizon 말단의 전진속도 보상
     horizon_steps: 60       # model_dt=0.04 s 기준 3.2 s prediction horizon
     # --- Obstacle Avoidance Params ---
     obstacle_avoidance_enabled: true
@@ -101,9 +107,11 @@
     real_perception_obstacles_topic: /f1/perception/object/obstacles/arr
     real_perception_obstacles_frame: map
     obstacle_timeout: 0.5
-    car_radius: 0.4            # conservative combined footprint radius
-    # 장애물 soft constraint: s=max(0, car_radius-distance), cost=q_obs*s^2
-    q_obs: 15000.0
+    car_radius: 0.5            # 실제 충돌 판정에 쓰는 combined footprint 반경
+    # car_radius 진입 전부터 회피를 준비해 속도/조향의 급격한 변화를 막는다.
+    obstacle_soft_margin: 0.0  # soft cost 시작 반경 = car_radius + 1.0 m
+    # s=max(0, car_radius+margin-distance), cost=q_obs*s^2
+    q_obs: 1000.0
     
     # --- Noise & Tuning ---
     noise_steer_std: 0.35    # rad/s
@@ -114,6 +122,8 @@
     lambda: 20.0
     num_samples: 1600        # desktop simulation: ~4 ms measured
     visualize_candidates: false # K*T 후보 복사는 끄고 weighted optimal trajectory만 발행
+    # false이면 /mppi_optimal_trajectory와 8개 cost 재계산을 모두 생략한다(대회 권장).
+    publish_optimal_trajectory: true
     # Slack-zero left/right boundary markers are separate from rollout markers.
     boundary_visualization_topic: /mppi_boundary_viz
     mlp_input_topic: /mppi_mlp_input  # 실제 CUDA 첫 knot의 22D MLP 입력 기록용
@@ -186,16 +196,19 @@
     dynamic_mlp_E_r: -0.9999999999999999
     dynamic_mlp_I_z: 0.04712
     dynamic_mlp_min_speed: 0.8 # runtime low-speed kinematic yaw fallback / residual gate
-    # 실차 학습분포(P99.5 yaw accel=10.8 rad/s^2) 기반 yaw 예측 폭주 방지.
+    # MLP가 보정하는 yaw 가속도(r_dot) 자체의 절댓값 상한 [rad/s^2].
     dynamic_mlp_max_residual_yaw_accel: 12.0
-    # 실제 applied steer가 포화에 가까울 때만 residual을 점진적으로 줄인다.
-    dynamic_mlp_residual_gate_steer_start: 0.40
-    dynamic_mlp_residual_gate_steer_end: 0.4788
+    # |applied steer|가 start 이하면 residual 100%, start~end는 선형 감소.
+    dynamic_mlp_residual_gate_steer_start: 0.40  # residual 감소 시작 조향각 [rad]
+    dynamic_mlp_residual_gate_steer_end: 0.4788 # residual이 0이 되는 조향각 [rad]
+    # Pacejka+MLP를 합친 최종 yaw 가속도 변화량 상한 [rad/s^2].
     dynamic_mlp_max_total_yaw_accel: 12.0
-    # min(scale*|vx*tan(applied)/L|+margin, ay_limit/|vx|) yaw-rate 한계.
+    # 최종 |yaw-rate| 상한의 kinematic 항 배율: scale*|vx*tan(delta)/L|.
     dynamic_mlp_yaw_rate_kinematic_scale: 0.75
+    # kinematic yaw-rate 상한에 더하는 고정 여유 [rad/s].
     dynamic_mlp_yaw_rate_margin: 0.35
-    dynamic_mlp_yaw_rate_lateral_accel_limit: 9.5
+    # |yaw-rate| <= ay_limit/|vx|로 제한할 때 쓰는 횡가속도 한계 [m/s^2].
+    dynamic_mlp_yaw_rate_lateral_accel_limit: 6.5
 
     # --- Runtime environment and topics ---
     # Required CSV columns: x_m, y_m, w_tr_left_m, w_tr_right_m.
@@ -207,7 +220,7 @@
     publish_rate: 1.0
     # true : simulator pose + twist come from simulation_odom_topic
     # false: real_pose_topic supplies map pose and real_odom_topic supplies velocity
-    is_simulation: false
+    is_simulation: true
     simulation_odom_topic: /ego_racecar/odom
     simulation_drive_topic: /drive  # must match f1tenth_gym_ros sim.yaml ego_drive_topic
     real_pose_topic: /newmcl_pose

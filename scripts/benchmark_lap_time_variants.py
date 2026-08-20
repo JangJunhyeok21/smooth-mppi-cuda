@@ -4,15 +4,15 @@ import json, os, signal, subprocess, time
 from pathlib import Path
 
 ROOT=Path(__file__).resolve().parents[1]
-SIM_ROOT=Path("/home/a/f1tenth_gym_ros")
-OUT=ROOT/"model_tuning/results/map1_lap_time_variants"
+SIM_ROOT=ROOT/"f1tenth_gym_ros"
+OUT=ROOT/"model_tuning/results/map1_simulator_gru_controller_confirmation"
 VARIANTS=(
-    ("lmpc",{"objective_mode":"lmpc"}),
-    ("mpcc",{"objective_mode":"mpcc"}),
-    ("fast_balanced",{"objective_mode":"mpcc","q_v":"15.0","q_progress":"105.0",
-                      "q_escape_vel":"34.0","q_du":"0.10"}),
-    ("fast_aggressive",{"objective_mode":"mpcc","q_v":"18.0","q_progress":"125.0",
-                        "q_escape_vel":"40.0","q_du":"0.08"}),
+    ("safe25",{"objective_mode":"mpcc","max_speed":"2.5","q_progress":"10.0",
+               "q_escape_vel":"0.0","q_rear_slip":"1000.0","rear_slip_soft_limit_deg":"5.0",
+               "q_lat_g":"60.0","q_boundary_slack":"10000.0"}),
+    ("safe30_progress15",{"objective_mode":"mpcc","max_speed":"3.0","q_progress":"15.0",
+               "q_escape_vel":"2.0","q_rear_slip":"1800.0","rear_slip_soft_limit_deg":"5.0",
+               "q_lat_g":"90.0","q_heading":"4.0","q_boundary_slack":"15000.0"}),
 )
 
 def start(command,cwd,log):
@@ -55,14 +55,14 @@ def main():
                 check=True,stdout=subprocess.DEVNULL)
             time.sleep(1.0)
             recorder=start(["/usr/bin/python3","scripts/record_map1_lap.py","--laps","2",
-                            "--timeout","45","--output",str(directory)],ROOT,directory/"recorder.log")
+                            "--timeout","60","--output",str(directory)],ROOT,directory/"recorder.log")
             time.sleep(.4)
             command=["ros2","run","smppi_cuda_controller","smppi_node","--ros-args",
                      "--params-file",str(ROOT/"config/params.yaml"),
                      "-p","is_simulation:=true","-p","obstacle_avoidance_enabled:=false"]
             for key,value in overrides.items():command.extend(("-p",f"{key}:={value}"))
             controller=start(command,ROOT,directory/"controller.log")
-            deadline=time.monotonic()+50
+            deadline=time.monotonic()+65
             while not (directory/"summary.txt").exists() and time.monotonic()<deadline:
                 time.sleep(.1)
             if not (directory/"summary.txt").exists():raise TimeoutError("recorder timeout")

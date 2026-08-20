@@ -100,6 +100,9 @@ struct Params {
     float max_accel;
     float min_speed;
     float max_speed;
+    // Per-rollout curve speed cap: v <= sqrt(a_y_limit / |curvature|).
+    // Zero disables the cap; max_speed remains the straight-line ceiling.
+    float curve_lateral_accel_limit;
     // CUDA rollout-only no-slip prior. The host KF keeps its own state; after
     // each predicted step, |body vx| below this value forces predicted vy=0.
     float kf_low_speed_threshold;
@@ -116,6 +119,11 @@ struct Params {
     float q_lat_g;
     float lat_g_soft_limit;
     float longitudinal_accel_soft_limit;
+    // Front-tire slip soft constraint. The applied (servo-lagged) steering
+    // angle is used, not the raw command.
+    float q_front_slip;
+    float front_slip_soft_limit;
+    float front_slip_cost_min_speed;
     // Rear-tire slip soft constraint. The threshold is stored in radians.
     float q_rear_slip;
     float rear_slip_soft_limit;
@@ -146,6 +154,9 @@ struct Params {
     float obs_x[MAX_OBS];
     float obs_y[MAX_OBS];
     float car_radius;
+    // Extra distance outside the hard collision radius where the smooth
+    // obstacle cost starts acting.
+    float obstacle_soft_margin;
     float q_obs;
     bool rollout_obstacle_ahead;
 

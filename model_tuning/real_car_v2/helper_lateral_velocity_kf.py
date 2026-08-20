@@ -223,3 +223,93 @@ def estimate_dataset(samples, columns, dt, params=None, steer_scale=1.1058064699
         yaw_rate[i] = kf.get_yaw_rate()
         previous_bag, previous_t = bag, stamp
     return vy, yaw_rate
+
+
+def estimate_dataset_pose_only(samples, columns, dt, params=None,
+                               steer_scale=1.1058064699, steer_bias=-0.0300696939,
+                               max_steer=0.4788, imu_ema_alpha=0.25,
+                               imu_wz_sign=1.0, use_pose_vy=True,
+                               pose_window_s=0.12, **_unused):
+    """Scalar runtime candidate: one Pacejka call + causal pose-vy update."""
+    names = {str(name): i for i, name in enumerate(columns)}
+    cfg = params or LateralVelocityKFParams(dt=dt)
+    vy = np.zeros(len(samples)); yaw_rate = np.zeros(len(samples))
+    estimate = 0.0; covariance = max(cfg.initial_var_vy, 1e-8)
+    previous_bag = previous_t = None; filtered_wz = 0.0; pose_history = []
+    dynamics = LateralVelocityKF(cfg)
+    for i, row in enumerate(samples):
+        bag, stamp = int(row[names["bag_id"]]), row[names["t"]]
+        wz = imu_wz_sign*row[names["imu_wz"]]
+        reset = previous_bag != bag or previous_t is None or abs(stamp-previous_t-dt) > .5*dt
+        if reset:
+            estimate=0.0; covariance=max(cfg.initial_var_vy,1e-8)
+            filtered_wz=wz; pose_history=[]
+        else:
+            alpha=float(np.clip(imu_ema_alpha,0.,1.))
+            filtered_wz=alpha*wz+(1.-alpha)*filtered_wz
+        abs_vx=abs(row[names["vx"]])
+        if abs_vx < cfg.low_speed_threshold:
+            estimate=0.0
+            covariance=min(covariance+cfg.process_var_vy,max(cfg.initial_var_vy,1e-8))
+        else:
+            delta=np.clip(steer_scale*row[names["steer"]]+steer_bias,-max_steer,max_steer)
+            dvy,_,_=dynamics._dynamics(max(abs_vx,cfg.min_longitudinal_speed),delta,estimate,filtered_wz)
+            estimate += dt*dvy
+            covariance=max(covariance+cfg.process_var_vy,1e-8)
+            measured_pose_vy=math.nan
+            if use_pose_vy and all(name in names for name in ("x","y","yaw")):
+                pose_history.append((float(stamp),float(row[names["x"]]),float(row[names["y"]])))
+                while len(pose_history)>2 and stamp-pose_history[0][0]>pose_window_s:
+                    pose_history.pop(0)
+                if len(pose_history)>=3:
+                    ph=np.asarray(pose_history);tt=ph[:,0]-ph[:,0].mean();denom=float(tt@tt)
+                    if denom>1e-8:
+                        wx=float(tt@(ph[:,1]-ph[:,1].mean())/denom)
+                        wy=float(tt@(ph[:,2]-ph[:,2].mean())/denom);yaw=float(row[names["yaw"]])
+                        measured_pose_vy=-math.sin(yaw)*wx+math.cos(yaw)*wy
+            innovation=measured_pose_vy-estimate
+            if math.isfinite(innovation) and abs(innovation)<=cfg.pose_vy_gate:
+                gain=covariance/(covariance+max(cfg.measurement_var_pose_vy,1e-8))
+                estimate+=gain*innovation;covariance=max((1.-gain)*covariance,1e-8)
+            estimate=float(np.clip(estimate,-cfg.max_abs_vy,cfg.max_abs_vy))
+        vy[i]=estimate;yaw_rate[i]=filtered_wz
+        previous_bag,previous_t=bag,stamp
+    return vy,yaw_rate
+
+
+def estimate_dataset_inertial_pose(samples, columns, dt, params=None,
+                                   imu_ema_alpha=.25, imu_wz_sign=1.,
+                                   imu_ax_sign=1., imu_ay_sign=1.,
+                                   imu_wz_bias=0.,imu_ax_bias=0.,imu_ay_bias=0., **_unused):
+    """C++ parity: 7-state MCL+odom+IMU EKF used by runtime MPPI."""
+    names={str(name):i for i,name in enumerate(columns)};n=len(samples)
+    output=np.zeros(n);yaw_output=np.zeros(n);previous_bag=previous_t=None
+    q=np.array((2e-5,2e-5,2e-5,2e-3,8e-3,2e-6,2e-6),float)
+    initial=np.array((2e-2,2e-2,2e-2,1e-1,2.5e-1,1e-1,1e-1),float)
+    measurement=np.array((4e-3,4e-3,8e-3,3e-2),float)
+    low_speed=params.low_speed_threshold if params else .5
+    max_vy=params.max_abs_vy if params else 2.
+    state=np.zeros(7);P=np.diag(initial);filtered=np.zeros(3);I=np.eye(7)
+    def angle(v):return (v+np.pi)%(2*np.pi)-np.pi
+    for k,row in enumerate(samples):
+        bag=int(row[names["bag_id"]]);stamp=row[names["t"]]
+        raw=np.array((imu_wz_sign*row[names["imu_wz"]]-imu_wz_bias,
+                      imu_ax_sign*row[names["imu_ax"]]-imu_ax_bias,
+                      imu_ay_sign*row[names["imu_ay"]]-imu_ay_bias))
+        reset=previous_bag!=bag or previous_t is None or abs(stamp-previous_t-dt)>.5*dt
+        if reset:
+            filtered=raw.copy();state[:4]=(row[names["x"]],row[names["y"]],row[names["yaw"]],row[names["vx"]]);state[4:]=0.;P=np.diag(initial)
+        else:filtered=imu_ema_alpha*raw+(1.-imu_ema_alpha)*filtered
+        yaw,vx,vy,bax,bay=state[2],state[3],state[4],state[5],state[6];r,ax,ay=filtered
+        F=I.copy();F[0,2]+=dt*(-vx*np.sin(yaw)-vy*np.cos(yaw));F[0,3]+=dt*np.cos(yaw);F[0,4]-=dt*np.sin(yaw)
+        F[1,2]+=dt*(vx*np.cos(yaw)-vy*np.sin(yaw));F[1,3]+=dt*np.sin(yaw);F[1,4]+=dt*np.cos(yaw)
+        F[3,4]+=dt*r;F[3,5]-=dt;F[4,3]-=dt*r;F[4,6]-=dt
+        state+=dt*np.array((vx*np.cos(yaw)-vy*np.sin(yaw),vx*np.sin(yaw)+vy*np.cos(yaw),r,ax-bax+r*vy,ay-bay-r*vx,0.,0.));state[2]=angle(state[2]);P=F@P@F.T+np.diag(q)
+        z=(row[names["x"]],row[names["y"]],row[names["yaw"]],row[names["vx"]])
+        for index,value,var in zip((0,1,2,3),z,measurement):
+            innovation=angle(value-state[index]) if index==2 else value-state[index]
+            gain=P[:,index]/(P[index,index]+var);old=P.copy();state+=gain*innovation;state[2]=angle(state[2]);P=old-np.outer(gain,old[index]);P=.5*(P+P.T);P[np.diag_indices(7)]=np.maximum(np.diag(P),1e-9)
+        if abs(row[names["vx"]])<low_speed:state[4]=0.
+        state[4]=np.clip(state[4],-max_vy,max_vy);output[k]=state[4];yaw_output[k]=r
+        previous_bag,previous_t=bag,stamp
+    return output,yaw_output

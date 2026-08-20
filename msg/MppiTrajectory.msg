@@ -1,18 +1,11 @@
-std_msgs/Header header
-float32[] steer
-float32[] accel
-float32[] predicted_x
-float32[] predicted_y
-float32[] predicted_yaw
-float32[] predicted_v
-float32[] predicted_vy
-float32[] predicted_yaw_rate
-float32 dist_cost
-float32 vel_cost
-float32 steer_rate_cost
-float32 accel_rate_cost
+# Weighted optimal trajectory horizon의 CUDA 목적함수 누적 항목.
+float32 tracking_cost
+float32 friction_ellipse_cost
+float32 front_slip_cost
+float32 rear_slip_cost
 float32 steer_cost
-float32 slip_cost
+float32 rate_cost
 float32 boundary_cost
-float32 yaw
-float32 ref_yaw
+float32 obs_cost
+# Terminal progress reward: -q_progress * progress_m (MPCC에서 음수).
+float32 progress_cost

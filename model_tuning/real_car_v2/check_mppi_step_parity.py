@@ -11,7 +11,8 @@ RESULT=ROOT/'model_tuning/results/dynamic_40ms_steer1_lateral_only_seed31'
 RUNTIME_BINARY=ROOT/'config/dynamic_40ms_residual_servo_lag.bin'
 PARAMS=ROOT/'model_tuning/results/dynamic_40ms_steer1_regression/params.json'
 CUDA_EXE=ROOT/'build/smppi_cuda_controller/mppi_step_parity'
-SIMULATOR_MODEL=Path('/home/a/f1tenth_gym_ros/src/f1tenth_gym/f1tenth_gym/envs/dynamic_models/dynamic_mlp_residual.py')
+SIMULATOR_MODEL=(ROOT/'f1tenth_gym_ros/src/f1tenth_gym/f1tenth_gym/envs/'
+                 'dynamic_models/dynamic_mlp_residual.py')
 # CUDA uses float32 fast trig while NumPy evaluates float64 libm. Across 30
 # recursive knots this accounts for about 1.2e-3 in ay and <4.5e-4 in r.
 STEPS=30;TOLERANCE=2e-3
@@ -40,14 +41,16 @@ def simulator_rollout(cfg,fit,binary):
  weights,mean,std=module.load_weights(binary)
  # Simulator state order: [x,y,steer_cmd,vx,yaw,yaw_rate,beta,vy].
  state=np.array([1.,-.5,0.,2.2,.3,-.4,np.arctan2(.15,2.2),.15],np.float32)
+ current_accel=np.array([.2,-.1],np.float32)
  history=np.array([-.10,2.,-.05,2.2,0.,2.5,.08,2.8,.12,3.],np.float32);applied=np.float32(.07);speed_reference=np.float32(2.);rows=[]
- kwargs=dict(dt=.04,lf=cfg['l_f'],lr=cfg['l_r'],mass=cfg['mass'],min_speed=cfg['min_speed'],max_speed=cfg['max_speed'],min_accel=cfg['min_accel'],max_accel=cfg['max_accel'],speed_servo_kp=cfg['speed_servo_kp'],speed_accel_tau=cfg['speed_reference_accel_time_constant'],speed_brake_tau=cfg['speed_reference_brake_time_constant'],max_speed_reference_rate=cfg['actuator_max_speed_reference_rate'],steer_scale=cfg['kinematic_steer_scale'],steer_bias=cfg['kinematic_steer_bias'],steer_time_constant=cfg['steer_servo_time_constant'],max_steer_rate=cfg['actuator_max_steer_rate'],position_speed_scale=cfg['kinematic_position_speed_scale'],Bf=fit['B_f'],Cf=fit['C_f'],Df=fit['D_f'],Ef=fit['E_f'],Br=fit['B_r'],Cr=fit['C_r'],Dr=fit['D_r'],Er=fit['E_r'],Iz=cfg['dynamic_mlp_I_z'],low_speed_center=cfg['dynamic_mlp_min_speed'])
+ kwargs=dict(dt=.04,lf=cfg['l_f'],lr=cfg['l_r'],mass=cfg['mass'],min_speed=cfg['min_speed'],max_speed=cfg['max_speed'],min_accel=cfg['min_accel'],max_accel=cfg['max_accel'],speed_servo_kp=cfg['speed_servo_kp'],speed_accel_tau=cfg['speed_reference_accel_time_constant'],speed_brake_tau=cfg['speed_reference_brake_time_constant'],max_speed_reference_rate=cfg['actuator_max_speed_reference_rate'],steer_scale=cfg['kinematic_steer_scale'],steer_bias=cfg['kinematic_steer_bias'],steer_time_constant=cfg['steer_servo_time_constant'],max_steer_rate=cfg['actuator_max_steer_rate'],position_speed_scale=cfg['kinematic_position_speed_scale'],Bf=fit['B_f'],Cf=fit['C_f'],Df=fit['D_f'],Ef=fit['E_f'],Br=fit['B_r'],Cr=fit['C_r'],Dr=fit['D_r'],Er=fit['E_r'],Iz=cfg['dynamic_mlp_I_z'],low_speed_center=cfg['dynamic_mlp_min_speed'],max_residual_yaw_accel=cfg['dynamic_mlp_max_residual_yaw_accel'],residual_gate_steer_start=cfg['dynamic_mlp_residual_gate_steer_start'],residual_gate_steer_end=cfg['dynamic_mlp_residual_gate_steer_end'],max_total_yaw_accel=cfg['dynamic_mlp_max_total_yaw_accel'],yaw_rate_kinematic_scale=cfg['dynamic_mlp_yaw_rate_kinematic_scale'],yaw_rate_margin=cfg['dynamic_mlp_yaw_rate_margin'],yaw_rate_lateral_accel_limit=cfg['dynamic_mlp_yaw_rate_lateral_accel_limit'])
  for k in range(STEPS):
   steer=.25-.012*k;speed=np.clip(3.5-.025*k,cfg['min_speed'],cfg['max_speed'])
   state,history,applied,speed_reference,imu,_=module.step(
       state,steer,speed,history,applied,speed_reference,
-      weights,mean,std,**kwargs)
+      weights,mean,std,current_accel=current_accel,**kwargs)
   canonical=np.array([state[0],state[1],state[4],state[3],state[7],state[5],imu[1],imu[2],state[6]])
+  current_accel=imu[1:3]
   rows.append(np.r_[canonical,history,applied,speed_reference])
  return np.asarray(rows)
 def main():
@@ -57,5 +60,13 @@ def main():
  expected=python_rollout(cfg,fit,load_weights(binary))
  args=[str(CUDA_EXE),str(binary),str(STEPS),*[str(fit[f'{q}_{a}']) for a in ('f','r') for q in 'BCDE'],str(cfg['dynamic_mlp_I_z']),str(cfg['min_speed']),str(cfg['max_speed'])];run=subprocess.run(args,text=True,capture_output=True)
  if run.returncode:print(json.dumps({'status':'CUDA_NOT_RUN','returncode':run.returncode,'stderr':run.stderr.strip(),'fixture_contract':'40ms_lag'},indent=2));raise SystemExit(run.returncode)
- actual=np.loadtxt(run.stdout.splitlines());error=np.abs(actual-expected);report={'status':'PASS' if error.max()<TOLERANCE else 'FAIL','fixture_contract':'40ms_lag','steps':STEPS,'one_step_max_abs_error':float(error[0].max()),'thirty_step_max_abs_error':float(error.max()),'mean_abs_error':float(error.mean()),'tolerance':TOLERANCE};print(json.dumps(report,indent=2));raise SystemExit(0 if report['status']=='PASS' else 1)
+ actual=np.loadtxt(run.stdout.splitlines());error=np.abs(actual-expected)
+ simulator=simulator_rollout(cfg,fit,binary);sim_error=np.abs(simulator-expected)
+ passed=error.max()<TOLERANCE and sim_error.max()<TOLERANCE
+ report={'status':'PASS' if passed else 'FAIL','fixture_contract':'40ms_lag','steps':STEPS,
+         'cuda_one_step_max_abs_error':float(error[0].max()),
+         'cuda_thirty_step_max_abs_error':float(error.max()),
+         'simulator_one_step_max_abs_error':float(sim_error[0].max()),
+         'simulator_thirty_step_max_abs_error':float(sim_error.max()),
+         'tolerance':TOLERANCE};print(json.dumps(report,indent=2));raise SystemExit(0 if passed else 1)
 if __name__=='__main__':main()

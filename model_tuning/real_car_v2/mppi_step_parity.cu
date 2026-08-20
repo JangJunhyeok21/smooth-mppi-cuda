@@ -20,7 +20,10 @@ int main(int argc,char **argv){
     p.dynamics_model=vx_delta_24d
         ?mppi::DYNAMIC_MLP_RESIDUAL_SERVO_LAG_VX_DELTA_24D
         :mppi::DYNAMIC_MLP_RESIDUAL_SERVO_LAG;
-    p.min_accel=-10.f;p.max_accel=10.f;
+    // Match the deployed controller and simulator plant.  The old fixture
+    // used [-10, 10], so its speed-servo response diverged after one knot even
+    // though both runtime models clamp longitudinal acceleration to [-1, 1].
+    p.min_accel=-1.f;p.max_accel=1.f;
     p.min_speed=std::atof(argv[12]);p.max_speed=std::atof(argv[13]);p.mass=3.74f;p.l_f=.163f;p.l_r=.161f;
     p.kinematic_steer_scale=1.f;p.kinematic_steer_bias=.01015773f;p.kinematic_position_speed_scale=.8633491306389823f;
     p.speed_servo_kp=27.85168694f;p.steer_servo_time_constant=.15514851356820727f;

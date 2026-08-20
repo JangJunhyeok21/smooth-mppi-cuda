@@ -6,12 +6,15 @@
 #include "visualization_msgs/msg/marker_array.hpp"
 #include "geometry_msgs/msg/point.hpp"
 #include "geometry_msgs/msg/pose_stamped.hpp"
+#ifdef SMPPI_HAS_F1_MSGS
 #include "f1_msgs/msg/f1state_arr.hpp"
+#endif
 #include "cuda_mppi_controller/cuda_mppi_core.hpp"
 #include "cuda_mppi_controller/kinematic_residual_weights.hpp"
 #include "cuda_mppi_controller/lateral_velocity_kf.hpp"
 #include "smppi_cuda_controller/msg/mppi_trajectory.hpp"
 #include "smppi_cuda_controller/msg/mlp_model_input.hpp"
+#include "smppi_cuda_controller/msg/kf_state.hpp"
 #include <ament_index_cpp/get_package_share_directory.hpp>
 #include <algorithm>
 #include <cmath>
@@ -53,9 +56,20 @@ public:
         boundary_vis_pub_ = this->create_publisher<visualization_msgs::msg::MarkerArray>(
             boundary_visualization_topic_,
             rclcpp::QoS(rclcpp::KeepLast(5)).reliable().transient_local());
-        traj_pub_  = this->create_publisher<smppi_cuda_controller::msg::MppiTrajectory>("/mppi_optimal_trajectory", 10);
+        if (publish_optimal_trajectory_) {
+            traj_pub_ = this->create_publisher<smppi_cuda_controller::msg::MppiTrajectory>(
+                "/mppi_optimal_trajectory", 10);
+        }
         mlp_input_pub_ = this->create_publisher<smppi_cuda_controller::msg::MlpModelInput>(
             mlp_input_topic_, 50);
+        // Sensor inputs must prefer the newest sample instead of draining a
+        // stale queue after a busy MPPI cycle.
+        const auto live_state_qos = rclcpp::SensorDataQoS().keep_last(1);
+        // Keep reliable compatibility with Foxglove/ros2 topic subscribers,
+        // while depth 1 prevents old estimator telemetry from accumulating.
+        const auto kf_state_qos = rclcpp::QoS(rclcpp::KeepLast(1)).reliable();
+        kf_state_pub_ = this->create_publisher<smppi_cuda_controller::msg::KfState>(
+            "/kf_state", kf_state_qos);
 
         if (!is_simulation_) {
             // Real car: localization pose is in map frame, while wheel odom
@@ -69,7 +83,7 @@ public:
         } else {
             // Simulator: pose and twist already share one odometry frame.
             odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
-                simulation_odom_topic_, 10,
+                simulation_odom_topic_, live_state_qos,
                 std::bind(&MPPINode::odom_callback, this, std::placeholders::_1));
         }
         if (obstacle_avoidance_enabled_) {
@@ -81,6 +95,7 @@ public:
                     "Simulation obstacle input: %s [nav_msgs/Odometry]",
                     simulation_obstacle_odom_topic_.c_str());
             } else {
+#ifdef SMPPI_HAS_F1_MSGS
                 perception_obstacles_sub_ =
                     this->create_subscription<f1_msgs::msg::F1stateArr>(
                         real_perception_obstacles_topic_, 10,
@@ -90,6 +105,11 @@ public:
                     "Real perception obstacle input: %s [f1_msgs/F1stateArr, frame=%s]",
                     real_perception_obstacles_topic_.c_str(),
                     real_perception_obstacles_frame_.c_str());
+#else
+                RCLCPP_WARN(this->get_logger(),
+                    "f1_msgs was not available at build time; real perception "
+                    "obstacle input is disabled");
+#endif
             }
         }
         // The no-IMU rollout neither subscribes to nor waits for IMU.  Keep the
@@ -97,7 +117,8 @@ public:
         if (mppi_params_.dynamics_model == mppi::DYNAMIC_MLP_RESIDUAL_SERVO_LAG ||
             mppi_params_.dynamics_model == mppi::DYNAMIC_RESIDUAL_SERVO_LAG) {
             imu_sub_ = this->create_subscription<sensor_msgs::msg::Imu>(
-                imu_topic_, 20, std::bind(&MPPINode::imu_callback,this,std::placeholders::_1));
+                imu_topic_, live_state_qos,
+                std::bind(&MPPINode::imu_callback,this,std::placeholders::_1));
         }
 
         const auto control_period = std::chrono::milliseconds(static_cast<int>(1000.0 / std::max(1.0, control_rate_hz_)));
@@ -114,6 +135,19 @@ public:
     }
 
 private:
+    void publish_kf_state(const rclcpp::Time &stamp) {
+        if(!kf_state_pub_||!lateral_velocity_kf_.isInitialized())return;
+        smppi_cuda_controller::msg::KfState msg;
+        msg.header.stamp=stamp;msg.header.frame_id="map";
+        msg.x=lateral_velocity_kf_.getState(0);msg.y=lateral_velocity_kf_.getState(1);
+        msg.yaw=lateral_velocity_kf_.getState(2);msg.vx=lateral_velocity_kf_.getState(3);
+        msg.vy=lateral_velocity_kf_.getState(4);msg.yaw_rate=lateral_velocity_kf_.getYawRate();
+        msg.imu_ax_bias=lateral_velocity_kf_.getState(5);msg.imu_ay_bias=lateral_velocity_kf_.getState(6);
+        for(int row=0;row<7;++row)for(int col=0;col<7;++col)
+            msg.covariance[row*7+col]=lateral_velocity_kf_.getCovariance(row,col);
+        kf_state_pub_->publish(msg);
+    }
+
     void obstacle_odom_callback(const nav_msgs::msg::Odometry::SharedPtr msg) {
         if (!std::isfinite(msg->pose.pose.position.x) ||
             !std::isfinite(msg->pose.pose.position.y)) return;
@@ -125,6 +159,7 @@ private:
         obstacle_stamp_ = this->now();
     }
 
+#ifdef SMPPI_HAS_F1_MSGS
     void perception_obstacles_callback(
         const f1_msgs::msg::F1stateArr::SharedPtr msg) {
         // The perception contract from integration/full-driving-stack reports
@@ -153,6 +188,7 @@ private:
         mppi_params_.num_obstacles = count;
         obstacle_stamp_ = this->now();
     }
+#endif
 
     void cache_fixed_model_properties() {
         is_kinematic_residual_model_ = false;
@@ -253,17 +289,15 @@ private:
         current_state_.vy = static_cast<float>(measured_vy);
         current_state_.omega = static_cast<float>(measured_omega);
         if (uses_lateral_velocity_kf_) {
-            const float steer = std::clamp(kf_steer_scale_ * last_steer_cmd_ + kf_steer_bias_,
-                                           -kf_max_steer_, kf_max_steer_);
             const float wz = aligned_imu_valid_ ? aligned_imu_[0] : NAN;
+            const float ax = aligned_imu_valid_ ? aligned_imu_[1] : NAN;
             const float ay = aligned_imu_valid_ ? aligned_imu_[2] : NAN;
             current_state_.vy = lateral_velocity_kf_.update(
-                current_state_.v, steer, wz, ay, aligned_pose_vy(stamp));
-            // vy is unobservable and comes from the KF. Yaw-rate is directly
-            // observable: keep the signed/causally aligned IMU measurement.
-            // The coupled KF yaw state was ~2x too small in the 08-08 turns.
+                current_state_.x,current_state_.y,current_state_.yaw,
+                current_state_.v,wz,ax,ay);
             current_state_.omega = aligned_imu_valid_ ? aligned_imu_[0]
                                                        : static_cast<float>(measured_omega);
+            publish_kf_state(stamp);
         }
         current_state_.slip_angle =
             std::atan2(current_state_.vy, std::fabs(current_state_.v) + 1e-5f);
@@ -278,15 +312,21 @@ private:
     void imu_callback(const sensor_msgs::msg::Imu::SharedPtr msg) {
         rclcpp::Time stamp(msg->header.stamp);
         if (stamp.nanoseconds() == 0) stamp = this->now();
-        // 0807 IMU is FRD (x-forward, y-right, z-down), while the MPPI state
-        // uses ROS FLU (x-forward, y-left, z-up). Convert once at the callback
-        // boundary so every downstream consumer (EMA, vy KF, residual model)
-        // sees the same body-frame convention as the training pipeline.
+        // Convert the configured sensor signs to MPPI FLU and remove the
+        // stationary bias once at the callback boundary. Every downstream
+        // consumer (EMA, vy EKF, residual model) therefore sees exactly the
+        // same convention and offset as the training pipeline.
+        // Simulator IMU is generated without the stationary bias measured on
+        // the real sensor. Applying the real-car calibration here created a
+        // constant artificial wz/ax/ay offset in simulation.
+        const float wz_bias=is_simulation_?0.f:imu_wz_bias_;
+        const float ax_bias=is_simulation_?0.f:imu_ax_bias_;
+        const float ay_bias=is_simulation_?0.f:imu_ay_bias_;
         imu_buffer_.push_back({
             stamp,
-            imu_wz_sign_*static_cast<float>(msg->angular_velocity.z),
-            imu_ax_sign_*static_cast<float>(msg->linear_acceleration.x),
-            imu_ay_sign_*static_cast<float>(msg->linear_acceleration.y)});
+            imu_wz_sign_*static_cast<float>(msg->angular_velocity.z)-wz_bias,
+            imu_ax_sign_*static_cast<float>(msg->linear_acceleration.x)-ax_bias,
+            imu_ay_sign_*static_cast<float>(msg->linear_acceleration.y)-ay_bias});
         while(imu_buffer_.size()>imu_buffer_capacity_) imu_buffer_.pop_front();
         imu_received_=true;
     }
@@ -371,14 +411,15 @@ private:
         current_state_.vy    = static_cast<float>(estimated_vy);
         current_state_.omega = static_cast<float>(estimated_omega);
         if (uses_lateral_velocity_kf_) {
-            const float steer = std::clamp(kf_steer_scale_*last_steer_cmd_+kf_steer_bias_,
-                                           -kf_max_steer_,kf_max_steer_);
             const float wz = aligned_imu_valid_ ? aligned_imu_[0] : NAN;
+            const float ax = aligned_imu_valid_ ? aligned_imu_[1] : NAN;
             const float ay = aligned_imu_valid_ ? aligned_imu_[2] : NAN;
             current_state_.vy = lateral_velocity_kf_.update(
-                current_state_.v,steer,wz,ay,aligned_pose_vy(pose_stamp));
+                current_state_.x,current_state_.y,current_state_.yaw,
+                current_state_.v,wz,ax,ay);
             current_state_.omega = aligned_imu_valid_ ? aligned_imu_[0]
                                                        : static_cast<float>(measured_omega);
+            publish_kf_state(pose_stamp);
         }
         last_body_vx_ = estimated_vx;
 
@@ -431,38 +472,131 @@ private:
         if (best_traj.empty() || optimal_controls.empty() ||
             ref_path_xs_.empty() || ref_path_yaws_.empty()) return;
 
-        int t_idx = (best_traj.size() > 1 && optimal_controls.size() > 1) ? 1 : 0;
-        const auto &s      = best_traj[t_idx];
-        const auto &u      = optimal_controls[t_idx];
-        const auto &u_prev = (t_idx == 0) ? optimal_controls[0] : optimal_controls[t_idx - 1];
-        int idx = update_nearest_index(s);
+        const size_t count = std::min(best_traj.size(), optimal_controls.size());
+        float applied_steer = mppi_params_.actuator_steer_state;
+        float previous_steer = last_steer_cmd_;
+        float previous_accel = last_speed_cmd_;
+        float heading=0.f, speed_reward=0.f, overspeed=0.f, error_speed=0.f;
+        float friction=0.f, front_slip=0.f, rear_slip=0.f, steer=0.f;
+        float control_rate=0.f, boundary=0.f, obstacle=0.f;
+        const int initial_path_idx = update_nearest_index(current_state_);
+        int last_idx = initial_path_idx;
 
-        float dx = s.x - ref_path_xs_[idx], dy = s.y - ref_path_ys_[idx];
-        float dist_error = dx*dx + dy*dy;
-        float speed_err  = s.v - mppi_params_.max_speed;
-        float overspeed  = (speed_err > 0.f) ? mppi_params_.q_v * speed_err * speed_err : 0.f;
+        for (size_t t=0; t<count; ++t) {
+            const auto &s=best_traj[t];
+            const auto &u=optimal_controls[t];
+            const float target=std::max(-mppi_params_.max_steer,std::min(
+                mppi_params_.max_steer,
+                mppi_params_.kinematic_steer_scale*u.steer+mppi_params_.kinematic_steer_bias));
+            const float raw_rate=(target-applied_steer)/std::max(
+                mppi_params_.steer_servo_time_constant,1.0e-3f);
+            const float applied_rate=std::max(-mppi_params_.actuator_max_steer_rate,
+                std::min(mppi_params_.actuator_max_steer_rate,raw_rate));
+            applied_steer=std::max(-mppi_params_.max_steer,std::min(
+                mppi_params_.max_steer,
+                applied_steer+applied_rate*mppi_params_.model_dt));
 
-        float d_steer = u.steer - u_prev.steer, d_accel = u.accel - u_prev.accel;
-        float ay_abs = fabsf(s.ay);
-        float lat_g  = (ay_abs >= 9.5f) ? mppi_params_.q_lat_g * expf(-3.f*(ay_abs-9.5f)) : 0.f;
+            // CUDA와 같은 forward local search를 사용한다.
+            float nearest_distance=std::numeric_limits<float>::infinity();
+            int idx=last_idx;
+            for (int offset=0;offset<30;++offset) {
+                const int candidate=(last_idx+offset)%static_cast<int>(ref_path_xs_.size());
+                const float dx=s.x-ref_path_xs_[candidate];
+                const float dy=s.y-ref_path_ys_[candidate];
+                const float distance=dx*dx+dy*dy;
+                if(distance<nearest_distance){nearest_distance=distance;idx=candidate;}
+            }
+            last_idx=idx;
+            const float dx=s.x-ref_path_xs_[idx],dy=s.y-ref_path_ys_[idx];
+            const float ref_cos=std::cos(ref_path_yaws_[idx]);
+            const float ref_sin=std::sin(ref_path_yaws_[idx]);
+            const float contour=-ref_sin*dx+ref_cos*dy;
+            const float lag=ref_cos*dx+ref_sin*dy;
+            const float heading_error=std::atan2(
+                std::sin(s.yaw-ref_path_yaws_[idx]),std::cos(s.yaw-ref_path_yaws_[idx]));
+            if(mppi_params_.objective_mode==mppi::MPCC_OBJECTIVE) {
+                heading += mppi_params_.q_dist*nearest_distance
+                    +mppi_params_.q_contour*contour*contour
+                    +mppi_params_.q_lag*lag*lag
+                    +mppi_params_.q_heading*heading_error*heading_error;
+                speed_reward -= (mppi_params_.q_v*0.2f)*s.v*std::cos(heading_error);
+                const float speed_excess=std::max(0.f,s.v-mppi_params_.max_speed);
+                overspeed += mppi_params_.q_v*speed_excess*speed_excess;
+                error_speed += mppi_params_.q_error_speed*s.v*s.v*
+                    (contour*contour+heading_error*heading_error);
+            }
 
-        float min_bnd   = compute_min_boundary_distance(s, idx);
-        float safe_dist = mppi_params_.collision_radius;
-        float bnd_cost  = 0.f;
-        if (min_bnd < safe_dist) {
-            float pen = safe_dist - min_bnd;
-            bnd_cost = mppi_params_.q_boundary_slack * pen * pen;
+            const float utilization=(s.ax/std::max(mppi_params_.longitudinal_accel_soft_limit,1.e-3f))*
+                (s.ax/std::max(mppi_params_.longitudinal_accel_soft_limit,1.e-3f))+
+                (s.ay/std::max(mppi_params_.lat_g_soft_limit,1.e-3f))*
+                (s.ay/std::max(mppi_params_.lat_g_soft_limit,1.e-3f));
+            const float friction_excess=std::max(0.f,utilization-1.f);
+            friction += mppi_params_.q_lat_g*friction_excess*friction_excess;
+            const float safe_vx=std::max(std::fabs(s.v),0.5f);
+            const float alpha_f=applied_steer-std::atan2(s.vy+mppi_params_.l_f*s.omega,safe_vx);
+            const float alpha_r=-std::atan2(s.vy-mppi_params_.l_r*s.omega,safe_vx);
+            if(std::fabs(s.v)>=mppi_params_.front_slip_cost_min_speed) {
+                const float excess=std::max(0.f,std::fabs(alpha_f)-mppi_params_.front_slip_soft_limit);
+                front_slip += mppi_params_.q_front_slip*excess*excess;
+            }
+            if(std::fabs(s.v)>=mppi_params_.rear_slip_cost_min_speed) {
+                const float excess=std::max(0.f,std::fabs(alpha_r)-mppi_params_.rear_slip_soft_limit);
+                rear_slip += mppi_params_.q_rear_slip*excess*excess;
+            }
+            steer += mppi_params_.q_steer*u.steer*u.steer;
+            const float ds=u.steer-previous_steer,da=u.accel-previous_accel;
+            control_rate += mppi_params_.q_du*(ds*ds+da*da);
+            previous_steer=u.steer;previous_accel=u.accel;
+            const float slack=std::max(0.f,mppi_params_.collision_radius-
+                compute_min_boundary_distance(s,idx));
+            boundary += (t+1==count?mppi_params_.q_boundary_terminal_slack:
+                mppi_params_.q_boundary_slack)*slack*slack;
+            const float obstacle_soft_radius=
+                mppi_params_.car_radius+mppi_params_.obstacle_soft_margin;
+            for(int i=0;i<mppi_params_.num_obstacles;++i){
+                const float ox=s.x-mppi_params_.obs_x[i],oy=s.y-mppi_params_.obs_y[i];
+                const float obs_slack=std::max(
+                    0.f,obstacle_soft_radius-std::hypot(ox,oy));
+                obstacle += mppi_params_.q_obs*obs_slack*obs_slack;
+            }
         }
 
-        msg.dist_cost       = mppi_params_.q_dist * dist_error;
-        msg.vel_cost        = overspeed;
-        msg.steer_rate_cost = mppi_params_.q_du * 2.f * d_steer * d_steer;
-        msg.accel_rate_cost = mppi_params_.q_du * std::fabs(d_accel);
-        msg.steer_cost      = mppi_params_.q_steer * u.steer * u.steer;
-        msg.slip_cost       = lat_g;
-        msg.boundary_cost   = bnd_cost;
-        msg.yaw             = s.yaw;
-        msg.ref_yaw         = ref_path_yaws_[idx];
+        // Per-step 반환 항목과 terminal progress reward를 분리해 노출한다.
+        const float tracking=heading+speed_reward+overspeed+error_speed;
+        float progress_cost=0.f;
+        if(mppi_params_.objective_mode==mppi::MPCC_OBJECTIVE && count>0) {
+            int steps=last_idx-initial_path_idx;
+            if(steps<0)steps+=static_cast<int>(ref_path_xs_.size());
+            if(steps<=static_cast<int>(ref_path_xs_.size()/2)) {
+                float progress_m=0.f;
+                int previous=initial_path_idx;
+                for(int n=0;n<steps;++n) {
+                    const int next=(previous+1)%static_cast<int>(ref_path_xs_.size());
+                    progress_m+=std::hypot(ref_path_xs_[next]-ref_path_xs_[previous],
+                                           ref_path_ys_[next]-ref_path_ys_[previous]);
+                    previous=next;
+                }
+                const auto tangent_lag=[this](const mppi::State &state,int idx) {
+                    const float dx=state.x-ref_path_xs_[idx];
+                    const float dy=state.y-ref_path_ys_[idx];
+                    return std::max(-0.15f,std::min(0.15f,
+                        dx*std::cos(ref_path_yaws_[idx])+dy*std::sin(ref_path_yaws_[idx])));
+                };
+                progress_m=std::max(0.f,progress_m+
+                    tangent_lag(best_traj.back(),last_idx)-
+                    tangent_lag(current_state_,initial_path_idx));
+                progress_cost=-mppi_params_.q_progress*progress_m;
+            }
+        }
+        msg.tracking_cost=tracking;
+        msg.friction_ellipse_cost=friction;
+        msg.front_slip_cost=front_slip;
+        msg.rear_slip_cost=rear_slip;
+        msg.steer_cost=steer;
+        msg.rate_cost=control_rate;
+        msg.boundary_cost=boundary;
+        msg.obs_cost=obstacle;
+        msg.progress_cost=progress_cost;
     }
 
     void load_parameters() {
@@ -486,6 +620,9 @@ private:
         this->declare_parameter("max_accel",            9.0);    mppi_params_.max_accel     = this->get_parameter("max_accel").as_double();
         this->declare_parameter("min_speed",            0.0);    mppi_params_.min_speed     = this->get_parameter("min_speed").as_double();
         this->declare_parameter("max_speed",            10.0);   mppi_params_.max_speed     = this->get_parameter("max_speed").as_double();
+        this->declare_parameter("curve_lateral_accel_limit", 0.0);
+        mppi_params_.curve_lateral_accel_limit =
+            this->get_parameter("curve_lateral_accel_limit").as_double();
         this->declare_parameter("heading_speed_limit_gain", 8.0);
         heading_speed_limit_gain_ = this->get_parameter("heading_speed_limit_gain").as_double();
         this->declare_parameter("contour_speed_limit_gain", 2.0);
@@ -501,6 +638,15 @@ private:
         this->declare_parameter("q_lat_g",              200.0);  mppi_params_.q_lat_g       = this->get_parameter("q_lat_g").as_double();
         this->declare_parameter("lat_g_soft_limit",     9.81);   mppi_params_.lat_g_soft_limit = this->get_parameter("lat_g_soft_limit").as_double();
         this->declare_parameter("longitudinal_accel_soft_limit", 4.0); mppi_params_.longitudinal_accel_soft_limit = this->get_parameter("longitudinal_accel_soft_limit").as_double();
+        this->declare_parameter("q_front_slip", 300.0);
+        mppi_params_.q_front_slip = this->get_parameter("q_front_slip").as_double();
+        this->declare_parameter("front_slip_soft_limit_deg", 8.0);
+        mppi_params_.front_slip_soft_limit =
+            this->get_parameter("front_slip_soft_limit_deg").as_double()
+            * static_cast<double>(M_PI) / 180.0;
+        this->declare_parameter("front_slip_cost_min_speed", 1.5);
+        mppi_params_.front_slip_cost_min_speed =
+            this->get_parameter("front_slip_cost_min_speed").as_double();
         this->declare_parameter("q_rear_slip",          800.0);  mppi_params_.q_rear_slip = this->get_parameter("q_rear_slip").as_double();
         this->declare_parameter("rear_slip_soft_limit_deg", 8.0);
         mppi_params_.rear_slip_soft_limit =
@@ -542,6 +688,9 @@ private:
         mppi_params_.safe_set_inv_yaw_scale=1.0/std::max(1.0e-6,this->get_parameter("safe_set_state_scale_yaw").as_double());
         mppi_params_.safe_set_count=0;
         this->declare_parameter("car_radius",           0.15);   mppi_params_.car_radius    = this->get_parameter("car_radius").as_double();
+        this->declare_parameter("obstacle_soft_margin", 1.0);
+        mppi_params_.obstacle_soft_margin =
+            this->get_parameter("obstacle_soft_margin").as_double();
         this->declare_parameter("q_obs",             15000.0);  mppi_params_.q_obs         = this->get_parameter("q_obs").as_double();
         this->declare_parameter("obstacle_avoidance_enabled", false); obstacle_avoidance_enabled_=this->get_parameter("obstacle_avoidance_enabled").as_bool();
         this->declare_parameter("simulation_obstacle_odom_topic", "/opp_racecar/odom"); simulation_obstacle_odom_topic_=this->get_parameter("simulation_obstacle_odom_topic").as_string();
@@ -559,6 +708,9 @@ private:
             this->get_parameter("boundary_visualization_topic").as_string();
         this->declare_parameter("mlp_input_topic", "/mppi_mlp_input");
         mlp_input_topic_=this->get_parameter("mlp_input_topic").as_string();
+        this->declare_parameter("publish_optimal_trajectory", true);
+        publish_optimal_trajectory_=
+            this->get_parameter("publish_optimal_trajectory").as_bool();
         this->declare_parameter("mass",   3.74);   mppi_params_.mass = this->get_parameter("mass").as_double();
         this->declare_parameter("l_f",    0.163);  mppi_params_.l_f  = this->get_parameter("l_f").as_double();
         this->declare_parameter("l_r",    0.162);  mppi_params_.l_r  = this->get_parameter("l_r").as_double();
@@ -665,24 +817,22 @@ private:
         imu_ax_sign_=static_cast<float>(this->get_parameter("imu_ax_sign").as_double());
         this->declare_parameter("imu_ay_sign",1.0);
         imu_ay_sign_=static_cast<float>(this->get_parameter("imu_ay_sign").as_double());
-        this->declare_parameter("kf_min_vx",0.5);lateral_velocity_kf_params_.min_longitudinal_speed=this->get_parameter("kf_min_vx").as_double();
+        this->declare_parameter("imu_wz_bias",0.0);imu_wz_bias_=this->get_parameter("imu_wz_bias").as_double();
+        this->declare_parameter("imu_ax_bias",0.0);imu_ax_bias_=this->get_parameter("imu_ax_bias").as_double();
+        this->declare_parameter("imu_ay_bias",0.0);imu_ay_bias_=this->get_parameter("imu_ay_bias").as_double();
         this->declare_parameter("kf_low_speed_threshold",0.0);
         lateral_velocity_kf_params_.low_speed_threshold=this->get_parameter("kf_low_speed_threshold").as_double();
         mppi_params_.kf_low_speed_threshold=std::max(
             0.0, this->get_parameter("kf_low_speed_threshold").as_double());
         this->declare_parameter("kf_max_abs_vy",2.0);lateral_velocity_kf_params_.max_abs_vy=this->get_parameter("kf_max_abs_vy").as_double();
-        this->declare_parameter("kf_q_vy",0.02);lateral_velocity_kf_params_.process_var_vy=this->get_parameter("kf_q_vy").as_double();
-        this->declare_parameter("kf_q_yaw_rate",0.02);lateral_velocity_kf_params_.process_var_yaw_rate=this->get_parameter("kf_q_yaw_rate").as_double();
-        this->declare_parameter("kf_r_lateral_accel",0.5);lateral_velocity_kf_params_.measurement_var_lateral_accel=this->get_parameter("kf_r_lateral_accel").as_double();
-        this->declare_parameter("kf_r_yaw_rate",0.01);lateral_velocity_kf_params_.measurement_var_yaw_rate=this->get_parameter("kf_r_yaw_rate").as_double();
-        this->declare_parameter("kf_initial_p_vy",0.25);lateral_velocity_kf_params_.initial_var_vy=this->get_parameter("kf_initial_p_vy").as_double();
-        this->declare_parameter("kf_initial_p_yaw_rate",0.10);lateral_velocity_kf_params_.initial_var_yaw_rate=this->get_parameter("kf_initial_p_yaw_rate").as_double();
-        this->declare_parameter("imu_lateral_accel_sign",1.0);lateral_velocity_kf_params_.imu_lateral_accel_sign=this->get_parameter("imu_lateral_accel_sign").as_double();
-        this->declare_parameter("kf_q_ay_bias",2.8456300e-6);lateral_velocity_kf_params_.process_var_ay_bias=this->get_parameter("kf_q_ay_bias").as_double();
-        this->declare_parameter("kf_initial_p_ay_bias",0.008792814);lateral_velocity_kf_params_.initial_var_ay_bias=this->get_parameter("kf_initial_p_ay_bias").as_double();
-        this->declare_parameter("kf_max_abs_ay_bias",0.7880429);lateral_velocity_kf_params_.max_abs_ay_bias=this->get_parameter("kf_max_abs_ay_bias").as_double();
-        this->declare_parameter("kf_r_pose_vy",0.07933411);lateral_velocity_kf_params_.measurement_var_pose_vy=this->get_parameter("kf_r_pose_vy").as_double();
-        this->declare_parameter("kf_pose_vy_gate",1.3457935);lateral_velocity_kf_params_.pose_vy_gate=this->get_parameter("kf_pose_vy_gate").as_double();
+        const std::array<const char*,7> q_names{{"kf_q_x","kf_q_y","kf_q_yaw","kf_q_vx","kf_q_vy","kf_q_ax_bias","kf_q_ay_bias"}};
+        const std::array<double,7> q_defaults{{2e-5,2e-5,2e-5,2e-3,8e-3,2e-6,2e-6}};
+        const std::array<const char*,7> p_names{{"kf_p0_x","kf_p0_y","kf_p0_yaw","kf_p0_vx","kf_p0_vy","kf_p0_ax_bias","kf_p0_ay_bias"}};
+        const std::array<double,7> p_defaults{{2e-2,2e-2,2e-2,1e-1,2.5e-1,1e-1,1e-1}};
+        for(int i=0;i<7;++i){this->declare_parameter(q_names[i],q_defaults[i]);lateral_velocity_kf_params_.process_var[i]=this->get_parameter(q_names[i]).as_double();this->declare_parameter(p_names[i],p_defaults[i]);lateral_velocity_kf_params_.initial_var[i]=this->get_parameter(p_names[i]).as_double();}
+        const std::array<const char*,4> r_names{{"kf_r_mcl_x","kf_r_mcl_y","kf_r_mcl_yaw","kf_r_odom_vx"}};
+        const std::array<double,4> r_defaults{{4e-3,4e-3,8e-3,3e-2}};
+        for(int i=0;i<4;++i){this->declare_parameter(r_names[i],r_defaults[i]);lateral_velocity_kf_params_.measurement_var[i]=this->get_parameter(r_names[i]).as_double();}
         this->declare_parameter("kf_pose_vy_enabled",true);kf_pose_vy_enabled_=this->get_parameter("kf_pose_vy_enabled").as_bool();
         this->declare_parameter("kf_pose_vy_window_s",0.12);kf_pose_vy_window_s_=this->get_parameter("kf_pose_vy_window_s").as_double();
         this->declare_parameter("kf_pose_vy_max_age_s",0.06);kf_pose_vy_max_age_s_=this->get_parameter("kf_pose_vy_max_age_s").as_double();
@@ -695,16 +845,6 @@ private:
 
         mppi_params_.dt            = 1.0 / std::max(1.0, control_rate_hz_);
         mppi_params_.control_dt    = mppi_params_.dt;
-        lateral_velocity_kf_params_.mass=mppi_params_.mass;lateral_velocity_kf_params_.yaw_inertia=mppi_params_.I_z;
-        lateral_velocity_kf_params_.l_f=mppi_params_.l_f;lateral_velocity_kf_params_.l_r=mppi_params_.l_r;
-        lateral_velocity_kf_params_.pacejka_b_front=mppi_params_.dynamic_mlp_B_f;
-        lateral_velocity_kf_params_.pacejka_c_front=mppi_params_.dynamic_mlp_C_f;
-        lateral_velocity_kf_params_.pacejka_d_front=mppi_params_.dynamic_mlp_D_f;
-        lateral_velocity_kf_params_.pacejka_e_front=mppi_params_.dynamic_mlp_E_f;
-        lateral_velocity_kf_params_.pacejka_b_rear=mppi_params_.dynamic_mlp_B_r;
-        lateral_velocity_kf_params_.pacejka_c_rear=mppi_params_.dynamic_mlp_C_r;
-        lateral_velocity_kf_params_.pacejka_d_rear=mppi_params_.dynamic_mlp_D_r;
-        lateral_velocity_kf_params_.pacejka_e_rear=mppi_params_.dynamic_mlp_E_r;
         lateral_velocity_kf_params_.dt=mppi_params_.dt;
         mppi_params_.num_obstacles = 0;
     }
@@ -712,6 +852,8 @@ private:
     void validate_parameters() {
         if (mppi_params_.min_speed > mppi_params_.max_speed)
             std::swap(mppi_params_.min_speed, mppi_params_.max_speed);
+        mppi_params_.curve_lateral_accel_limit =
+            std::max(0.0f, mppi_params_.curve_lateral_accel_limit);
         if (horizon_steps_ < 1) horizon_steps_ = 1;
         if (mppi_params_.lambda <= 0.0f) mppi_params_.lambda = 1.0f;
         if (mppi_params_.max_accel_rate <= 0.0f)
@@ -720,10 +862,17 @@ private:
         contour_speed_limit_gain_ = std::max(0.0f, contour_speed_limit_gain_);
         if (mppi_params_.collision_radius < 0.0f)
             mppi_params_.collision_radius = std::abs(mppi_params_.collision_radius);
+        mppi_params_.obstacle_soft_margin =
+            std::max(0.0f, mppi_params_.obstacle_soft_margin);
         if (mppi_params_.q_boundary_slack < 0.0f)
             mppi_params_.q_boundary_slack = 0.0f;
         if (mppi_params_.q_boundary_terminal_slack < 0.0f)
             mppi_params_.q_boundary_terminal_slack = 0.0f;
+        mppi_params_.q_front_slip = std::max(0.0f, mppi_params_.q_front_slip);
+        mppi_params_.front_slip_soft_limit =
+            std::max(0.0f, mppi_params_.front_slip_soft_limit);
+        mppi_params_.front_slip_cost_min_speed =
+            std::max(0.0f, mppi_params_.front_slip_cost_min_speed);
         if (mppi_params_.dynamic_mlp_min_speed < 0.0f)
             mppi_params_.dynamic_mlp_min_speed = 0.0f;
         if((mppi_params_.dynamics_model==mppi::DYNAMIC_MLP_RESIDUAL_SERVO_LAG ||
@@ -1255,8 +1404,8 @@ private:
 
         // Candidate 복사는 옵션으로 끄되 weighted optimal Marker는 항상 발행한다.
         publish_path_visualization();
-        // 최적 weighted trajectory 80점은 후보 K*T 시각화와 무관하게 발행한다.
-        publish_mppi_trajectory();
+        // 대회 모드에서는 trajectory 복사/목적함수 재계산/ROS 직렬화를 모두 생략한다.
+        if (publish_optimal_trajectory_) publish_mppi_trajectory();
 
         auto end = std::chrono::high_resolution_clock::now();
         std::chrono::duration<double, std::milli> elapsed = end - start;
@@ -1270,22 +1419,6 @@ private:
         const auto &oc = solver_->get_optimal_controls();
         if (bt.empty() || oc.empty()) return;
         smppi_cuda_controller::msg::MppiTrajectory msg;
-        msg.header.stamp = this->now(); msg.header.frame_id = "map";
-        int T = solver_->get_T();
-        msg.steer.reserve(T); msg.accel.reserve(T);
-        msg.predicted_x.reserve(T); msg.predicted_y.reserve(T);
-        msg.predicted_yaw.reserve(T); msg.predicted_v.reserve(T);
-        msg.predicted_vy.reserve(T); msg.predicted_yaw_rate.reserve(T);
-        for (int t = 0; t < T; ++t) {
-            msg.steer.push_back(oc[t].steer);
-            msg.accel.push_back(oc[t].accel);
-            msg.predicted_x.push_back(bt[t].x);
-            msg.predicted_y.push_back(bt[t].y);
-            msg.predicted_yaw.push_back(bt[t].yaw);
-            msg.predicted_v.push_back(bt[t].v);
-            msg.predicted_vy.push_back(bt[t].vy);
-            msg.predicted_yaw_rate.push_back(bt[t].omega);
-        }
         append_best_traj_costs(bt, oc, msg);
         traj_pub_->publish(msg);
     }
@@ -1474,7 +1607,9 @@ private:
 
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;  // 단일 구독
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr obstacle_odom_sub_;
+#ifdef SMPPI_HAS_F1_MSGS
     rclcpp::Subscription<f1_msgs::msg::F1stateArr>::SharedPtr perception_obstacles_sub_;
+#endif
     rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr mcl_pose_sub_;
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr velocity_sub_;
     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_sub_;
@@ -1484,6 +1619,7 @@ private:
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr       boundary_vis_pub_;
     rclcpp::Publisher<smppi_cuda_controller::msg::MppiTrajectory>::SharedPtr traj_pub_;
     rclcpp::Publisher<smppi_cuda_controller::msg::MlpModelInput>::SharedPtr mlp_input_pub_;
+    rclcpp::Publisher<smppi_cuda_controller::msg::KfState>::SharedPtr kf_state_pub_;
 
     rclcpp::TimerBase::SharedPtr timer_;
 
@@ -1506,6 +1642,7 @@ private:
     mppi::LateralVelocityKFParams lateral_velocity_kf_params_;
     float kf_steer_scale_{1.1058064699f},kf_steer_bias_{-0.0300696939f},kf_max_steer_{0.4788f};
     bool odom_received_ = false;
+    bool publish_optimal_trajectory_{true};
     bool obstacle_avoidance_enabled_{false};
     double obstacle_timeout_s_{0.5};
     rclcpp::Time obstacle_stamp_{0, 0, RCL_ROS_TIME};
@@ -1544,6 +1681,7 @@ private:
     double imu_sync_max_age_s_{0.05};
     float imu_ema_alpha_{0.25f};
     float imu_wz_sign_{1.f},imu_ax_sign_{1.f},imu_ay_sign_{1.f};
+    float imu_wz_bias_{0.f},imu_ax_bias_{0.f},imu_ay_bias_{0.f};
     bool imu_received_{false},aligned_imu_valid_{false},imu_ema_initialized_{false};
     struct PoseSample { rclcpp::Time stamp; double x,y; };
     struct PoseVySample { rclcpp::Time stamp; float vy; };

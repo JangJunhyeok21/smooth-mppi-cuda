@@ -15,7 +15,7 @@ HERE=Path(__file__).resolve().parent; ROOT=HERE.parents[1]
 sys.path.insert(0,str(ROOT));sys.path.insert(0,str(HERE))
 from contract import Contract, FEATURES, OUTPUTS, actuator_step, longitudinal_actuator_step
 from offline_lateral_velocity_smoother import smooth_segment_vy
-from helper_lateral_velocity_kf import LateralVelocityKFParams,estimate_dataset
+from helper_lateral_velocity_kf import LateralVelocityKFParams,estimate_dataset_inertial_pose
 
 DEFAULT_SOURCE_DIRS=(
     ROOT/"model_tuning/data/ifac0810_0819_autonomous_physics_clean",
@@ -28,6 +28,9 @@ REPORT=OUTPUT.with_suffix(".json")
 # smoother is enabled by default only as the supervised teacher/target.
 USE_OFFLINE_VY_SMOOTHER=os.environ.get("USE_OFFLINE_VY_SMOOTHER","1")=="1"
 FORBIDDEN="prediction_vs_actual_run12_reconstructed.csv"
+# /ackermann_cmd 자체가 수동 조종기에서 발행된 세션은 /drive와 일치하므로
+# Step 1의 command-mismatch 필터로 검출할 수 없다. 세션 단위로 제외한다.
+MANUAL_SESSION_NAMES={"rosbag2_2026_08_19-20_20_24.npz"}
 TRAINING_MAX_SPEED=4.0  # retain high-speed bag samples even during 2 m/s shakedown deployment
 LEGACY_IMU_SIGNS=np.array((-1.0,1.0,-1.0),dtype=float)
 CURRENT_IMU_SIGNS=np.array((1.0,1.0,1.0),dtype=float)
@@ -79,7 +82,9 @@ def main():
         "KINEMATIC_STEER_SCALE_OVERRIDE",cfg["kinematic_steer_scale"]))
     cfg["kinematic_steer_bias"]=float(os.environ.get(
         "KINEMATIC_STEER_BIAS_OVERRIDE",cfg["kinematic_steer_bias"]))
-    files=sorted({p.resolve() for source in SOURCE_DIRS for p in source.glob("*.npz")})
+    discovered=sorted({p.resolve() for source in SOURCE_DIRS for p in source.glob("*.npz")})
+    excluded_manual=[str(path) for path in discovered if path.name in MANUAL_SESSION_NAMES]
+    files=[path for path in discovered if path.name not in MANUAL_SESSION_NAMES]
     if not files:raise SystemExit(f"no direct-bag NPZ in {SOURCE_DIRS}")
     if any(FORBIDDEN in str(p) for p in files):raise RuntimeError("diagnostic reconstructed CSV/derivative is forbidden")
     features=[];targets=[];observations=[];teacher_vys=[];teacher_confidences=[];bag_ids=[];split_ids=[];valids=[];manifest=[];next_bag=0;c=Contract(
@@ -120,7 +125,9 @@ def main():
         for local in np.unique(local_ids):
             ii=np.flatnonzero(local_ids==local);s=a[ii];n=len(s)
             if n<12:continue
-            kfp=LateralVelocityKFParams(mass=float(cfg["mass"]),yaw_inertia=float(cfg["I_z"]),l_f=float(cfg["l_f"]),l_r=float(cfg["l_r"]),dt=dt,min_longitudinal_speed=float(cfg["kf_min_vx"]),low_speed_threshold=float(cfg["kf_low_speed_threshold"]),max_abs_vy=float(cfg["kf_max_abs_vy"]),process_var_vy=float(cfg["kf_q_vy"]),process_var_yaw_rate=float(cfg["kf_q_yaw_rate"]),measurement_var_lateral_accel=float(cfg["kf_r_lateral_accel"]),measurement_var_yaw_rate=float(cfg["kf_r_yaw_rate"]),initial_var_vy=float(cfg["kf_initial_p_vy"]),initial_var_yaw_rate=float(cfg["kf_initial_p_yaw_rate"]),imu_lateral_accel_sign=float(cfg["imu_lateral_accel_sign"]),process_var_ay_bias=float(cfg["kf_q_ay_bias"]),initial_var_ay_bias=float(cfg["kf_initial_p_ay_bias"]),max_abs_ay_bias=float(cfg["kf_max_abs_ay_bias"]),measurement_var_pose_vy=float(cfg["kf_r_pose_vy"]),pose_vy_gate=float(cfg["kf_pose_vy_gate"]))
+            kfp=LateralVelocityKFParams(dt=dt,
+                low_speed_threshold=float(cfg["kf_low_speed_threshold"]),
+                max_abs_vy=float(cfg["kf_max_abs_vy"]))
             # Bag/MCL verification places the convention change at 2026-08-15:
             # 0810--0813 sensor y/z oppose MPPI FLU, 0815 onward they match.
             # Resolve this from the recording date and reject contradictory
@@ -129,11 +136,11 @@ def main():
             imu_wz_sign,imu_ax_sign,imu_ay_sign=source_signs
             source_ema_alpha=(float(z["imu_ema_alpha"]) if "imu_ema_alpha" in z.files
                               else float(cfg["imu_ema_alpha"]))
-            vy_input,r=estimate_dataset(s,z["columns"],dt,kfp,steer_scale=float(cfg["kf_steer_scale"]),steer_bias=float(cfg["kf_steer_bias"]),max_steer=float(cfg["kf_max_steer"]),imu_ema_alpha=source_ema_alpha,imu_wz_sign=imu_wz_sign,imu_ay_sign=imu_ay_sign,use_pose_vy=bool(cfg["kf_pose_vy_enabled"]),pose_window_s=float(cfg["kf_pose_vy_window_s"]))
+            vy_input,r=estimate_dataset_inertial_pose(s,z["columns"],dt,kfp,imu_ema_alpha=source_ema_alpha,imu_wz_sign=imu_wz_sign,imu_ax_sign=imu_ax_sign,imu_ay_sign=imu_ay_sign,imu_wz_bias=float(cfg["imu_wz_bias"]),imu_ax_bias=float(cfg["imu_ax_bias"]),imu_ay_bias=float(cfg["imu_ay_bias"]))
             vy_teacher=vy_input.copy()
             vx=s[:,names["vx"]];steer_cmd=s[:,names["steer"]]
             speed_cmd=np.clip(s[:,names["speed_cmd"]],float(cfg["min_speed"]),TRAINING_MAX_SPEED)
-            imu_ax=ema(imu_ax_sign*s[:,names["imu_ax"]],source_ema_alpha);imu_ay=ema(imu_ay_sign*s[:,names["imu_ay"]],source_ema_alpha)
+            imu_ax=ema(imu_ax_sign*s[:,names["imu_ax"]]-float(cfg["imu_ax_bias"]),source_ema_alpha);imu_ay=ema(imu_ay_sign*s[:,names["imu_ay"]]-float(cfg["imu_ay_bias"]),source_ema_alpha)
             smoother_diagnostics=None
             if USE_OFFLINE_VY_SMOOTHER:
                 smoothed_vy,smoother_diagnostics=smooth_segment_vy(
@@ -185,10 +192,10 @@ def main():
             # Every discontinuous segment needs its own id. Reusing source_id
             # made recursive windows cross localization/collision cuts.
             bag_id=next_bag
-            features.append(feat.astype(np.float32));targets.append(target.astype(np.float32));observations.append(np.c_[imu_ax,imu_ay,r].astype(np.float32));teacher_vys.append(vy_teacher.astype(np.float32));teacher_confidences.append(teacher_confidence.astype(np.float32));valids.append(ok);bag_ids.append(np.full(n,bag_id));split_ids.append(np.full(n,split));manifest.append({"bag_id":bag_id,"source":str(path),"recording_date":recording_date.isoformat(),"imu_sign_cutover":IMU_CONVENTION_CUTOFF.isoformat(),"segment":int(local),"split":("train","val","test")[split],"samples":n,"valid":int(ok.sum()),"vy_input":"causal_pacejka_mcl_ay_bias_ekf","vy_teacher":("offline_mcl_imu_smoother" if smoother_diagnostics and smoother_diagnostics.get("usable") else "causal_pacejka_mcl_ay_bias_ekf_fallback"),"vy_smoother":smoother_diagnostics,"imu_ax_stationary_bias_removed":ax_bias,"imu_axis_signs":{"wz":imu_wz_sign,"ax":imu_ax_sign,"ay":imu_ay_sign},"imu_ema_alpha":source_ema_alpha,"command_topic":str(z["command_topic"])});next_bag+=1
+            features.append(feat.astype(np.float32));targets.append(target.astype(np.float32));observations.append(np.c_[imu_ax,imu_ay,r].astype(np.float32));teacher_vys.append(vy_teacher.astype(np.float32));teacher_confidences.append(teacher_confidence.astype(np.float32));valids.append(ok);bag_ids.append(np.full(n,bag_id));split_ids.append(np.full(n,split));manifest.append({"bag_id":bag_id,"source":str(path),"recording_date":recording_date.isoformat(),"imu_sign_cutover":IMU_CONVENTION_CUTOFF.isoformat(),"segment":int(local),"split":("train","val","test")[split],"samples":n,"valid":int(ok.sum()),"vy_input":"causal_mcl_odom_imu_7state_ekf","vy_teacher":("offline_mcl_imu_smoother" if smoother_diagnostics and smoother_diagnostics.get("usable") else "causal_mcl_odom_imu_7state_ekf_fallback"),"vy_smoother":smoother_diagnostics,"imu_ax_stationary_bias_removed":ax_bias,"imu_axis_signs":{"wz":imu_wz_sign,"ax":imu_ax_sign,"ay":imu_ay_sign},"imu_ema_alpha":source_ema_alpha,"command_topic":str(z["command_topic"])});next_bag+=1
     X=np.concatenate(features);Y=np.concatenate(targets);O=np.concatenate(observations);TV=np.concatenate(teacher_vys);TC=np.concatenate(teacher_confidences);B=np.concatenate(bag_ids);S=np.concatenate(split_ids);V=np.concatenate(valids)
     assert X.shape[1]==20 and tuple(FEATURES)==("vx","vy","yaw_rate","steer_cmd","speed_cmd","applied_steer","steer_cmd_delta","base_next_vx","base_next_vy","base_next_yaw_rate","steer_t-4","speed_t-4","steer_t-3","speed_t-3","steer_t-2","speed_t-2","steer_t-1","speed_t-1","steer_t","speed_t")
-    np.savez_compressed(OUTPUT,features=X,targets=Y,observations=O,teacher_vy=TV,teacher_vy_confidence=TC,bag_id=B,split=S,valid=V,feature_names=np.array(FEATURES),target_names=np.array(OUTPUTS),observation_names=np.array(("imu_ax","imu_ay","imu_yaw_rate")),dt=c.dt,vy_input_contract="causal_pacejka_mcl_ay_bias_ekf",vy_teacher_contract="offline_smoother_with_causal_fallback")
-    REPORT.write_text(json.dumps({"output":str(OUTPUT),"samples":len(X),"valid":int(V.sum()),"bags":int(len(np.unique(B))),"kinematic_steer_scale":c.steer_scale,"kinematic_steer_bias":c.steer_bias,"vy_input":"causal_pacejka_mcl_ay_bias_ekf","vy_teacher":"offline_mcl_imu_smoother_with_causal_fallback","sources":manifest,"forbidden_training_source":FORBIDDEN},indent=2)+"\n")
+    np.savez_compressed(OUTPUT,features=X,targets=Y,observations=O,teacher_vy=TV,teacher_vy_confidence=TC,bag_id=B,split=S,valid=V,feature_names=np.array(FEATURES),target_names=np.array(OUTPUTS),observation_names=np.array(("imu_ax","imu_ay","imu_yaw_rate")),dt=c.dt,vy_input_contract="causal_mcl_odom_imu_7state_ekf",vy_teacher_contract="offline_smoother_with_causal_fallback")
+    REPORT.write_text(json.dumps({"output":str(OUTPUT),"samples":len(X),"valid":int(V.sum()),"bags":int(len(np.unique(B))),"kinematic_steer_scale":c.steer_scale,"kinematic_steer_bias":c.steer_bias,"vy_input":"causal_mcl_odom_imu_7state_ekf","vy_teacher":"offline_mcl_imu_smoother_with_causal_fallback","sources":manifest,"excluded_manual_sessions":excluded_manual,"forbidden_training_source":FORBIDDEN},indent=2)+"\n")
     print(REPORT.read_text())
 if __name__=="__main__":main()

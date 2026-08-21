@@ -14,7 +14,7 @@ int main(int argc, char** argv) {
     p.dynamics_model=use_mlp ? mppi::DYNAMIC_MLP_RESIDUAL_SERVO_LAG
                             : mppi::DYNAMIC_RESIDUAL_SERVO_LAG;
     p.max_steer=.4788f; p.min_accel=-10.f; p.max_accel=10.f;
-    p.min_speed=0.f; p.max_speed=10.f; p.kf_low_speed_threshold=.5f;
+    p.min_speed=0.f; p.max_speed=10.f;
     p.q_v=12.f; p.q_heading=1.f; p.q_du=.12f; p.q_steer=.3f;
     p.q_obs=15000.f; p.q_lat_g=60.f; p.lat_g_soft_limit=9.5f;
     p.longitudinal_accel_soft_limit=4.f; p.q_rear_slip=800.f;
@@ -27,7 +27,6 @@ int main(int argc, char** argv) {
     p.l_f=.163f; p.l_r=.161f; p.F_zf=p.mass*9.81f*p.l_r/(p.l_f+p.l_r);
     p.F_zr=p.mass*9.81f*p.l_f/(p.l_f+p.l_r);
     p.kinematic_steer_scale=.50927964f; p.kinematic_steer_bias=.01015773f;
-    p.kinematic_position_speed_scale=.86334913f;
     p.steer_servo_time_constant=.15514851f; p.actuator_max_steer_rate=.8344091f;
     p.speed_servo_kp=.76168889f; p.speed_reference_accel_time_constant=.04f;
     p.speed_reference_brake_time_constant=.02f; p.actuator_max_speed_reference_rate=8.f;
@@ -36,11 +35,8 @@ int main(int argc, char** argv) {
     p.dynamic_mlp_D_f=.66502247f; p.dynamic_mlp_E_f=.66150913f;
     p.dynamic_mlp_B_r=4.20691398f; p.dynamic_mlp_C_r=.75200864f;
     p.dynamic_mlp_D_r=.52704648f; p.dynamic_mlp_E_r=-.99773961f;
-    p.dynamic_mlp_min_speed=.8f;
-    p.dynamic_mlp_max_residual_yaw_accel=12.f;p.dynamic_mlp_residual_gate_steer_start=.40f;
-    p.dynamic_mlp_residual_gate_steer_end=.4788f;p.dynamic_mlp_max_total_yaw_accel=12.f;
-    p.dynamic_mlp_yaw_rate_kinematic_scale=.75f;p.dynamic_mlp_yaw_rate_margin=.35f;
-    p.dynamic_mlp_yaw_rate_lateral_accel_limit=9.5f;
+    p.mlp_max_residual_ax=0.f;p.mlp_max_residual_ay=8.f;
+    p.mlp_max_residual_yaw_accel=12.f;
     p.visualize_candidates=argc > 3 && std::stoi(argv[3]) != 0;
     p.actuator_speed_reference_state=3.f;
     p.objective_mode=use_safe_set?mppi::LMPC_OBJECTIVE:mppi::MPCC_OBJECTIVE;

@@ -42,7 +42,6 @@ enum DynamicsModel : int {
     SLIP_KINEMATIC_WITH_IMU_DIRECT_SPEED = 7,
     DYNAMIC_MLP_RESIDUAL = 8,
     DYNAMIC_MLP_RESIDUAL_SERVO_LAG = 9,
-    EFFECTIVE_HISTORY_STATE_RESIDUAL = 10,
     DYNAMIC_MLP_RESIDUAL_SERVO_LAG_VX_DELTA_24D = 11,
     DYNAMIC_RESIDUAL_SERVO_LAG = 12,
 };
@@ -84,7 +83,6 @@ struct Params {
     int dynamics_model;
     float residual_imu[3];
     float residual_command_history[10];
-    float effective_command_history[20];
     float residual_vx_history[5];
     float actuator_steer_state;
     float actuator_speed_reference_state;
@@ -103,10 +101,6 @@ struct Params {
     // Per-rollout curve speed cap: v <= sqrt(a_y_limit / |curvature|).
     // Zero disables the cap; max_speed remains the straight-line ceiling.
     float curve_lateral_accel_limit;
-    // CUDA rollout-only no-slip prior. The host KF keeps its own state; after
-    // each predicted step, |body vx| below this value forces predicted vy=0.
-    float kf_low_speed_threshold;
-    
     // Cost Weights
     float q_dist;
     float q_contour;
@@ -173,8 +167,6 @@ struct Params {
     float I_z;
     float kinematic_steer_scale;
     float kinematic_steer_bias;
-    // Converts VESC/odom longitudinal speed units to physical map displacement.
-    float kinematic_position_speed_scale;
     bool kinematic_no_slip;
     float l_f;
     float l_r;
@@ -201,24 +193,10 @@ struct Params {
     float dynamic_mlp_B_f, dynamic_mlp_C_f, dynamic_mlp_D_f, dynamic_mlp_E_f;
     float dynamic_mlp_B_r, dynamic_mlp_C_r, dynamic_mlp_D_r, dynamic_mlp_E_r;
     float dynamic_mlp_I_z;
-    float dynamic_mlp_min_speed;
-    float dynamic_mlp_max_residual_yaw_accel;
-    float dynamic_mlp_residual_gate_steer_start;
-    float dynamic_mlp_residual_gate_steer_end;
-    float dynamic_mlp_max_total_yaw_accel;
-    float dynamic_mlp_yaw_rate_kinematic_scale;
-    float dynamic_mlp_yaw_rate_margin;
-    float dynamic_mlp_yaw_rate_lateral_accel_limit;
-
-    // Command-to-state effective model. These are joint response parameters,
-    // not claims about a measured physical steering servo.
-    float effective_steer_scale;
-    float effective_steer_bias;
-    float effective_yaw_response_tau;
-    float effective_max_yaw_accel;
-    float effective_speed_response_gain;
-    float effective_max_accel;
-    float effective_vy_decay_tau;
+    // Limits only the learned correction, never a measured/predicted state.
+    float mlp_max_residual_ax;
+    float mlp_max_residual_ay;
+    float mlp_max_residual_yaw_accel;
 
     ButterworthCoeffs filter_coeffs;
 };
@@ -238,7 +216,6 @@ public:
     void load_dynamic_imu_recursive_weights(const std::string& path);
     void load_dynamic_mlp_residual_weights(const std::string& path);
     void load_dynamic_mlp_vx_delta_residual_weights(const std::string& path);
-    void load_effective_history_state_residual_weights(const std::string& path);
     // Validation-only entry point. It launches the exact CUDA rollout step,
     // including actuator states, feature construction, MLP and integration.
     State debug_dynamic_mlp_residual_step(
@@ -248,9 +225,6 @@ public:
         const State& state, const Control& control,
         std::array<float, 12>& command_history,
         std::array<float, 5>& vx_history);
-    State debug_effective_history_state_residual_step(
-        const State& state, const Control& control,
-        std::array<float, 20>& command_history);
     
     // 경로 및 바운더리 설정
     void set_reference_path(const std::vector<float>& xs, const std::vector<float>& ys,

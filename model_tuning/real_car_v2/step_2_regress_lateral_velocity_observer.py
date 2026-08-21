@@ -44,7 +44,7 @@ def load_records(cfg):
                 part[:, names["vx"]], yaw_rate, lateral_accel, dt)
             if not diagnostic.get("usable"):
                 continue
-            valid = np.isfinite(teacher) & (np.abs(part[:, names["vx"]]) >= cfg["kf_low_speed_threshold"])
+            valid = np.isfinite(teacher)
             valid[:8] = False; valid[-8:] = False
             if valid.sum() >= 40:
                 records.append((part, columns, dt, signs, alpha, teacher, valid))
@@ -65,8 +65,7 @@ def make_params(cfg, theta, dt):
         pacejka_d_rear=float(cfg["dynamic_mlp_D_r"]),
         pacejka_e_rear=float(cfg["dynamic_mlp_E_r"]),
         min_longitudinal_speed=float(cfg["kf_min_vx"]),
-        low_speed_threshold=float(cfg["kf_low_speed_threshold"]),
-        max_abs_vy=float(cfg["kf_max_abs_vy"]), process_var_vy=q_vy,
+        low_speed_threshold=0.0, max_abs_vy=float("inf"), process_var_vy=q_vy,
         process_var_yaw_rate=float(cfg["kf_q_yaw_rate"]),
         measurement_var_lateral_accel=r_ay,
         measurement_var_yaw_rate=float(cfg["kf_r_yaw_rate"]),

@@ -11,6 +11,7 @@ PYTHON = sys.executable
 
 # User-editable switches. The default performs the complete reproducible run.
 RUN_BUILD_DATASET = True
+RUN_LONGITUDINAL_REGRESSION = True
 # observer를 다시 튜닝할 때만 켠다. 결과는 검토 후 params.yaml에 반영한다.
 RUN_OBSERVER_REGRESSION = False
 RUN_CLASSIC_REGRESSION = True
@@ -34,6 +35,8 @@ def run(script, *arguments, environment=None):
 
 
 def main():
+    if RUN_LONGITUDINAL_REGRESSION:
+        run("visualize_and_regress_longitudinal_actuator.py")
     if RUN_OBSERVER_REGRESSION:
         run("step_2_regress_lateral_velocity_observer.py")
     if RUN_BUILD_DATASET:

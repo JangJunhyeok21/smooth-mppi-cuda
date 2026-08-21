@@ -22,12 +22,14 @@ class Contract:
     speed_accel_tau: float = 0.04
     speed_brake_tau: float = 0.02
     max_speed_reference_rate: float = 8.0
-    position_speed_scale: float = 0.8633491306389823
+    # Training/evaluation integrates body velocity directly; no fitted S_v.
+    position_speed_scale: float = 1.0
     drag: float = 0.0
     min_accel: float = -1.0
     max_accel: float = 1.0
-    low_speed_center: float = 0.8
-    low_speed_width: float = 0.2
+    max_residual_ax: float = 0.0
+    max_residual_ay: float = 8.0
+    max_residual_yaw_accel: float = 12.0
     def dump(self, path):
         with open(path, "w", encoding="utf-8") as f:
             json.dump({**asdict(self), "features": FEATURES, "outputs": OUTPUTS}, f, indent=2)
@@ -48,18 +50,20 @@ def longitudinal_actuator_step(speed_reference, speed_cmd, vx, c=Contract()):
     return speed_reference2,ax
 
 def low_speed_gate(vx, c=Contract()):
-    return 1/(1+np.exp(-(np.abs(vx)-c.low_speed_center)/max(c.low_speed_width,1e-3)))
+    """Compatibility API: residual gating was removed; always return one."""
+    return np.ones_like(vx, dtype=float) if np.ndim(vx) else 1.0
 
 def residual_gates(vx, c=Contract()):
-    """Ax stays observable at standstill; gate only lateral/yaw residuals."""
-    lateral=low_speed_gate(vx,c)
-    return np.stack((np.ones_like(lateral),lateral,lateral),axis=-1) if np.ndim(lateral) else np.array((1.,lateral,lateral))
+    """Compatibility API: no speed-dependent residual gate remains."""
+    one=low_speed_gate(vx,c)
+    return np.stack((one,one,one),axis=-1) if np.ndim(one) else np.ones(3)
 
 def integrate(state, base_accel, residual, c=Contract()):
     """state=[x,y,yaw,vx,vy,r], accelerations use ISO body axes."""
     x,y,yaw,vx,vy,r=np.asarray(state,float)
-    bounded=np.clip(np.asarray(residual),[-8.,-8.,-30.],[8.,8.,30.])
-    ax,ay,rdot=np.asarray(base_accel)+residual_gates(vx,c)*bounded
+    limit=np.asarray((c.max_residual_ax,c.max_residual_ay,c.max_residual_yaw_accel))
+    bounded=np.clip(np.asarray(residual),-limit,limit)
+    ax,ay,rdot=np.asarray(base_accel)+bounded
     nvx=vx+(ax+vy*r)*c.dt
     nvy=vy+(ay-vx*r)*c.dt
     nr=r+rdot*c.dt

@@ -75,6 +75,10 @@ private:
         int ipsi = findColumn(headers, {"psi_rad", "psi", "yaw", "heading_rad"});
         int ileft = findColumn(headers, {"w_tr_left_m", "w_left_m", "left_width_m"});
         int iright = findColumn(headers, {"w_tr_right_m", "w_right_m", "right_width_m"});
+        int ilx = findColumn(headers, {"left_x_m", "left_x"});
+        int ily = findColumn(headers, {"left_y_m", "left_y"});
+        int irx = findColumn(headers, {"right_x_m", "right_x"});
+        int iry = findColumn(headers, {"right_y_m", "right_y"});
 
         if (ix < 0 || iy < 0) {
             RCLCPP_FATAL(get_logger(), "CSV must have X and Y columns");
@@ -90,7 +94,8 @@ private:
             return;
         }
 
-        std::vector<double> xs, ys, psis, lefts, rights;
+        const bool has_explicit_boundaries = ilx >= 0 && ily >= 0 && irx >= 0 && iry >= 0;
+        std::vector<double> xs, ys, psis, lefts, rights, left_xs, left_ys, right_xs, right_ys;
 
         while (std::getline(file, line)) {
             line = trim(line);
@@ -109,6 +114,17 @@ private:
             psis.push_back(psi);
             lefts.push_back(left);
             rights.push_back(right);
+            if (has_explicit_boundaries) {
+                double lx, ly, rx, ry;
+                if (!tryParse(cols, ilx, lx) || !tryParse(cols, ily, ly) ||
+                    !tryParse(cols, irx, rx) || !tryParse(cols, iry, ry)) {
+                    RCLCPP_FATAL(get_logger(), "Invalid explicit boundary coordinate in %s", csv_path_.c_str());
+                    rclcpp::shutdown();
+                    return;
+                }
+                left_xs.push_back(lx); left_ys.push_back(ly);
+                right_xs.push_back(rx); right_ys.push_back(ry);
+            }
         }
 
         if (xs.size() < 2) {
@@ -143,7 +159,8 @@ private:
             psis[i] = psis[i-1] + diff;
         }
 
-        buildPath(xs, ys, psis, lefts, rights, path_center_, path_left_, path_right_);
+        buildPath(xs, ys, psis, lefts, rights, left_xs, left_ys,
+                  right_xs, right_ys, path_center_, path_left_, path_right_);
 
         RCLCPP_INFO(
             get_logger(),
@@ -157,6 +174,10 @@ private:
         const std::vector<double> &psis,
         const std::vector<double> &lefts,
         const std::vector<double> &rights,
+        const std::vector<double> &left_xs,
+        const std::vector<double> &left_ys,
+        const std::vector<double> &right_xs,
+        const std::vector<double> &right_ys,
         nav_msgs::msg::Path &pc,
         nav_msgs::msg::Path &pl,
         nav_msgs::msg::Path &pr)
@@ -186,16 +207,17 @@ private:
 
             geometry_msgs::msg::PoseStamped l;
             l.header.frame_id = frame_id_;
-            l.pose.position.x = xs[i] + nx * lefts[i];
-            l.pose.position.y = ys[i] + ny * lefts[i];
+            const bool explicit_boundaries = left_xs.size() == xs.size();
+            l.pose.position.x = explicit_boundaries ? left_xs[i] : xs[i] + nx * lefts[i];
+            l.pose.position.y = explicit_boundaries ? left_ys[i] : ys[i] + ny * lefts[i];
             l.pose.position.z = 0.0;
             l.pose.orientation = c.pose.orientation;
             pl.poses.push_back(l);
 
             geometry_msgs::msg::PoseStamped r;
             r.header.frame_id = frame_id_;
-            r.pose.position.x = xs[i] - nx * rights[i];
-            r.pose.position.y = ys[i] - ny * rights[i];
+            r.pose.position.x = explicit_boundaries ? right_xs[i] : xs[i] - nx * rights[i];
+            r.pose.position.y = explicit_boundaries ? right_ys[i] : ys[i] - ny * rights[i];
             r.pose.position.z = 0.0;
             r.pose.orientation = c.pose.orientation;
             pr.poses.push_back(r);

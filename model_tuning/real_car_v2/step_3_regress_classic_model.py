@@ -21,10 +21,10 @@ HORIZON = 25                    # 1.0 s at one 40 ms MPPI knot
 # optimizer balanced per bag, but cap redundant windows so a full rerun remains
 # practical after adding a day of data.
 MAX_PER_BAG = 80
-ADAM_RESTARTS = 3
-ADAM_STEPS = 600
-SURROGATE_SAMPLES = 400
-SURROGATE_PROPOSALS = 40000
+ADAM_RESTARTS = int(os.environ.get("CLASSIC_ADAM_RESTARTS","3"))
+ADAM_STEPS = int(os.environ.get("CLASSIC_ADAM_STEPS","600"))
+SURROGATE_SAMPLES = int(os.environ.get("CLASSIC_SURROGATE_SAMPLES","400"))
+SURROGATE_PROPOSALS = int(os.environ.get("CLASSIC_SURROGATE_PROPOSALS","40000"))
 
 NAMES = ("B_f", "C_f", "D_f", "E_f", "B_r", "C_r", "D_r", "E_r")
 BOUNDS = np.asarray((
@@ -123,6 +123,18 @@ def relative_pose(states, scale):
     return pose
 
 
+def mcl_relative_pose(data, window_starts):
+    """Actual MCL trajectory in each rollout's initial local frame."""
+    pose=data["mcl_pose"].astype(np.float64); result=[]
+    for step in range(1,HORIZON+1):
+        initial=pose[window_starts]; current=pose[window_starts+2*step]
+        dx=current[:,0]-initial[:,0];dy=current[:,1]-initial[:,1];yaw=initial[:,2]
+        result.append(np.c_[dx*np.cos(yaw)+dy*np.sin(yaw),
+                            -dx*np.sin(yaw)+dy*np.cos(yaw),
+                            (current[:,2]-yaw+np.pi)%(2*np.pi)-np.pi])
+    return np.stack(result,1)
+
+
 def objective(parameters, data, window_starts, config, regularize=True):
     prediction, truth = rollout_numpy(parameters, data, window_starts, config)
     time_weight = np.linspace(.25, 1., HORIZON)[None, :, None]
@@ -130,9 +142,10 @@ def objective(parameters, data, window_starts, config, regularize=True):
     huber = np.where(np.abs(state_error) < .3,
                      .5*state_error**2, .3*(np.abs(state_error)-.15))
     loss = float(np.mean(huber*time_weight))
-    scale = float(config["kinematic_position_speed_scale"])
-    position_error = (relative_pose(prediction, scale)[:, -1, :2]
-                      - relative_pose(truth, scale)[:, -1, :2])
+    trajectory_truth=(mcl_relative_pose(data,window_starts) if "mcl_pose" in data.files
+                      else relative_pose(truth,1.0))
+    position_error = (relative_pose(prediction, 1.0)[:, -1, :2]
+                      - trajectory_truth[:, -1, :2])
     loss += .8*float(np.mean(np.sum(position_error**2, axis=1)))
     if regularize:
         span = BOUNDS[:, 1]-BOUNDS[:, 0]
@@ -148,10 +161,10 @@ def objective(parameters, data, window_starts, config, regularize=True):
 def metrics(parameters, data, window_starts, config):
     prediction, truth = rollout_numpy(parameters, data, window_starts, config)
     state_error = np.abs(prediction[:, -1]-truth[:, -1])
-    scale = float(config["kinematic_position_speed_scale"])
-    position_error = np.linalg.norm(
-        relative_pose(prediction, scale)[:, -1, :2]
-        - relative_pose(truth, scale)[:, -1, :2], axis=1)
+    trajectory_truth=(mcl_relative_pose(data,window_starts) if "mcl_pose" in data.files
+                      else relative_pose(truth,1.0))
+    position_error = np.linalg.norm(relative_pose(prediction, 1.0)[:, -1, :2]
+        - trajectory_truth[:, -1, :2], axis=1)
     return {"windows": len(window_starts),
             "state_mae": state_error.mean(0).tolist(),
             "state_p95": np.quantile(state_error, .95, axis=0).tolist(),
@@ -243,20 +256,24 @@ def torch_rollout_loss(raw_parameters, data, window_starts, config, device):
     loss=torch.nn.functional.smooth_l1_loss(error,torch.zeros_like(error),beta=.3)
     # Match the black-box objective: recursively integrate body velocities so
     # Adam cannot improve vy/r while silently worsening the actual trajectory.
-    scale=float(config["kinematic_position_speed_scale"])
     predicted_pose=torch.zeros((len(window_starts),3),device=device,dtype=torch.float64)
     truth_pose=torch.zeros_like(predicted_pose)
     for step in range(HORIZON):
         pvx,pvy,pr=prediction[:,step].unbind(1)
         tvx,tvy,tr=truth[:,step].unbind(1)
         predicted_pose=torch.stack((
-            predicted_pose[:,0]+scale*(pvx*torch.cos(predicted_pose[:,2])-pvy*torch.sin(predicted_pose[:,2]))*.04,
-            predicted_pose[:,1]+scale*(pvx*torch.sin(predicted_pose[:,2])+pvy*torch.cos(predicted_pose[:,2]))*.04,
+            predicted_pose[:,0]+(pvx*torch.cos(predicted_pose[:,2])-pvy*torch.sin(predicted_pose[:,2]))*.04,
+            predicted_pose[:,1]+(pvx*torch.sin(predicted_pose[:,2])+pvy*torch.cos(predicted_pose[:,2]))*.04,
             predicted_pose[:,2]+pr*.04),1)
-        truth_pose=torch.stack((
-            truth_pose[:,0]+scale*(tvx*torch.cos(truth_pose[:,2])-tvy*torch.sin(truth_pose[:,2]))*.04,
-            truth_pose[:,1]+scale*(tvx*torch.sin(truth_pose[:,2])+tvy*torch.cos(truth_pose[:,2]))*.04,
-            truth_pose[:,2]+tr*.04),1)
+        truth_pose=torch.stack((truth_pose[:,0]+(tvx*torch.cos(truth_pose[:,2])-tvy*torch.sin(truth_pose[:,2]))*.04,
+            truth_pose[:,1]+(tvx*torch.sin(truth_pose[:,2])+tvy*torch.cos(truth_pose[:,2]))*.04,truth_pose[:,2]+tr*.04),1)
+    if "mcl_pose" in data.files:
+        mcl=torch.as_tensor(data["mcl_pose"],device=device,dtype=torch.float64)
+        initial=mcl[starts_tensor]; final=mcl[starts_tensor+2*HORIZON]
+        dx=final[:,0]-initial[:,0];dy=final[:,1]-initial[:,1];heading=initial[:,2]
+        truth_pose=torch.stack((dx*torch.cos(heading)+dy*torch.sin(heading),
+                                -dx*torch.sin(heading)+dy*torch.cos(heading),
+                                final[:,2]-heading),1)
     loss=loss+.8*torch.mean(torch.sum(
         (predicted_pose[:,:2]-truth_pose[:,:2])**2,dim=1))
     # Tail-risk term: classic yaw error in a few hard corners dominates MPPI
@@ -332,7 +349,10 @@ def main():
     tolerance=.01*(BOUNDS[:,1]-BOUNDS[:,0])
     boundary={name:bool(abs(value-low)<=tol or abs(high-value)<=tol)
               for name,value,(low,high),tol in zip(NAMES,selected,BOUNDS,tolerance)}
-    report={"model_dt":.04,"integration":"single Euler step at 0.04 s",
+    report={"model_dt":.04,"integration":"semi-implicit Euler: next body state advances pose at 0.04 s",
+        "state_target":"classic MPPI EKF + backward RTS [vx,vy,yaw_rate]",
+        "trajectory_target":"classic MPPI EKF + backward RTS [x,y,yaw]",
+        "position_speed_scale":1.0,
         "parameter_names":list(NAMES),"selection":"lowest held-out validation open-loop score",
         "selected_method":winner,"expanded_fitted":dict(zip(NAMES,selected.tolist())),
         "boundary_solution":boundary,"deployment_gate_passed":not any(boundary.values()),

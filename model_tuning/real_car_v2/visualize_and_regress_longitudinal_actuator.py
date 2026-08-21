@@ -16,7 +16,7 @@ from scipy.optimize import differential_evolution, minimize
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
-SOURCE_DIR = ROOT / "model_tuning/data/real_car_v2_drive"
+SOURCE_DIR = ROOT / "model_tuning/data/ifac0810_0819_autonomous_physics_clean"
 OUTPUT_DIR = ROOT / "model_tuning/results/longitudinal_actuator_regression"
 CONFIG_PATH = ROOT / "config/params.yaml"
 ROLLOUT_STEPS = 50                 # 1.0 s at 50 Hz
@@ -52,7 +52,7 @@ def load_sessions():
             split = "test" if path.name in TEST_FILES else "validation" if path.name in VALIDATION_FILES else "train"
             sessions.append({
                 "name": f"{path.stem}:segment{segment}", "source": path.name,
-                "split": split, "vx": a[:, names["vx"]].astype(float),
+                "split": split, "vx": a[:, names["offline_vx"]].astype(float),
                 "cmd": a[:, names["speed_cmd"]].astype(float),
                 "dt": float(z["dt"]),
             })
@@ -164,7 +164,7 @@ def plot_examples(sessions, old, fitted, cfg):
         sl = slice(start, start + ROLLOUT_STEPS + 1)
         gt, cmd = session["vx"][sl], session["cmd"][sl]
         t = np.arange(len(gt)) * session["dt"]
-        ax.plot(t, gt, color="black", lw=2, label="GT odom vx")
+        ax.plot(t, gt, color="black", lw=2, label="classic KF/RTS vx target")
         ax.plot(t, cmd, color="tab:gray", ls=":", label="/drive speed command")
         ax.plot(t, predict_window(gt, cmd, session["dt"], old, cfg["speed_servo_kp"], cfg["min_accel"], cfg["max_accel"]), ls="--", label="previous parameters")
         ax.plot(t, predict_window(gt, cmd, session["dt"], fitted, cfg["speed_servo_kp"], cfg["min_accel"], cfg["max_accel"]), color="tab:red", label="fitted parameters")
@@ -194,7 +194,8 @@ def main():
         "parameter_order": ["speed_reference_accel_time_constant", "speed_reference_brake_time_constant", "actuator_max_speed_reference_rate"],
         "previous": old.tolist(), "fitted": fitted.tolist(),
         "fixed_speed_servo_kp": float(cfg["speed_servo_kp"]),
-        "objective": "1.0 s recursive odom-vx rollout, train Huber; source-session-disjoint validation",
+        "objective": "1.0 s recursive offline-vx rollout, train Huber; source-session-disjoint validation",
+        "target_source": "offline_vx (classic MPPI EKF + backward RTS)",
         "metrics_previous": {s: metrics(old, sessions, s, cfg) for s in ("train", "validation", "test")},
         "metrics_fitted": {s: metrics(fitted, sessions, s, cfg) for s in ("train", "validation", "test")},
         "sessions": [{"name": s["name"], "split": s["split"], "rollouts": int(len(s["starts"]))} for s in sessions],

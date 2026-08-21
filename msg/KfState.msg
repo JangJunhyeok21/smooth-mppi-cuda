@@ -5,6 +5,6 @@ float32 yaw
 float32 vx
 float32 vy
 float32 yaw_rate
-float32 imu_ax_bias
-float32 imu_ay_bias
-float32[49] covariance
+float32 ax
+float32 ay
+float32[36] covariance

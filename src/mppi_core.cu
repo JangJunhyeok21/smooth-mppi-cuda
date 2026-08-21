@@ -33,8 +33,6 @@ namespace mppi
     __device__ float dmr_mean[22],dmr_std[22];
     __device__ float dmr24_w1[64*24],dmr24_b1[64],dmr24_w2[32*64],dmr24_b2[32],dmr24_w3[3*32],dmr24_b3[3];
     __device__ float dmr24_mean[24],dmr24_std[24];
-    __device__ float ehsr_w1[64*34],ehsr_b1[64],ehsr_w2[32*64],ehsr_b2[32],ehsr_w3[3*32],ehsr_b3[3];
-    __device__ float ehsr_mean[34],ehsr_std[34];
 
     __device__ inline float sigmoidf_fast(float x) { return 1.f/(1.f+__expf(-x)); }
 
@@ -97,19 +95,6 @@ namespace mppi
         while (angle > M_PI) angle -= 2.0f * M_PI;
         while (angle < -M_PI) angle += 2.0f * M_PI;
         return angle;
-    }
-
-    // Apply the requested no-slip prior only to predicted CUDA rollout state.
-    // With threshold=0 this is disabled.  Use longitudinal body speed rather
-    // than hypot(vx,vy), otherwise a large vy could prevent the low-vx prior.
-    __host__ __device__ inline void apply_rollout_low_speed_vy_prior(
-        State &state, const Params &params)
-    {
-        if (params.kf_low_speed_threshold > 0.0f &&
-            fabsf(state.v) < params.kf_low_speed_threshold) {
-            state.vy = 0.0f;
-            state.slip_angle = 0.0f;
-        }
     }
 
     __host__ __device__ State update_kinematic(const State &s, const Control &u, const Params &p)
@@ -184,8 +169,8 @@ namespace mppi
         float corr[3],scale[3]={8.f,8.f,30.f};
         for(int o=0;o<3;++o){float z=mlp_b3[o];for(int i=0;i<32;++i)z+=mlp_w3[o*32+i]*h2[i];corr[o]=tanhf(z)*scale[o];}
         State n=classic_s;n.v+=corr[0]*p.dt;n.vy+=corr[1]*p.dt;n.omega+=corr[2]*p.dt;
-        n.x=s.x+p.kinematic_position_speed_scale*(n.v*fast_cos(s.yaw)-n.vy*fast_sin(s.yaw))*p.dt;
-        n.y=s.y+p.kinematic_position_speed_scale*(n.v*fast_sin(s.yaw)+n.vy*fast_cos(s.yaw))*p.dt;n.yaw=angle_normalize(s.yaw+n.omega*p.dt);
+        n.x=s.x+(n.v*fast_cos(s.yaw)-n.vy*fast_sin(s.yaw))*p.dt;
+        n.y=s.y+(n.v*fast_sin(s.yaw)+n.vy*fast_cos(s.yaw))*p.dt;n.yaw=angle_normalize(s.yaw+n.omega*p.dt);
         n.slip_angle=atan2f(n.vy,fabsf(n.v)+1e-5f);n.ay=(n.vy-s.vy)/p.dt+n.v*n.omega;
         for(int i=0;i<8;++i)command_history[i]=command_history[i+2];command_history[8]=u.steer;command_history[9]=speed_cmd;
         return n;
@@ -232,58 +217,10 @@ namespace mppi
         const float*,const float*,const float*,const float*,const float*,
         const float*,const float*,const float*,const float*,float*);
 
-    __device__ inline void append_effective_command(float *history, float steer, float speed) {
-        for(int i=0;i<18;++i) history[i]=history[i+2];
-        history[18]=steer;history[19]=speed;
-    }
-
     __host__ __device__ inline bool uses_40ms_rollout_knot(int dynamics_model) {
         return dynamics_model == DYNAMIC_MLP_RESIDUAL_SERVO_LAG ||
                dynamics_model == DYNAMIC_RESIDUAL_SERVO_LAG ||
-               dynamics_model == DYNAMIC_MLP_RESIDUAL_SERVO_LAG_VX_DELTA_24D ||
-               dynamics_model == EFFECTIVE_HISTORY_STATE_RESIDUAL;
-    }
-
-    // 34-feature command-history model. One state transition is exactly 40 ms;
-    // the effective baseline consumes the held control in two 20 ms substeps.
-    // State residuals are corrections to the resulting 40 ms body state.
-    __device__ State update_effective_history_state_residual(
-        const State &s,const Control &u,const Params &p,float *history)
-    {
-        constexpr float control_dt=.02f,model_dt=.04f;
-        const float speed_cmd=fminf(p.max_speed,fmaxf(p.min_speed,u.accel));
-        // The incoming history ends at the last published command. The first
-        // future command becomes command[t] and must be present in its feature.
-        append_effective_command(history,u.steer,speed_cmd);
-        float raw[34]={s.v,s.vy,s.omega,s.ax,s.ay,u.steer,speed_cmd};
-        for(int i=0;i<10;++i)raw[7+i]=history[2*i];
-        for(int i=0;i<10;++i)raw[17+i]=history[2*i+1];
-        raw[27]=u.steer-history[16];raw[28]=u.steer-history[12];
-        raw[29]=speed_cmd-history[17];raw[30]=s.v*u.steer;
-        raw[31]=s.v*s.v*u.steer;raw[32]=s.v*s.omega;raw[33]=fabsf(s.v)*u.steer;
-        float corr[3];split_residual_mlp_v2<34>(raw,ehsr_mean,ehsr_std,
-            ehsr_w1,ehsr_b1,ehsr_w2,ehsr_b2,ehsr_w3,ehsr_b3,corr);
-        const float limits[3]={.12f,.10f,.25f};
-        for(int i=0;i<3;++i)corr[i]=limits[i]*tanhf(corr[i]);
-        float vx=s.v,vy=s.vy,r=s.omega;
-        for(int sub=0;sub<2;++sub) {
-            const float effective=p.effective_steer_scale*u.steer+p.effective_steer_bias;
-            const float target=vx/(p.l_f+p.l_r)*tanf(effective);
-            const float rdot=fminf(p.effective_max_yaw_accel,fmaxf(-p.effective_max_yaw_accel,
-                (target-r)/fmaxf(p.effective_yaw_response_tau,1e-3f)));
-            const float accel=fminf(p.effective_max_accel,fmaxf(-p.effective_max_accel,
-                p.effective_speed_response_gain*(speed_cmd-vx)));
-            vx+=accel*control_dt;vy+=(-vy/fmaxf(p.effective_vy_decay_tau,1e-3f))*control_dt;r+=rdot*control_dt;
-        }
-        State n=s;n.v=vx+corr[0];n.vy=vy+corr[1];n.omega=r+corr[2];
-        n.ax=(n.v-s.v)/model_dt;n.ay=(n.vy-s.vy)/model_dt+s.v*s.omega;
-        n.x=s.x+p.kinematic_position_speed_scale*(n.v*cosf(s.yaw)-n.vy*sinf(s.yaw))*model_dt;
-        n.y=s.y+p.kinematic_position_speed_scale*(n.v*sinf(s.yaw)+n.vy*cosf(s.yaw))*model_dt;
-        n.yaw=angle_normalize(s.yaw+n.omega*model_dt);n.slip_angle=atan2f(n.vy,fabsf(n.v)+1e-5f);
-        // Second held 20 ms command becomes the latest history sample for the
-        // following 40 ms transition.
-        append_effective_command(history,u.steer,speed_cmd);
-        return n;
+               dynamics_model == DYNAMIC_MLP_RESIDUAL_SERVO_LAG_VX_DELTA_24D;
     }
 
     // Real-car v2 residual contract: 20 -> 64 -> 32 -> 3, ReLU hidden
@@ -363,8 +300,8 @@ namespace mppi
         State n=s;n.v=base_vx+corr[0]*p.dt;n.vy=base_vy+corr[1]*p.dt;n.omega=base_w+corr[2]*p.dt;
         n.ax=(n.v-s.v)/p.dt-s.vy*s.omega;n.ay=(n.vy-s.vy)/p.dt+s.v*s.omega;
         const float next_speed=hypotf(n.v,n.vy),next_beta=atan2f(n.vy,n.v);
-        n.x=s.x+p.kinematic_position_speed_scale*next_speed*cosf(s.yaw+next_beta)*p.dt;
-        n.y=s.y+p.kinematic_position_speed_scale*next_speed*sinf(s.yaw+next_beta)*p.dt;
+        n.x=s.x+next_speed*cosf(s.yaw+next_beta)*p.dt;
+        n.y=s.y+next_speed*sinf(s.yaw+next_beta)*p.dt;
         n.yaw=angle_normalize(s.yaw+n.omega*p.dt);n.slip_angle=next_beta;
         for(int i=0;i<8;++i)history[i]=history[i+2];history[8]=u.steer;history[9]=speed_cmd;history[10]=steer;return n;
     }
@@ -557,35 +494,14 @@ namespace mppi
                 residual_derivatives);
         }
 
-        // Longitudinal response is identified directly from vx_cmd -> vx.
-        // Keep the network exclusively as a lateral/yaw correction model so
-        // its delta_ax cannot fight the deterministic speed-servo dynamics.
-        residual_derivatives[0] = 0.0f; // Delta ax
-        residual_derivatives[1] = fminf(8.0f, fmaxf(-8.0f, residual_derivatives[1])); // Delta ay
-        residual_derivatives[2] = fminf(
-            params.dynamic_mlp_max_residual_yaw_accel,
-            fmaxf(-params.dynamic_mlp_max_residual_yaw_accel,
-                  residual_derivatives[2])); // Delta yaw acceleration
-
-        // Smoothly suppress a poorly observable residual around standstill;
-        // this is identical to real_car_v2/contract.py::low_speed_gate.
-        const float low_speed_gate = 1.0f / (1.0f + expf(
-            -(fabsf(current_state.v) - params.dynamic_mlp_min_speed) / 0.2f));
-        // Longitudinal acceleration remains observable at standstill. Gating
-        // delta_ax made 0 -> 2.5 m/s launches structurally impossible because
-        // the classic acceleration is capped at 1 m/s^2. Only the poorly
-        // observable lateral and yaw residuals are suppressed at low speed.
-        residual_derivatives[1] *= low_speed_gate;
-        residual_derivatives[2] *= low_speed_gate;
-
-        const float steer_gate_span=fmaxf(
-            params.dynamic_mlp_residual_gate_steer_end-
-                params.dynamic_mlp_residual_gate_steer_start,1.0e-4f);
-        const float steer_residual_gate=fminf(1.0f,fmaxf(0.0f,
-            (params.dynamic_mlp_residual_gate_steer_end-fabsf(steering_angle)) /
-                steer_gate_span));
-        residual_derivatives[1] *= steer_residual_gate;
-        residual_derivatives[2] *= steer_residual_gate;
+        // Bound only the learned correction to its trained output domain.
+        // Sensor values and the resulting total state are never clamped here.
+        residual_derivatives[0] = fminf(params.mlp_max_residual_ax,
+            fmaxf(-params.mlp_max_residual_ax, residual_derivatives[0]));
+        residual_derivatives[1] = fminf(params.mlp_max_residual_ay,
+            fmaxf(-params.mlp_max_residual_ay, residual_derivatives[1]));
+        residual_derivatives[2] = fminf(params.mlp_max_residual_yaw_accel,
+            fmaxf(-params.mlp_max_residual_yaw_accel, residual_derivatives[2]));
 
         State next_state = current_state;
         next_state.v = classic_next_longitudinal_velocity
@@ -597,47 +513,12 @@ namespace mppi
         next_state.ax = classic_longitudinal_acceleration + residual_derivatives[0];
         next_state.ay = classic_lateral_acceleration + residual_derivatives[1];
 
-        // Bound the complete physics+residual transition. The real-car P99.5
-        // yaw acceleration is 10.8 rad/s^2; an unconstrained Pacejka step was
-        // observed jumping from 1 to 5 rad/s in one 40 ms rollout knot.
-        const float max_yaw_delta=params.dynamic_mlp_max_total_yaw_accel*dynamics_dt;
-        next_state.omega=current_state.omega+fminf(max_yaw_delta,fmaxf(
-            -max_yaw_delta,next_state.omega-current_state.omega));
-        const float wheelbase=params.l_f+params.l_r;
-        const float kinematic_yaw=fabsf(next_state.v*tanf(steering_angle)/wheelbase);
-        const float friction_yaw=params.dynamic_mlp_yaw_rate_lateral_accel_limit /
-            fmaxf(fabsf(next_state.v),MIN_DYNAMIC_SPEED);
-        const float yaw_envelope=fminf(
-            params.dynamic_mlp_yaw_rate_kinematic_scale*kinematic_yaw+
-                params.dynamic_mlp_yaw_rate_margin,
-            friction_yaw);
-        next_state.omega=fminf(yaw_envelope,fmaxf(-yaw_envelope,next_state.omega));
-
-        // The dynamic bicycle equations are ill-conditioned near standstill:
-        // slip angles divide by vx while tire forces can still create a large
-        // yaw acceleration. Use a no-slip kinematic yaw response until the
-        // identified dynamic model becomes observable.
-        if (fabsf(current_state.v) < params.dynamic_mlp_min_speed) {
-            const float wheelbase=params.l_f+params.l_r;
-            const float kinematic_yaw_rate=next_state.v*tanf(steering_angle)/wheelbase;
-            const float yaw_time_constant=fmaxf(
-                params.kinematic_yaw_rate_time_constant,1.0e-3f);
-            const float yaw_acceleration=fminf(params.kinematic_max_yaw_accel,
-                fmaxf(-params.kinematic_max_yaw_accel,
-                    (kinematic_yaw_rate-current_state.omega)/yaw_time_constant));
-            next_state.omega=current_state.omega+yaw_acceleration*dynamics_dt;
-            next_state.vy=0.0f;
-            next_state.ay=next_state.v*next_state.omega;
-        }
-
         const float next_speed = hypotf(next_state.v, next_state.vy);
         const float next_body_slip_angle = atan2f(next_state.vy, next_state.v);
-        next_state.x = current_state.x
-            + params.kinematic_position_speed_scale * next_speed
-                * cosf(current_state.yaw + next_body_slip_angle) * dynamics_dt;
-        next_state.y = current_state.y
-            + params.kinematic_position_speed_scale * next_speed
-                * sinf(current_state.yaw + next_body_slip_angle) * dynamics_dt;
+        next_state.x = current_state.x + next_speed
+            * cosf(current_state.yaw + next_body_slip_angle) * dynamics_dt;
+        next_state.y = current_state.y + next_speed
+            * sinf(current_state.yaw + next_body_slip_angle) * dynamics_dt;
         next_state.yaw = angle_normalize(
             current_state.yaw + next_state.omega * dynamics_dt);
         next_state.slip_angle = next_body_slip_angle;
@@ -864,13 +745,15 @@ namespace mppi
         const float safe_front_vx = fmaxf(fabsf(s.v), MIN_FRONT_SLIP_SPEED);
         const float front_tire_slip_angle = applied_steering_angle - atan2f(
             s.vy + p.l_f * s.omega, safe_front_vx);
-        const float front_slip_excess =
-            fabsf(s.v) >= p.front_slip_cost_min_speed
-                ? fmaxf(0.0f,
-                        fabsf(front_tire_slip_angle) - p.front_slip_soft_limit)
-                : 0.0f;
+        const float front_slip_excess = fmaxf(
+            0.0f, fabsf(front_tire_slip_angle) - p.front_slip_soft_limit);
+        const float front_speed_ratio = fminf(
+            1.0f, fabsf(s.v) / fmaxf(p.front_slip_cost_min_speed, 1.0e-3f));
+        const float front_speed_gate = front_speed_ratio * front_speed_ratio
+            * (3.0f - 2.0f * front_speed_ratio);
         const float front_slip_cost =
-            p.q_front_slip * front_slip_excess * front_slip_excess;
+            front_speed_gate * p.q_front_slip
+            * front_slip_excess * front_slip_excess;
 
         // Rear-tire slip soft constraint. Unlike the GG ellipse, this catches
         // rear-axle saturation/oversteer even when total vehicle acceleration
@@ -880,13 +763,15 @@ namespace mppi
         const float safe_vx = fmaxf(fabsf(s.v), MIN_REAR_SLIP_SPEED);
         const float rear_tire_slip_angle = -atan2f(
             s.vy - p.l_r * s.omega, safe_vx);
-        const float rear_slip_excess =
-            fabsf(s.v) >= p.rear_slip_cost_min_speed
-                ? fmaxf(0.0f,
-                        fabsf(rear_tire_slip_angle) - p.rear_slip_soft_limit)
-                : 0.0f;
+        const float rear_slip_excess = fmaxf(
+            0.0f, fabsf(rear_tire_slip_angle) - p.rear_slip_soft_limit);
+        const float rear_speed_ratio = fminf(
+            1.0f, fabsf(s.v) / fmaxf(p.rear_slip_cost_min_speed, 1.0e-3f));
+        const float rear_speed_gate = rear_speed_ratio * rear_speed_ratio
+            * (3.0f - 2.0f * rear_speed_ratio);
         const float rear_slip_cost =
-            p.q_rear_slip * rear_slip_excess * rear_slip_excess;
+            rear_speed_gate * p.q_rear_slip
+            * rear_slip_excess * rear_slip_excess;
 
         // 4. Control Input Cost
         float d_steer = u.steer - u_prev.steer;
@@ -1204,7 +1089,6 @@ namespace mppi
 
             x=update_dynamic_mlp_residual(x,u_clamped,p,mlp_command_history,
                 true,nullptr,APPLY_RESIDUAL);
-            apply_rollout_low_speed_vy_prior(x, p);
             states[idx] = x;
             controls[idx] = u_clamped; 
 
@@ -1250,17 +1134,13 @@ namespace mppi
     {
         if (blockIdx.x != 0 || threadIdx.x != 0) return;
         float gru_hidden[RESIDUAL_HIDDEN];
-        float command_history[20];
+        float command_history[12];
         float vx_history[5];
         for (int i=0;i<RESIDUAL_HIDDEN;++i)
             gru_hidden[i]=encoded_residual_hidden ? encoded_residual_hidden[i] : 0.f;
-        if(p.dynamics_model==EFFECTIVE_HISTORY_STATE_RESIDUAL)
-            for(int i=0;i<20;++i)command_history[i]=p.effective_command_history[i];
-        else {
-            for (int i=0;i<10;++i) command_history[i]=p.residual_command_history[i];
-            command_history[10]=p.actuator_steer_state;
-            command_history[11]=p.actuator_speed_reference_state;
-        }
+        for (int i=0;i<10;++i) command_history[i]=p.residual_command_history[i];
+        command_history[10]=p.actuator_steer_state;
+        command_history[11]=p.actuator_speed_reference_state;
         for(int i=0;i<5;++i)vx_history[i]=p.residual_vx_history[i];
         for (int t=0;t<T;++t) {
             const Control u=controls[t];
@@ -1284,11 +1164,8 @@ namespace mppi
                     p.dynamics_model!=DYNAMIC_MLP_RESIDUAL,
                     p.dynamics_model==DYNAMIC_MLP_RESIDUAL_SERVO_LAG_VX_DELTA_24D
                         ? vx_history : nullptr);
-            else if(p.dynamics_model==EFFECTIVE_HISTORY_STATE_RESIDUAL)
-                x=update_effective_history_state_residual(x,u,p,command_history);
             else
                 x=update_dynamics(x,u,p);
-            apply_rollout_low_speed_vy_prior(x, p);
             states[t]=x;
         }
     }
@@ -1352,8 +1229,7 @@ namespace mppi
                                  params_.dynamics_model==DYNAMIC_MLP_RESIDUAL ||
                                  params_.dynamics_model==DYNAMIC_MLP_RESIDUAL_SERVO_LAG ||
                                  params_.dynamics_model==DYNAMIC_RESIDUAL_SERVO_LAG ||
-                                 params_.dynamics_model==DYNAMIC_MLP_RESIDUAL_SERVO_LAG_VX_DELTA_24D ||
-                                 params_.dynamics_model==EFFECTIVE_HISTORY_STATE_RESIDUAL);
+                                 params_.dynamics_model==DYNAMIC_MLP_RESIDUAL_SERVO_LAG_VX_DELTA_24D);
         const float initial_accel = direct_speed ? params_.min_speed :
             ((params_.dynamics_model == KINEMATIC) ? 1.0f : 0.0f);
         h_prev_controls_.resize(T, {neutral_steer, initial_accel});
@@ -1541,42 +1417,6 @@ namespace mppi
 #undef LOAD_DMR24
     }
 
-    void MPPISolver::load_effective_history_state_residual_weights(const std::string& path) {
-        std::ifstream file(path,std::ios::binary);if(!file)throw std::runtime_error("cannot open effective-history state residual: "+path);
-        char magic[8];uint32_t version,nin,h1,h2,nout;float control_dt,model_dt,limits[3];
-        file.read(magic,8);file.read(reinterpret_cast<char*>(&version),4);file.read(reinterpret_cast<char*>(&nin),4);
-        file.read(reinterpret_cast<char*>(&h1),4);file.read(reinterpret_cast<char*>(&h2),4);file.read(reinterpret_cast<char*>(&nout),4);
-        file.read(reinterpret_cast<char*>(&control_dt),4);file.read(reinterpret_cast<char*>(&model_dt),4);file.read(reinterpret_cast<char*>(limits),12);
-        if(!file || std::string(magic,7)!="EHSR004" || version!=1 || nin!=34 || h1!=64 || h2!=32 || nout!=3 ||
-           fabsf(control_dt-.02f)>1e-7f || fabsf(model_dt-.04f)>1e-7f ||
-           fabsf(limits[0]-.12f)>1e-6f || fabsf(limits[1]-.10f)>1e-6f || fabsf(limits[2]-.25f)>1e-6f)
-            throw std::runtime_error("effective-history binary metadata/contract mismatch: "+path);
-        constexpr size_t count=64*34+64+32*64+32+3*32+3+34+34;
-        std::vector<float>w(count);file.read(reinterpret_cast<char*>(w.data()),count*sizeof(float));
-        char extra;if(file.gcount()!=static_cast<std::streamsize>(count*sizeof(float)) || file.read(&extra,1))
-            throw std::runtime_error("invalid effective-history binary payload: "+path);
-        size_t o=0;
-#define LOAD_EHSR(symbol,count_) CUDA_CHECK(cudaMemcpyToSymbol(symbol,w.data()+o,(count_)*sizeof(float)));o+=(count_)
-        LOAD_EHSR(ehsr_w1,64*34);LOAD_EHSR(ehsr_b1,64);LOAD_EHSR(ehsr_w2,32*64);LOAD_EHSR(ehsr_b2,32);LOAD_EHSR(ehsr_w3,3*32);LOAD_EHSR(ehsr_b3,3);LOAD_EHSR(ehsr_mean,34);LOAD_EHSR(ehsr_std,34);
-#undef LOAD_EHSR
-    }
-
-    __global__ void debug_effective_history_step_kernel(State state,Control control,Params params,
-        const float *history_input,State *state_output,float *history_output) {
-        if(blockIdx.x||threadIdx.x)return;float history[20];for(int i=0;i<20;++i)history[i]=history_input[i];
-        *state_output=update_effective_history_state_residual(state,control,params,history);
-        for(int i=0;i<20;++i)history_output[i]=history[i];
-    }
-
-    State MPPISolver::debug_effective_history_state_residual_step(const State& state,const Control& control,
-        std::array<float,20>& command_history) {
-        float *dh=nullptr,*dho=nullptr;State *ds=nullptr;CUDA_CHECK(cudaMalloc(&dh,20*sizeof(float)));CUDA_CHECK(cudaMalloc(&dho,20*sizeof(float)));CUDA_CHECK(cudaMalloc(&ds,sizeof(State)));
-        CUDA_CHECK(cudaMemcpy(dh,command_history.data(),20*sizeof(float),cudaMemcpyHostToDevice));
-        debug_effective_history_step_kernel<<<1,1>>>(state,control,params_,dh,ds,dho);CUDA_CHECK(cudaDeviceSynchronize());State out{};
-        CUDA_CHECK(cudaMemcpy(&out,ds,sizeof(State),cudaMemcpyDeviceToHost));CUDA_CHECK(cudaMemcpy(command_history.data(),dho,20*sizeof(float),cudaMemcpyDeviceToHost));
-        cudaFree(dh);cudaFree(dho);cudaFree(ds);return out;
-    }
-
     State MPPISolver::debug_dynamic_mlp_residual_step(
         const State& state, const Control& control,
         std::array<float, 12>& command_history, bool use_servo_lag)
@@ -1718,22 +1558,16 @@ namespace mppi
                         hypotf(before_dx,before_dy)+hypotf(after_dx,after_dy)));
                     const float curvature=angle_normalize(
                         after_heading-before_heading)/stencil_length;
-                    const float effective_steer=atanf((params_.l_f+params_.l_r)*curvature);
+                    const float target_tire_steer=atanf((params_.l_f+params_.l_r)*curvature);
                     const float scale=fabsf(params_.kinematic_steer_scale)>1.0e-6f
                         ? params_.kinematic_steer_scale : 1.0f;
                     h_prev_controls_[t].steer=fminf(params_.max_steer,
                         fmaxf(-params_.max_steer,
-                            (effective_steer-params_.kinematic_steer_bias)/scale));
+                            (target_tire_steer-params_.kinematic_steer_bias)/scale));
                 }
             }
             direct_speed_warm_start_initialized_=true;
         }
-        // One-cycle planning guard only. update_params() restores the fitted
-        // runtime threshold on the next 50 Hz callback, so simulator and MPPI
-        // use the same 0.8 m/s hybrid model after initialization.
-        if(first_direct_speed_solve)
-            params_.dynamic_mlp_min_speed=fmaxf(
-                params_.dynamic_mlp_min_speed,1.5f);
         CUDA_CHECK(cudaMemcpy(d_prev_controls_, h_prev_controls_.data(), T_ * sizeof(Control), cudaMemcpyHostToDevice));
 
         int threadsPerBlock = 128;
@@ -1885,12 +1719,16 @@ namespace mppi
         CUDA_CHECK(cudaMemcpy(weighted_control_trajectory_.data(), d_weighted_states_,
                               T_ * sizeof(State), cudaMemcpyDeviceToHost));
 
-        // Boundary clearance is intentionally soft.  Keep post-selection only
-        // for physical obstacle overlap; do not reject a trajectory merely
-        // because its lane-boundary slack is non-zero.
+        // Safe samples from opposite modes can average into an unsafe path.
+        // Check the rollout of the controls that will actually be published.
+        const bool weighted_obstacle_unsafe =
+            trajectory_min_obstacle_clearance(weighted_control_trajectory_)
+                < params_.car_radius;
+        const bool weighted_boundary_unsafe =
+            trajectory_min_boundary_clearance(weighted_control_trajectory_)
+                < 0.0f;
         if(params_.weighted_trajectory_safety_enabled &&
-           trajectory_min_obstacle_clearance(weighted_control_trajectory_)
-                < params_.car_radius) {
+           (weighted_obstacle_unsafe || weighted_boundary_unsafe)) {
             CUDA_CHECK(cudaMemcpy(h_states_.data(),d_states_,K_*T_*sizeof(State),
                                   cudaMemcpyDeviceToHost));
             CUDA_CHECK(cudaMemcpy(h_controls_.data(),d_controls_,K_*T_*sizeof(Control),
@@ -1905,7 +1743,9 @@ namespace mppi
             for(int k:candidates) {
                 std::copy_n(h_states_.begin()+k*T_,T_,candidate_trajectory.begin());
                 if(trajectory_min_obstacle_clearance(candidate_trajectory)
-                        >= params_.car_radius) {
+                        >= params_.car_radius &&
+                   trajectory_min_boundary_clearance(candidate_trajectory)
+                        >= 0.0f) {
                     safe_candidate=k;
                     break;
                 }

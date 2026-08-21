@@ -47,6 +47,7 @@ find_package(nav_msgs REQUIRED)
 find_package(visualization_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
+find_package(Eigen3 REQUIRED NO_MODULE)
 find_package(rosidl_default_generators REQUIRED)
 # [수정 3] fastrtps_cpp 종속성 제거 (기본 typesupport가 알아서 처리함)
 find_package(std_msgs REQUIRED)
@@ -85,11 +86,6 @@ add_executable(mppi_step_parity model_tuning/real_car_v2/mppi_step_parity.cu)
 target_include_directories(mppi_step_parity PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
 target_link_libraries(mppi_step_parity smppi_lib ${CUDA_LIBRARIES})
-
-add_executable(effective_history_parity model_tuning/effective_history/effective_history_parity.cu)
-target_include_directories(effective_history_parity PUBLIC
-  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
-target_link_libraries(effective_history_parity smppi_lib ${CUDA_LIBRARIES})
 
 add_executable(mppi_horizon80_benchmark
   model_tuning/real_car_v2/benchmark_mppi_horizon80.cu)
@@ -139,6 +135,7 @@ ament_target_dependencies(smppi_node ${SMPPI_NODE_DEPENDENCIES})
 # 라이브러리 링크 (CUDA 링크)
 target_link_libraries(smppi_node
   smppi_lib
+  Eigen3::Eigen
   ${CUDA_LIBRARIES}
 )
 
@@ -159,7 +156,7 @@ ament_target_dependencies(path_publisher
   geometry_msgs
 )
 
-install(TARGETS smppi_node path_publisher mppi_step_parity effective_history_parity
+install(TARGETS smppi_node path_publisher mppi_step_parity
   mppi_horizon80_benchmark
   RUNTIME DESTINATION lib/${PROJECT_NAME})
 install(TARGETS smppi_lib

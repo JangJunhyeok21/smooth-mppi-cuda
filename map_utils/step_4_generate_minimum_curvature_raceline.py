@@ -1,0 +1,128 @@
+#!/usr/bin/env python3
+"""alpha-RACER/TUM minimum-curvature optimizer로 MPPI raceline CSV를 만든다."""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import sys
+from pathlib import Path
+
+import matplotlib.pyplot as plt
+import numpy as np
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--input", type=Path,
+                        default=ROOT / "data/map1/map1_centerline.csv")
+    parser.add_argument("--output", type=Path,
+                        default=ROOT / "data/map1/map1_raceline.csv")
+    parser.add_argument("--plot", type=Path,
+                        default=ROOT / "model_tuning/results/map1_raceline.png")
+    parser.add_argument("--alpha-racer-root", type=Path, default=Path(
+        "/home/a/alpha-RACER/global_racetrajectory_optimization"))
+    parser.add_argument("--vehicle-width", type=float, default=0.90,
+                        help="경계 최적화에 사용하는 차량 폭 [m]")
+    parser.add_argument("--curvature-limit", type=float, default=8.0,
+                        help="raceline 곡률 상한 [1/m]")
+    parser.add_argument("--step", type=float, default=0.05,
+                        help="출력 raceline 간격 [m]")
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    sys.path.insert(0, str(args.alpha_racer_root))
+    import trajectory_planning_helpers as tph
+
+    raw = np.genfromtxt(args.input, delimiter=",", names=True)
+    # alpha-RACER contract: x, y, right width, left width.
+    reftrack = np.column_stack((raw["x_m"], raw["y_m"],
+                                raw["w_tr_right_m"], raw["w_tr_left_m"]))
+    # The map utility already produces a smooth, equally sampled closed line.
+    # Build the same spline/normal inputs that alpha-RACER's prep_track hands
+    # to TUM's minimum-curvature QP. This also avoids its legacy SciPy fmin
+    # compatibility path, which is unnecessary for this pre-refined map.
+    prepared = reftrack
+    closed_xy = np.vstack((prepared[:, :2], prepared[0, :2]))
+    _, _, a_matrix, normals = tph.calc_splines.calc_splines(path=closed_xy)
+    alpha, prepared, normals = tph.iqp_handler.iqp_handler(
+        reftrack=prepared, normvectors=normals, A=a_matrix,
+        kappa_bound=args.curvature_limit, w_veh=args.vehicle_width,
+        print_debug=False, plot_debug=False, stepsize_interp=args.step,
+        iters_min=5, curv_error_allowed=0.02)
+    race, _, coeff_x, coeff_y, spline_idx, t_vals, *_ = (
+        tph.create_raceline.create_raceline(
+            refline=prepared[:, :2], normvectors=normals, alpha=alpha,
+            stepsize_interp=args.step))
+    yaw, curvature = tph.calc_head_curv_an.calc_head_curv_an(
+        coeffs_x=coeff_x, coeffs_y=coeff_y, ind_spls=spline_idx,
+        t_spls=t_vals)
+
+    # IQP changes its working reference line and widths. Never reconstruct the
+    # physical boundaries from that result. Project every raceline point onto
+    # the *input* centerline and interpolate the explicit original boundary
+    # coordinates instead.
+    original_center = np.column_stack((raw["x_m"], raw["y_m"]))
+    left_original = np.column_stack((raw["left_x_m"], raw["left_y_m"]))
+    right_original = np.column_stack((raw["right_x_m"], raw["right_y_m"]))
+    original_segment_length = np.linalg.norm(
+        np.roll(original_center, -1, axis=0) - original_center, axis=1)
+    original_s = np.r_[0.0, np.cumsum(original_segment_length)]
+    race_segment_length = np.linalg.norm(np.diff(
+        np.vstack((race, race[0])), axis=0), axis=1)
+    race_fraction = np.r_[0.0, np.cumsum(race_segment_length[:-1])] / np.sum(race_segment_length)
+    target_s = race_fraction * original_s[-1]
+    projection_index = np.searchsorted(original_s, target_s, side="right") - 1
+    projection_index = np.clip(projection_index, 0, len(original_center) - 1)
+    next_projection_index = (projection_index + 1) % len(original_center)
+    projection_t = ((target_s - original_s[projection_index]) /
+                    np.maximum(original_segment_length[projection_index], 1.0e-12))
+    blend = projection_t[:, None]
+    center_xy = (original_center[projection_index] * (1.0 - blend)
+                 + original_center[next_projection_index] * blend)
+    left_xy = (left_original[projection_index] * (1.0 - blend)
+               + left_original[next_projection_index] * blend)
+    right_xy = (right_original[projection_index] * (1.0 - blend)
+                + right_original[next_projection_index] * blend)
+    # Widths are measured from raceline to the unchanged physical boundaries.
+    left_width = np.linalg.norm(left_xy - race, axis=1)
+    right_width = np.linalg.norm(right_xy - race, axis=1)
+
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    with args.output.open("w", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["x_m", "y_m", "psi_rad", "kappa_radpm",
+                         "w_tr_left_m", "w_tr_right_m",
+                         "boundary_ref_x_m", "boundary_ref_y_m",
+                         "left_x_m", "left_y_m", "right_x_m", "right_y_m"])
+        for i in range(len(race)):
+            writer.writerow([race[i, 0], race[i, 1], yaw[i], curvature[i],
+                             left_width[i], right_width[i],
+                             center_xy[i, 0], center_xy[i, 1],
+                             left_xy[i, 0], left_xy[i, 1],
+                             right_xy[i, 0], right_xy[i, 1]])
+
+    args.plot.parent.mkdir(parents=True, exist_ok=True)
+    fig, ax = plt.subplots(figsize=(9, 7))
+    ax.plot(left_xy[:, 0], left_xy[:, 1], "k-", lw=1, label="track boundary")
+    ax.plot(right_xy[:, 0], right_xy[:, 1], "k-", lw=1)
+    ax.plot(original_center[:, 0], original_center[:, 1], "--",
+            color="0.65", label="centerline")
+    points = ax.scatter(race[:, 0], race[:, 1], c=np.abs(curvature), s=8,
+                        cmap="turbo", label="minimum-curvature raceline")
+    fig.colorbar(points, ax=ax, label="|curvature| [1/m]")
+    ax.axis("equal"); ax.grid(True); ax.legend(); ax.set_title("Map1 optimized raceline")
+    fig.tight_layout(); fig.savefig(args.plot, dpi=180)
+    print(f"wrote {len(race)} points: {args.output}")
+    print(f"alpha range [{alpha.min():.3f}, {alpha.max():.3f}] m, "
+          f"max |kappa|={np.max(np.abs(curvature)):.3f} 1/m")
+    print(f"plot: {args.plot}")
+
+
+if __name__ == "__main__":
+    main()

@@ -34,11 +34,7 @@
     min_accel: -9.0          # m/s^2
     max_accel: 9.0           # m/s^2
     min_speed: 0.5
-    max_speed: 5.0  # 직선에서 허용하는 최고속도; 코너는 아래 횡가속도 한계로 감속
-    curve_lateral_accel_limit: 6.5  # 코너 진입속도를 횡가속도 4.5 m/s^2 기준으로 제한
-    # Racing-line 자유도를 위해 중앙선 오차 기반 publish 속도 제한은 사용하지 않는다.
-    heading_speed_limit_gain: 0.0
-    contour_speed_limit_gain: 0.0
+    max_speed: 5.0  # 허용하는 최고속도
 
     # --- Costs (최적화 결과 반영) ---
     q_v: 16.0 # vs 크기에 비례해서 
@@ -66,13 +62,13 @@
     # s_k=max(0, collision_radius-min_boundary_clearance), cost=q_s*s_k^2.
     # Boundary violation remains finite/selectable; only physical obstacles
     # retain post-rollout hard candidate rejection.
-    collision_radius: 0.40
-    q_boundary_slack: 2000.0
+    collision_radius: 0.1
+    q_boundary_slack: 5000.0
     q_boundary_terminal_slack: 20000.0
     # true: reject an off-track weighted-control rollout and use the
     # lowest-cost safe sampled sequence. false: publish standard MPPI weighted
     # controls without this post-optimization replacement.
-    weighted_trajectory_safety_enabled: true  # 가중평균 traj가 경계/장애물 침범 시 safe sample 사용
+    weighted_trajectory_safety_enabled: false  # 가중평균 traj가 경계/장애물 침범 시 safe sample 사용
     # LMPC와 같은 terminal safe set: 최근 2개 완주 lap에서 진행도 주변 20점씩 사용.
     # 목적함수 전환: mpcc=contour/progress, lmpc=terminal safe-set/cost-to-go.
     # 현재 2 m/s safe set은 느리므로 랩타임 주행 기본값은 mpcc이다.
@@ -109,7 +105,8 @@
     max_accel_rate: 4.0
     lambda: 20.0
     num_samples: 1600        # desktop simulation: ~4 ms measured
-    visualize_candidates: false # K*T 후보 복사는 끄고 weighted optimal trajectory만 발행
+    visualize_candidates: false # K*T 후보 복사 비활성화
+    publish_visualization: true # 실차 MPPI 주기에서 MarkerArray 생성/직렬화 비활성화
     # false이면 /mppi_optimal_trajectory와 8개 cost 재계산을 모두 생략한다(대회 권장).
     publish_optimal_trajectory: true
     # Slack-zero left/right boundary markers are separate from rollout markers.
@@ -181,7 +178,7 @@
     # PathPublisher converts them to center/left/right paths.
     # Relative paths are resolved from the installed package share directory.
     # STEP3 track을 STEP4 minimum-curvature optimizer로 변환한 MPPI 산출물.
-    csv_file_path: data/map2/map2_mppi_track_optimal.csv
+    csv_file_path: data/map2/map2_mppi_track.csv
     frame_id: map
     publish_rate: 1.0
     # true : simulator pose + twist come from simulation_odom_topic

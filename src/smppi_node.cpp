@@ -680,13 +680,6 @@ private:
         this->declare_parameter("max_accel",            9.0);    mppi_params_.max_accel     = this->get_parameter("max_accel").as_double();
         this->declare_parameter("min_speed",            0.0);    mppi_params_.min_speed     = this->get_parameter("min_speed").as_double();
         this->declare_parameter("max_speed",            10.0);   mppi_params_.max_speed     = this->get_parameter("max_speed").as_double();
-        this->declare_parameter("curve_lateral_accel_limit", 0.0);
-        mppi_params_.curve_lateral_accel_limit =
-            this->get_parameter("curve_lateral_accel_limit").as_double();
-        this->declare_parameter("heading_speed_limit_gain", 8.0);
-        heading_speed_limit_gain_ = this->get_parameter("heading_speed_limit_gain").as_double();
-        this->declare_parameter("contour_speed_limit_gain", 2.0);
-        contour_speed_limit_gain_ = this->get_parameter("contour_speed_limit_gain").as_double();
         this->declare_parameter("q_dist",               1.5);    mppi_params_.q_dist        = this->get_parameter("q_dist").as_double();
         this->declare_parameter("q_contour",            0.5);    mppi_params_.q_contour     = this->get_parameter("q_contour").as_double();
         this->declare_parameter("q_lag",                5.0);    mppi_params_.q_lag         = this->get_parameter("q_lag").as_double();
@@ -763,6 +756,9 @@ private:
         this->declare_parameter("max_accel_rate",       1000.0); mppi_params_.max_accel_rate   = this->get_parameter("max_accel_rate").as_double();
         this->declare_parameter("lambda",               10.0);   mppi_params_.lambda        = this->get_parameter("lambda").as_double();
         this->declare_parameter("visualize_candidates", false);  mppi_params_.visualize_candidates = this->get_parameter("visualize_candidates").as_bool();
+        this->declare_parameter("publish_visualization", false);
+        publish_visualization_ =
+            this->get_parameter("publish_visualization").as_bool();
         this->declare_parameter("boundary_visualization_topic", "/mppi_boundary_viz");
         boundary_visualization_topic_ =
             this->get_parameter("boundary_visualization_topic").as_string();
@@ -913,14 +909,10 @@ private:
     void validate_parameters() {
         if (mppi_params_.min_speed > mppi_params_.max_speed)
             std::swap(mppi_params_.min_speed, mppi_params_.max_speed);
-        mppi_params_.curve_lateral_accel_limit =
-            std::max(0.0f, mppi_params_.curve_lateral_accel_limit);
         if (horizon_steps_ < 1) horizon_steps_ = 1;
         if (mppi_params_.lambda <= 0.0f) mppi_params_.lambda = 1.0f;
         if (mppi_params_.max_accel_rate <= 0.0f)
             mppi_params_.max_accel_rate = 1.5f;
-        heading_speed_limit_gain_ = std::max(0.0f, heading_speed_limit_gain_);
-        contour_speed_limit_gain_ = std::max(0.0f, contour_speed_limit_gain_);
         if (mppi_params_.collision_radius < 0.0f)
             mppi_params_.collision_radius = std::abs(mppi_params_.collision_radius);
         mppi_params_.obstacle_soft_margin =
@@ -1433,26 +1425,7 @@ private:
         if(direct_speed_model_) {
             const float previous_speed_command = has_published_command_
                 ? last_speed_cmd_ : current_state_.v;
-            const int nearest_idx = update_nearest_index(current_state_);
-            const float dx = current_state_.x - ref_path_xs_[nearest_idx];
-            const float dy = current_state_.y - ref_path_ys_[nearest_idx];
-            const float ref_yaw = ref_path_yaws_[nearest_idx];
-            const float contour_error = -std::sin(ref_yaw) * dx + std::cos(ref_yaw) * dy;
-            const float heading_error = std::atan2(
-                std::sin(current_state_.yaw - ref_yaw),
-                std::cos(current_state_.yaw - ref_yaw));
-            const float heading_speed_limit = mppi_params_.max_speed /
-                (1.0f + heading_speed_limit_gain_ * std::abs(heading_error));
-            const float contour_speed_limit = mppi_params_.max_speed /
-                (1.0f + contour_speed_limit_gain_ * std::abs(contour_error));
-            const float safety_speed_limit = std::clamp(
-                std::min(heading_speed_limit, contour_speed_limit),
-                0.0f, mppi_params_.max_speed);
-            const float recovery_speed_floor = std::min(
-                mppi_params_.min_speed, safety_speed_limit);
-            const float desired_speed = std::clamp(
-                u.accel, recovery_speed_floor, safety_speed_limit);
-            const float requested_speed = std::clamp(desired_speed,
+            const float requested_speed = std::clamp(u.accel,
                 previous_speed_command-direct_speed_step_,
                 previous_speed_command+direct_speed_step_);
             next_v=std::clamp(requested_speed, 0.0f, mppi_params_.max_speed);
@@ -1511,6 +1484,7 @@ private:
     }
 
     void publish_path_visualization() {
+        if (!publish_visualization_) return;
         visualization_msgs::msg::MarkerArray markers;
         if (mppi_params_.visualize_candidates) {
             const auto &states = solver_->get_generated_trajectories();
@@ -1723,6 +1697,7 @@ private:
     mppi::LateralVelocityKFParams lateral_velocity_kf_params_;
     bool odom_received_ = false;
     bool publish_optimal_trajectory_{true};
+    bool publish_visualization_{false};
     bool obstacle_avoidance_enabled_{false};
     double obstacle_timeout_s_{0.5};
     rclcpp::Time obstacle_stamp_{0, 0, RCL_ROS_TIME};
@@ -1738,8 +1713,6 @@ private:
     double last_odom_yaw_{0.0};
     float latest_mcl_x_{0.f},latest_mcl_y_{0.f},latest_mcl_yaw_{0.f};
     double control_rate_hz_{50.0};
-    float heading_speed_limit_gain_{8.0f};
-    float contour_speed_limit_gain_{2.0f};
     bool has_published_command_{false};
     bool direct_speed_model_{false};
     bool uses_command_history_{false};

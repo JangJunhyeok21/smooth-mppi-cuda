@@ -98,9 +98,6 @@ struct Params {
     float max_accel;
     float min_speed;
     float max_speed;
-    // Per-rollout curve speed cap: v <= sqrt(a_y_limit / |curvature|).
-    // Zero disables the cap; max_speed remains the straight-line ceiling.
-    float curve_lateral_accel_limit;
     // Cost Weights
     float q_dist;
     float q_contour;
@@ -258,12 +255,15 @@ private:
     
     // --- Host Memory ---
     std::vector<State> h_states_;       
-    std::vector<Control> h_controls_;   
     std::vector<Control> h_prev_controls_; 
     bool direct_speed_warm_start_initialized_{false};
     int model_knot_phase_{0};
     std::vector<float> h_costs_;        
     std::vector<float> h_weights_;      
+    // Per-rollout safety summaries.  Keeping these on the device avoids
+    // copying K*T states to the CPU when the weighted trajectory is unsafe.
+    std::vector<float> h_min_boundary_clearances_;
+    std::vector<float> h_min_obstacle_clearances_;
     int best_k_ = 0;
     std::vector<State> best_trajectory_;
     std::vector<State> weighted_control_trajectory_;
@@ -287,6 +287,8 @@ private:
     Control* d_weighted_controls_;
     float* d_costs_;         
     float* d_weights_;
+    float* d_min_boundary_clearances_;
+    float* d_min_obstacle_clearances_;
     float* d_residual_history_;
     float* d_residual_hidden_;
     

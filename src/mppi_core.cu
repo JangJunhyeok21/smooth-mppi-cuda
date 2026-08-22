@@ -327,14 +327,14 @@ namespace mppi
     // Pacejka dynamic classic base + residual MLP. This is byte-for-byte the
     // Same 20-D feature order used by step_4_build_40ms_dataset.py and
     // step_5_train_residual_mlp.py.
+    template <bool APPLY_RESIDUAL>
     __device__ State update_dynamic_mlp_residual(
         const State &current_state,
         const Control &control,
         const Params &params,
         float *command_history,
         bool use_servo_lag,
-        float *vx_history = nullptr,
-        bool apply_residual = true)
+        float *vx_history = nullptr)
     {
         constexpr float MAX_STEERING_ANGLE = 0.55f;
         constexpr float MIN_DYNAMIC_SPEED = 0.5f;
@@ -471,6 +471,39 @@ namespace mppi
         const float classic_next_yaw_rate = current_state.omega
             + classic_yaw_acceleration * dynamics_dt;
 
+        // DYNAMIC_SERVO_LAG is the non-MLP deployment model.  Do not build
+        // the 22-D residual feature vector or execute the residual-output
+        // path when the caller explicitly disabled the learned correction.
+        // This branch preserves the same actuator/history contract as the
+        // residual path, but only integrates the Pacejka/kinematic baseline.
+        if constexpr (!APPLY_RESIDUAL) {
+            State next_state = current_state;
+            next_state.v = classic_next_longitudinal_velocity;
+            next_state.vy = classic_next_lateral_velocity;
+            next_state.omega = classic_next_yaw_rate;
+            next_state.ax = classic_longitudinal_acceleration;
+            next_state.ay = classic_lateral_acceleration;
+
+            const float next_speed = hypotf(next_state.v, next_state.vy);
+            const float next_body_slip_angle = atan2f(next_state.vy, next_state.v);
+            next_state.x = current_state.x + next_speed
+                * cosf(current_state.yaw + next_body_slip_angle) * dynamics_dt;
+            next_state.y = current_state.y + next_speed
+                * sinf(current_state.yaw + next_body_slip_angle) * dynamics_dt;
+            next_state.yaw = angle_normalize(
+                current_state.yaw + next_state.omega * dynamics_dt);
+            next_state.slip_angle = next_body_slip_angle;
+
+            if (!use_servo_lag) {
+                for (int history_index = 0; history_index < 8; ++history_index)
+                    command_history[history_index] = command_history[history_index + 2];
+                command_history[8] = control.steer;
+                command_history[9] = speed_command;
+            }
+            command_history[10] = steering_angle;
+            return next_state;
+        }
+
         // Keep this exact 22-D order synchronized with the canonical 40 ms
         // residual dataset/training pipeline:
         // [vx, vy, yaw_rate, steer_cmd, speed_cmd, applied_steer,
@@ -498,11 +531,7 @@ namespace mppi
 
         // MLP outputs residual derivatives [delta_ax, delta_ay, delta_yaw_accel].
         float residual_derivatives[3];
-        if (!apply_residual) {
-            residual_derivatives[0]=0.0f;
-            residual_derivatives[1]=0.0f;
-            residual_derivatives[2]=0.0f;
-        } else if (vx_history != nullptr) {
+        if (vx_history != nullptr) {
             float features_24d[24];
             for (int i=0;i<20;++i) features_24d[i]=mlp_features[i];
             for (int i=0;i<4;++i) features_24d[20+i]=vx_history[i+1]-vx_history[i];
@@ -571,7 +600,7 @@ namespace mppi
         if (blockIdx.x != 0 || threadIdx.x != 0) return;
         float history[12];
         for (int i = 0; i < 12; ++i) history[i] = history_input[i];
-        *state_output = update_dynamic_mlp_residual(
+        *state_output = update_dynamic_mlp_residual<true>(
             state, control, params, history, use_servo_lag);
         for (int i = 0; i < 12; ++i) history_output[i] = history[i];
     }
@@ -584,7 +613,7 @@ namespace mppi
         float history[12],vx_history[5];
         for(int i=0;i<12;++i)history[i]=history_input[i];
         for(int i=0;i<5;++i)vx_history[i]=vx_input[i];
-        *state_output=update_dynamic_mlp_residual(
+        *state_output=update_dynamic_mlp_residual<true>(
             state,control,params,history,true,vx_history);
         for(int i=0;i<12;++i)history_output[i]=history[i];
         for(int i=0;i<5;++i)vx_output[i]=vx_history[i];
@@ -1009,7 +1038,9 @@ namespace mppi
 
     template <bool APPLY_RESIDUAL>
     __global__ void rollout_kernel(
-        State *states, Control *controls, float *costs, curandState *rng_states,
+        State *states, Control *controls, float *costs,
+        float *min_boundary_clearances, float *min_obstacle_clearances,
+        curandState *rng_states,
         const State start_state, const Control *prev_controls, const Params p,
         const float *ref_xs, const float *ref_ys, const float *ref_yaws, int path_len,
         const float *left_bnd_xs, const float *left_bnd_ys,
@@ -1023,6 +1054,8 @@ namespace mppi
 
         State x = start_state;
         float total_cost = 0.0f;
+        float min_boundary_clearance = 1.0e30f;
+        float min_obstacle_clearance = 1.0e30f;
         Control current_action = prev_controls[0]; 
         Control last_u = current_action;
 
@@ -1095,31 +1128,33 @@ namespace mppi
             Control u_clamped = current_action;
             u_clamped.steer = fminf(fmaxf(u_clamped.steer, -p.max_steer), p.max_steer);
 
-            const float speed_lower_bound=fminf(p.min_speed,prev_controls[0].accel);
-            float curve_speed_limit=p.max_speed;
-            if(p.curve_lateral_accel_limit>0.0f && path_len>2) {
-                constexpr int curvature_window=4;
-                const int before=(local_path_idx+path_len-curvature_window)%path_len;
-                const int after=(local_path_idx+curvature_window)%path_len;
-                const float chord=hypotf(ref_xs[after]-ref_xs[before],
-                                         ref_ys[after]-ref_ys[before]);
-                const float curvature=fabsf(angle_normalize(
-                    ref_yaws[after]-ref_yaws[before]))/fmaxf(chord,1.0e-3f);
-                curve_speed_limit=fminf(p.max_speed,sqrtf(
-                    p.curve_lateral_accel_limit/fmaxf(curvature,1.0e-3f)));
-            }
-            u_clamped.accel=fminf(curve_speed_limit,
-                fmaxf(speed_lower_bound,u_clamped.accel));
-
             current_action = u_clamped; 
 
-            x=update_dynamic_mlp_residual(x,u_clamped,p,mlp_command_history,
-                true,nullptr,APPLY_RESIDUAL);
+            // The template specialization is the source of truth for the
+            // learned correction: DYNAMIC_SERVO_LAG uses the same baseline
+            // transition without executing the residual MLP.
+            x=update_dynamic_mlp_residual<APPLY_RESIDUAL>(
+                x,u_clamped,p,mlp_command_history,true,nullptr);
             states[idx] = x;
             controls[idx] = u_clamped; 
 
-            float min_dist = compute_min_boundary_distance(
-                x, ref_xs, ref_ys, ref_yaws, left_bnd_xs, left_bnd_ys, right_bnd_xs, right_bnd_ys, path_len, local_path_idx, &local_path_idx);
+            float min_dist = 1.0e30f;
+            if (bnd_len > 0) {
+                min_dist = compute_min_boundary_distance(
+                    x, ref_xs, ref_ys, ref_yaws, left_bnd_xs, left_bnd_ys,
+                    right_bnd_xs, right_bnd_ys, path_len, local_path_idx,
+                    &local_path_idx);
+                min_boundary_clearance = fminf(min_boundary_clearance, min_dist);
+            }
+
+            for (int obstacle_index = 0;
+                 obstacle_index < p.num_obstacles && obstacle_index < MAX_OBS;
+                 ++obstacle_index) {
+                const float dx = x.x - p.obs_x[obstacle_index];
+                const float dy = x.y - p.obs_y[obstacle_index];
+                min_obstacle_clearance = fminf(
+                    min_obstacle_clearance, sqrtf(dx * dx + dy * dy));
+            }
 
             if (path_len > 0)
             {
@@ -1149,6 +1184,8 @@ namespace mppi
             last_u = u_clamped;
         }
         costs[k] = total_cost;
+        min_boundary_clearances[k] = min_boundary_clearance;
+        min_obstacle_clearances[k] = min_obstacle_clearance;
     }
 
     // Re-simulate the control sequence that is actually sent by MPPI.  The
@@ -1183,10 +1220,11 @@ namespace mppi
             else if(p.dynamics_model==DYNAMIC_IMU_RECURSIVE)
                 x=update_dynamic_imu_recursive(x,u,p,command_history);
             else if(p.dynamics_model==DYNAMIC_SERVO_LAG)
-                x=update_dynamic_mlp_residual(x,u,p,command_history,true,nullptr,false);
+                x=update_dynamic_mlp_residual<false>(
+                    x,u,p,command_history,true,nullptr);
             else if(p.dynamics_model==DYNAMIC_MLP_RESIDUAL || p.dynamics_model==DYNAMIC_MLP_RESIDUAL_SERVO_LAG ||
                     p.dynamics_model==DYNAMIC_MLP_RESIDUAL_SERVO_LAG_VX_DELTA_24D)
-                x=update_dynamic_mlp_residual(x,u,p,command_history,
+                x=update_dynamic_mlp_residual<true>(x,u,p,command_history,
                     p.dynamics_model!=DYNAMIC_MLP_RESIDUAL,
                     p.dynamics_model==DYNAMIC_MLP_RESIDUAL_SERVO_LAG_VX_DELTA_24D
                         ? vx_history : nullptr);
@@ -1235,7 +1273,6 @@ namespace mppi
             ? params_.model_dt : params_.dt;
         params_.filter_coeffs = compute_butterworth_coeffs(3.0f, knot_dt);
         h_states_.resize(K * T);
-        h_controls_.resize(K * T);
         // A zero steering command is not physically neutral when the
         // identified command mapping contains a bias.  Starting every rollout
         // at zero therefore makes the car curve while the low-pass exploration
@@ -1261,6 +1298,8 @@ namespace mppi
         h_prev_controls_.resize(T, {neutral_steer, initial_accel});
         h_costs_.resize(K);
         h_weights_.resize(K);
+        h_min_boundary_clearances_.resize(K);
+        h_min_obstacle_clearances_.resize(K);
         allocate_cuda_memory();
     }
 
@@ -1274,6 +1313,8 @@ namespace mppi
         CUDA_CHECK(cudaMalloc(&d_weighted_controls_, T_ * sizeof(Control)));
         CUDA_CHECK(cudaMalloc(&d_costs_, K_ * sizeof(float)));
         CUDA_CHECK(cudaMalloc(&d_weights_, K_ * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&d_min_boundary_clearances_, K_ * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&d_min_obstacle_clearances_, K_ * sizeof(float)));
         CUDA_CHECK(cudaMalloc(&d_rng_states_, K_ * T_ * sizeof(curandState)));
         CUDA_CHECK(cudaMalloc(&d_residual_history_, RESIDUAL_HISTORY*RESIDUAL_FEATURES*sizeof(float)));
         CUDA_CHECK(cudaMalloc(&d_residual_hidden_, RESIDUAL_HIDDEN*sizeof(float)));
@@ -1308,7 +1349,10 @@ namespace mppi
     void MPPISolver::cleanup_cuda_memory() {
         cudaFree(d_states_); cudaFree(d_controls_); cudaFree(d_prev_controls_);
         cudaFree(d_weighted_states_); cudaFree(d_weighted_controls_);
-        cudaFree(d_costs_); cudaFree(d_weights_); cudaFree(d_rng_states_);
+        cudaFree(d_costs_); cudaFree(d_weights_);
+        cudaFree(d_min_boundary_clearances_);
+        cudaFree(d_min_obstacle_clearances_);
+        cudaFree(d_rng_states_);
         cudaFree(d_residual_history_); cudaFree(d_residual_hidden_);
         cudaFree(d_ref_xs_); cudaFree(d_ref_ys_); cudaFree(d_ref_yaws_);
         cudaFree(d_left_bnd_xs_); cudaFree(d_left_bnd_ys_);
@@ -1603,14 +1647,16 @@ namespace mppi
 
         if (params_.dynamics_model==DYNAMIC_MLP_RESIDUAL_SERVO_LAG) {
             rollout_kernel<true><<<blocksPerGrid, threadsPerBlock>>>(
-                d_states_, d_controls_, d_costs_, (curandState *)d_rng_states_,
+                d_states_, d_controls_, d_costs_, d_min_boundary_clearances_,
+                d_min_obstacle_clearances_, (curandState *)d_rng_states_,
                 current_state, d_prev_controls_, params_,
                 d_ref_xs_, d_ref_ys_, d_ref_yaws_, ref_path_len_,
                 d_left_bnd_xs_, d_left_bnd_ys_, d_right_bnd_xs_, d_right_bnd_ys_,
                 d_residual_hidden_, bnd_len_, K_, T_, start_path_idx);
         } else {
             rollout_kernel<false><<<blocksPerGrid, threadsPerBlock>>>(
-                d_states_, d_controls_, d_costs_, (curandState *)d_rng_states_,
+                d_states_, d_controls_, d_costs_, d_min_boundary_clearances_,
+                d_min_obstacle_clearances_, (curandState *)d_rng_states_,
                 current_state, d_prev_controls_, params_,
                 d_ref_xs_, d_ref_ys_, d_ref_yaws_, ref_path_len_,
                 d_left_bnd_xs_, d_left_bnd_ys_, d_right_bnd_xs_, d_right_bnd_ys_,
@@ -1619,6 +1665,14 @@ namespace mppi
         
         CUDA_CHECK(cudaGetLastError());
         CUDA_CHECK(cudaMemcpy(h_costs_.data(), d_costs_, K_ * sizeof(float), cudaMemcpyDeviceToHost));
+        if (params_.weighted_trajectory_safety_enabled) {
+            CUDA_CHECK(cudaMemcpy(h_min_boundary_clearances_.data(),
+                                  d_min_boundary_clearances_,
+                                  K_ * sizeof(float), cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpy(h_min_obstacle_clearances_.data(),
+                                  d_min_obstacle_clearances_,
+                                  K_ * sizeof(float), cudaMemcpyDeviceToHost));
+        }
         
         if (params_.visualize_candidates) {
             CUDA_CHECK(cudaMemcpy(h_states_.data(), d_states_, K_ * T_ * sizeof(State), cudaMemcpyDeviceToHost));
@@ -1747,38 +1801,38 @@ namespace mppi
 
         // Safe samples from opposite modes can average into an unsafe path.
         // Check the rollout of the controls that will actually be published.
-        const bool weighted_obstacle_unsafe =
-            trajectory_min_obstacle_clearance(weighted_control_trajectory_)
-                < params_.car_radius;
-        const bool weighted_boundary_unsafe =
-            trajectory_min_boundary_clearance(weighted_control_trajectory_)
-                < 0.0f;
-        if(params_.weighted_trajectory_safety_enabled &&
-           (weighted_obstacle_unsafe || weighted_boundary_unsafe)) {
-            CUDA_CHECK(cudaMemcpy(h_states_.data(),d_states_,K_*T_*sizeof(State),
-                                  cudaMemcpyDeviceToHost));
-            CUDA_CHECK(cudaMemcpy(h_controls_.data(),d_controls_,K_*T_*sizeof(Control),
-                                  cudaMemcpyDeviceToHost));
-            std::vector<int> candidates(K_);
-            for(int k=0;k<K_;++k)candidates[k]=k;
-            std::sort(candidates.begin(),candidates.end(),[this](int lhs,int rhs) {
-                return h_costs_[lhs]<h_costs_[rhs];
-            });
-            std::vector<State> candidate_trajectory(T_);
-            int safe_candidate=-1;
-            for(int k:candidates) {
-                std::copy_n(h_states_.begin()+k*T_,T_,candidate_trajectory.begin());
-                if(trajectory_min_obstacle_clearance(candidate_trajectory)
-                        >= params_.car_radius &&
-                   trajectory_min_boundary_clearance(candidate_trajectory)
-                        >= 0.0f) {
-                    safe_candidate=k;
-                    break;
+        if(params_.weighted_trajectory_safety_enabled) {
+            const bool weighted_obstacle_unsafe =
+                trajectory_min_obstacle_clearance(weighted_control_trajectory_)
+                    < params_.car_radius;
+            const bool weighted_boundary_unsafe =
+                trajectory_min_boundary_clearance(weighted_control_trajectory_)
+                    < 0.0f;
+            if (weighted_obstacle_unsafe || weighted_boundary_unsafe) {
+                // The rollout kernel already computed the minimum clearance
+                // for every candidate. Use those K summaries instead of
+                // copying and rescanning K*T states on the CPU (which was the
+                // source of the 100--300 ms safety spikes on the vehicle
+                // computer).
+                std::vector<int> candidates(K_);
+                for(int k=0;k<K_;++k)candidates[k]=k;
+                std::sort(candidates.begin(),candidates.end(),[this](int lhs,int rhs) {
+                    return h_costs_[lhs]<h_costs_[rhs];
+                });
+                int safe_candidate=-1;
+                for(int k:candidates) {
+                    if(h_min_obstacle_clearances_[k] >= params_.car_radius &&
+                       h_min_boundary_clearances_[k] >= 0.0f) {
+                        safe_candidate=k;
+                        break;
+                    }
                 }
-            }
-            if(safe_candidate>=0) {
+                if(safe_candidate>=0) {
                 best_k_=safe_candidate;
-                std::copy_n(h_controls_.begin()+safe_candidate*T_,T_,weighted_controls.begin());
+                CUDA_CHECK(cudaMemcpy(
+                    weighted_controls.data(),
+                    d_controls_ + static_cast<size_t>(safe_candidate) * T_,
+                    T_ * sizeof(Control), cudaMemcpyDeviceToHost));
                 optimal_controls_=weighted_controls;
                 output=weighted_controls[0];
                 CUDA_CHECK(cudaMemcpy(d_weighted_controls_,weighted_controls.data(),
@@ -1789,7 +1843,7 @@ namespace mppi
                 CUDA_CHECK(cudaGetLastError());
                 CUDA_CHECK(cudaMemcpy(weighted_control_trajectory_.data(),d_weighted_states_,
                                       T_*sizeof(State),cudaMemcpyDeviceToHost));
-            } else {
+                } else {
                 // Replaying the previous steering when every candidate is
                 // unsafe can lock the vehicle into an off-track circle. Build
                 // a low-speed geometric recovery sequence toward a centerline
@@ -1835,6 +1889,7 @@ namespace mppi
                 CUDA_CHECK(cudaGetLastError());
                 CUDA_CHECK(cudaMemcpy(weighted_control_trajectory_.data(),d_weighted_states_,
                                       T_*sizeof(State),cudaMemcpyDeviceToHost));
+                }
             }
         }
 

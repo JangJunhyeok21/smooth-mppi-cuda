@@ -34,7 +34,7 @@
     min_accel: -9.0          # m/s^2
     max_accel: 9.0           # m/s^2
     min_speed: 0.5
-    max_speed: 5.0  # 허용하는 최고속도
+    max_speed: 10.0  # 허용하는 최고속도
 
     # --- Costs (최적화 결과 반영) ---
     q_v: 16.0 # vs 크기에 비례해서 
@@ -56,13 +56,13 @@
     # alpha_r = -atan2(vy-l_r*yaw_rate, |vx|). It complements the GG ellipse
     # by detecting rear-axle saturation while total ax/ay is still moderate.
     q_rear_slip: 800.0
-    rear_slip_soft_limit_deg: 5.0
+    rear_slip_soft_limit_deg: 8.0
     rear_slip_cost_min_speed: 1.5         # disable ill-conditioned low-vx slip cost
     # MPC-style lane-boundary slack:
     # s_k=max(0, collision_radius-min_boundary_clearance), cost=q_s*s_k^2.
     # Boundary violation remains finite/selectable; only physical obstacles
     # retain post-rollout hard candidate rejection.
-    collision_radius: 0.1
+    collision_radius: 0.15
     q_boundary_slack: 5000.0
     q_boundary_terminal_slack: 20000.0
     # true: reject an off-track weighted-control rollout and use the
@@ -91,14 +91,14 @@
     real_perception_obstacles_topic: /f1/perception/object/obstacles/arr
     real_perception_obstacles_frame: map
     obstacle_timeout: 0.5
-    car_radius: 0.5            # 실제 충돌 판정에 쓰는 combined footprint 반경
+    car_radius: 0.4         # 실제 충돌 판정에 쓰는 combined footprint 반경
     # car_radius 진입 전부터 회피를 준비해 속도/조향의 급격한 변화를 막는다.
     obstacle_soft_margin: 0.0  # soft cost 시작 반경 = car_radius + 1.0 m
     # s=max(0, car_radius+margin-distance), cost=q_obs*s^2
     q_obs: 1000.0
     
     # --- Noise & Tuning ---
-    noise_steer_std: 0.35    # rad/s
+    noise_steer_std: 0.5    # rad/s
     noise_accel_std: 2.0     # m/s^3
     max_steer_rate: 50.0    # rad/s
     # Input slew rate: m/s^2 for direct-speed models, m/s^3 for acceleration-command models.

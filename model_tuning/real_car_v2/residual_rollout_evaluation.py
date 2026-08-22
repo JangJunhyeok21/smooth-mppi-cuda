@@ -157,7 +157,7 @@ def main():
     bag_ids = np.asarray([bag_id_by_name[name] for name in data["bag_name"]], int)
     weights = load_network(Path(args.result) / "dynamic_40ms_residual.bin")
     parameters = configured_parameters(args.classic_params)
-    mlp_cfg = yaml.safe_load((ROOT / "config/MLP_params.yaml").read_text())["/**"]["ros__parameters"]
+    mlp_cfg = yaml.safe_load((ROOT / "config/params.yaml").read_text())["/**"]["ros__parameters"]
     residual_limit = np.asarray((mlp_cfg["mlp_max_residual_ax"],
                                  mlp_cfg["mlp_max_residual_ay"],
                                  mlp_cfg["mlp_max_residual_yaw_accel"]), float)

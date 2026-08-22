@@ -34,6 +34,9 @@ public:
         load_parameters();
         validate_parameters();
         cache_fixed_model_properties();
+        selected_drive_topic_ = is_simulation_
+            ? simulation_drive_topic_ : real_drive_topic_;
+        log_startup_io_configuration();
 
         if (uses_lateral_velocity_kf_) {
             lateral_velocity_kf_.initialize(lateral_velocity_kf_params_);
@@ -48,8 +51,6 @@ public:
         RCLCPP_INFO(this->get_logger(),"MPPI objective mode: %s",
                     objective_mode_name_.c_str());
 
-        selected_drive_topic_ = is_simulation_
-            ? simulation_drive_topic_ : real_drive_topic_;
         drive_pub_ = this->create_publisher<ackermann_msgs::msg::AckermannDriveStamped>(
             selected_drive_topic_, 10);
         vis_pub_   = this->create_publisher<visualization_msgs::msg::MarkerArray>("/mppi_viz", 50);
@@ -136,6 +137,52 @@ public:
     }
 
 private:
+    void log_startup_io_configuration() const {
+        RCLCPP_INFO(
+            this->get_logger(),
+            "MPPI startup mode: %s (is_simulation=%s)",
+            is_simulation_ ? "SIMULATOR" : "REAL CAR",
+            is_simulation_ ? "true" : "false");
+
+        if (is_simulation_) {
+            RCLCPP_INFO(
+                this->get_logger(),
+                "State input: %s [nav_msgs/msg/Odometry; pose + velocity]",
+                simulation_odom_topic_.c_str());
+        } else {
+            RCLCPP_INFO(
+                this->get_logger(),
+                "State inputs: pose=%s [geometry_msgs/msg/PoseStamped], "
+                "velocity=%s [nav_msgs/msg/Odometry]",
+                real_pose_topic_.c_str(), real_odom_topic_.c_str());
+        }
+
+        const bool subscribes_to_imu =
+            mppi_params_.dynamics_model == mppi::DYNAMIC_MLP_RESIDUAL_SERVO_LAG ||
+            mppi_params_.dynamics_model == mppi::DYNAMIC_SERVO_LAG ||
+            uses_lateral_velocity_kf_;
+        if (subscribes_to_imu) {
+            RCLCPP_INFO(this->get_logger(),
+                        "IMU input: %s [sensor_msgs/msg/Imu]",
+                        imu_topic_.c_str());
+        } else {
+            RCLCPP_INFO(this->get_logger(), "IMU input: disabled");
+        }
+
+        if (obstacle_avoidance_enabled_) {
+            RCLCPP_INFO(
+                this->get_logger(), "Obstacle input: %s",
+                is_simulation_ ? simulation_obstacle_odom_topic_.c_str()
+                               : real_perception_obstacles_topic_.c_str());
+        } else {
+            RCLCPP_INFO(this->get_logger(), "Obstacle input: disabled");
+        }
+        RCLCPP_INFO(
+            this->get_logger(),
+            "Drive command output: %s [ackermann_msgs/msg/AckermannDriveStamped]",
+            selected_drive_topic_.c_str());
+    }
+
     void publish_kf_state(const rclcpp::Time &stamp) {
         if(!kf_state_pub_||!lateral_velocity_kf_.isInitialized())return;
         smppi_cuda_controller::msg::KfState msg;

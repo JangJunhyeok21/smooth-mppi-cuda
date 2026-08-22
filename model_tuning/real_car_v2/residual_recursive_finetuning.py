@@ -74,12 +74,20 @@ def main():
                                   horizon=args.horizon_steps)
     train = np.flatnonzero(data["split"] == 0)
     validation = np.flatnonzero(data["split"] == 1)
-    if not len(train) or not len(validation):
-        raise RuntimeError("Step 1 callback data needs non-empty train/validation bags")
+    if not len(train):
+        raise RuntimeError("Step 1 callback data has no training windows")
+    validation_source = "held-out validation split"
+    if not len(validation):
+        validation = train.copy()
+        validation_source = "training split fallback (no validation bags matched)"
+        print("WARNING: recursive validation split is empty; using training "
+              "windows for checkpoint selection.", flush=True)
+    print(f"recursive windows: train={len(train)}, validation={len(validation)} "
+          f"({validation_source})", flush=True)
     validation = validation[::max(1, len(validation) // 256)][:256]
     parameters = configured_parameters()
     cfg = yaml.safe_load((ROOT / "config/params.yaml").read_text())["/**"]["ros__parameters"]
-    mlp_cfg = yaml.safe_load((ROOT / "config/MLP_params.yaml").read_text())["/**"]["ros__parameters"]
+    mlp_cfg = cfg
     mean, std = load_normalization(Path(args.initial) / "dynamic_40ms_residual.bin")
     network = Net()
     network.load_state_dict(torch.load(Path(args.initial) / "model.pt",
@@ -201,12 +209,18 @@ def main():
 
     optimizer = torch.optim.AdamW(network.parameters(), lr=LEARNING_RATE,
                                   weight_decay=1e-5)
-    best = (float("inf"), None, 0); stale = 0
+    best = (float("inf"), {key: value.detach().cpu().clone()
+                           for key, value in network.state_dict().items()}, 0)
+    stale = 0
     for epoch in range(args.epochs):
         network.train(); train_values = []
         for _ in range(BATCHES_PER_EPOCH):
             batch = rng.choice(train, min(64, len(train)), replace=True)
-            value = loss(batch); optimizer.zero_grad(); value.backward()
+            value = loss(batch)
+            if not torch.isfinite(value):
+                raise RuntimeError(
+                    f"non-finite recursive training loss at epoch {epoch + 1}")
+            optimizer.zero_grad(); value.backward()
             torch.nn.utils.clip_grad_norm_(network.parameters(), 1.0)
             optimizer.step(); train_values.append(float(value.detach()))
         network.eval(); validation_scores = []
@@ -215,6 +229,9 @@ def main():
                 _, score = loss(batch, True); validation_scores.extend(score.cpu().numpy())
         validation_scores = np.asarray(validation_scores)
         score = float(validation_scores.mean() + 2 * np.quantile(validation_scores, .95))
+        if not np.isfinite(score):
+            raise RuntimeError(
+                f"non-finite recursive validation score at epoch {epoch + 1}")
         print(f"epoch={epoch + 1} train={np.mean(train_values):.6f} val={score:.6f}",
               flush=True)
         if score < best[0] - 1e-5:
@@ -240,7 +257,8 @@ def main():
         "state_target": "future actual MPPI-model KF",
         "pose_target": "future MCL pose", "best_epoch": best[2],
         "best_validation_score": best[0], "train_windows": len(train),
-        "validation_windows": len(validation)}
+        "validation_windows": len(validation),
+        "validation_source": validation_source}
     (output / "metrics.json").write_text(json.dumps(metrics, indent=2) + "\n")
 
 

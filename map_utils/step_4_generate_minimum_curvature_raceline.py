@@ -34,8 +34,10 @@ def parse_args() -> argparse.Namespace:
                         help="raceline 곡률 상한 [1/m]")
     parser.add_argument("--step", type=float, default=0.05,
                         help="출력 raceline 간격 [m]")
-    parser.add_argument("--optimizer-step", type=float, default=0.10,
+    parser.add_argument("--optimizer-step", type=float, default=0.40,
                         help="IQP 입력 centerline 간격 [m]. 출력 간격과 독립적이다.")
+    parser.add_argument("--iqp-curvature-tolerance", type=float, default=0.25,
+                        help="IQP 선형화 곡률 오차 종료 기준 [1/m]")
     return parser.parse_args()
 
 
@@ -84,8 +86,9 @@ def main() -> None:
     alpha, prepared, normals = tph.iqp_handler.iqp_handler(
         reftrack=prepared, normvectors=normals, A=a_matrix,
         kappa_bound=args.curvature_limit, w_veh=args.vehicle_width,
-        print_debug=False, plot_debug=False, stepsize_interp=args.step,
-        iters_min=5, curv_error_allowed=0.02)
+        print_debug=True, plot_debug=False,
+        stepsize_interp=args.optimizer_step,
+        iters_min=5, curv_error_allowed=args.iqp_curvature_tolerance)
     race, _, coeff_x, coeff_y, spline_idx, t_vals, *_ = (
         tph.create_raceline.create_raceline(
             refline=prepared[:, :2], normvectors=normals, alpha=alpha,

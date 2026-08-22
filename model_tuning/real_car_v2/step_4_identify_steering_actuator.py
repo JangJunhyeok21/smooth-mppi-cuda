@@ -9,7 +9,7 @@ import steering_actuator_regression as regression
 # User-configurable Step 4 settings
 # ---------------------------------------------------------------------------
 ROOT = Path(__file__).resolve().parents[2]
-DATA_PATH = ROOT / "model_tuning/data/ifac0810_0819_autonomous_physics_clean"
+DATA_PATH = ROOT / "model_tuning/data/0821"
 OUTPUT_DIR = ROOT / "model_tuning/results/steering_actuator_regression"
 STEER_SCALE_MIN = 0.15
 STEER_SCALE_MAX = 1.2
@@ -19,7 +19,7 @@ STEER_TIME_CONSTANT_MIN_S = 0.01
 STEER_TIME_CONSTANT_MAX_S = 0.6
 RANDOM_SEED = 31
 USE_PLOT = True
-GT_CONSISTENCY_MODE = "adjust_states_to_pose"
+GT_CONSISTENCY_MODE = "none" # "adjust_pose_to_states", "adjust_states_to_pose", or "none"
 POSE_DERIVATIVE_SMOOTH_WINDOW_S = 0.20
 
 # Step 4 open-loop loss/model-selection weights. These are independent user

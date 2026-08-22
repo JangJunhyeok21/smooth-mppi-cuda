@@ -4,6 +4,10 @@
     # MLP 모델만 아래 학습 가중치를 읽고, Classic 모델은 이 파일을 읽지 않는다.
     dynamics_model: DYNAMIC_SERVO_LAG
     dynamic_mlp_servo_lag_weights_path: /home/a/smooth-mppi-cuda/config/dynamic_40ms_residual_servo_lag.bin
+    # MLP 보정 출력만 제한한다. 센서값과 최종 state에는 적용하지 않는다.
+    mlp_max_residual_ax: 0.0          # [m/s^2]
+    mlp_max_residual_ay: 8.0          # [m/s^2]
+    mlp_max_residual_yaw_accel: 12.0  # [rad/s^2]
     # IMU는 odom 시각에 causal 정렬되어 6-state MPPI classic-model EKF에 사용된다.
     imu_topic: /imu/data
     imu_sync_max_age_s: 0.05
@@ -176,13 +180,13 @@
     # The MPPI track contains the centerline and left/right lane widths.
     # PathPublisher converts them to center/left/right paths.
     # Relative paths are resolved from the installed package share directory.
-    # map_utils/step_3_refine_centerline_for_equal_width.py의 최종 산출물.
-    csv_file_path: data/map2/map2_mppi_track.csv
+    # STEP3 track을 STEP4 minimum-curvature optimizer로 변환한 MPPI 산출물.
+    csv_file_path: data/map2/map2_mppi_track_optimal.csv
     frame_id: map
     publish_rate: 1.0
     # true : simulator pose + twist come from simulation_odom_topic
     # false: real_pose_topic supplies map pose and real_odom_topic supplies velocity
-    is_simulation: true
+    is_simulation: false
     simulation_odom_topic: /ego_racecar/odom
     simulation_drive_topic: /drive  # must match f1tenth_gym_ros sim.yaml ego_drive_topic
     real_pose_topic: /newmcl_pose

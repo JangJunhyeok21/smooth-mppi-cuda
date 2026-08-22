@@ -12,7 +12,7 @@ import numpy as np
 
 ROOT=Path(__file__).resolve().parents[2]
 HERE=Path(__file__).resolve().parent
-STEP1_DATA=ROOT/"model_tuning/data/ifac0810_0819_autonomous_physics_clean"
+STEP1_DATA=ROOT/"model_tuning/data/0821"
 CLASSIC_PARAMS=ROOT/"model_tuning/results/dynamic_40ms_regression/params.json"
 OUTPUT=ROOT/"model_tuning/results/step_6_residual"
 ONE_STEP_EPOCHS=300
@@ -26,7 +26,7 @@ EVALUATE_ONLY=False  # F5: one-step -> recursive -> evaluation 순서로 실행
 EVALUATION_MODEL_PATH=OUTPUT/"recursive"
 DEPLOY_AFTER_TRAINING=True
 ROLLOUT_DT_S=0.04
-HORIZON_STEPS=30  # Step 1 currently stores 1.2 s = 30 * 40 ms
+HORIZON_STEPS=60  # Step 1 currently stores 1.2 s = HORIZON_STEPS * 40 ms
 INSPECT_BAG_ID=None  # None: INSPECT_RANDOM_SEED로 가능한 bag 하나를 선택
 INSPECT_RANDOM_SEED=31
 

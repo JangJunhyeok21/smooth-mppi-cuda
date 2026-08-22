@@ -1,6 +1,0 @@
-/**:
-  ros__parameters:
-    # MLP 보정 출력만 제한한다. 센서값과 최종 state에는 적용하지 않는다.
-    mlp_max_residual_ax: 0.0          # vx는 command servo 모델만 사용 [m/s^2]
-    mlp_max_residual_ay: 8.0          # MLP 횡가속도 보정 절댓값 한계 [m/s^2]
-    mlp_max_residual_yaw_accel: 12.0  # MLP yaw 가속도 보정 절댓값 한계 [rad/s^2]

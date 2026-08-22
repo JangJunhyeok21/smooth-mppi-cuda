@@ -193,7 +193,7 @@ def main():
                                           e2e.tensors(data)[3], e2e.tensors(data)[4])
     e2e_pose, e2e_state = e2e_pose.numpy(), e2e_state.numpy()
     config = yaml.safe_load((ROOT/"config/params.yaml").read_text())["/**"]["ros__parameters"]
-    mlp_config = yaml.safe_load((ROOT/"config/MLP_params.yaml").read_text())["/**"]["ros__parameters"]
+    mlp_config = yaml.safe_load((ROOT/"config/params.yaml").read_text())["/**"]["ros__parameters"]
     residual_pose, residual_state, residual_accel = rollout_residual(
         data, load_residual(args.residual), config, mlp_config)
     target = data["target"]

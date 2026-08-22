@@ -30,15 +30,27 @@ def main():
  lf,lr,m,iz=float(cfg['l_f']),float(cfg['l_r']),float(cfg['mass']),params.Iz;wb=lf+lr;fzf=m*9.81*lr/wb;fzr=m*9.81*lf/wb
  for i in range(len(state)):
   ap[i],_=actuator_step(ap[i],cmd[i,0],cmd[i,1],state[i,0],c);sr[i],bax=longitudinal_actuator_step(sr[i],cmd[i,1],state[i,0],c);vx,vy,r=state[i];safe=max(abs(vx),.5);af=ap[i]-np.arctan2(vy+lf*r,safe);ar=-np.arctan2(vy-lr*r,safe);bf=params.B_f*af;br=params.B_r*ar;fyf=fzf*params.D_f*np.sin(params.C_f*np.arctan(bf-params.E_f*(bf-np.arctan(bf))));fyr=fzr*params.D_r*np.sin(params.C_r*np.arctan(br-params.E_r*(br-np.arctan(br))));blend=low_speed_gate(vx,c);dynamic_ay=(fyf*np.cos(ap[i])+fyr)/m;dynamic_rd=(lf*fyf*np.cos(ap[i])-lr*fyr)/iz;kinematic_r=vx*np.tan(ap[i])/max(wb,1e-6);ay=blend*dynamic_ay+(1-blend)*(vx*r-vy/.1);rd=blend*dynamic_rd+(1-blend)*(kinematic_r-r)/.1;base[i]=(vx+(bax+vy*r)*.04,vy+(ay-vx*r)*.04,r+rd*.04)
- previous=d['history'][:,-4];x=np.c_[state,cmd,ap,cmd[:,0]-previous,base,d['history'],d['imu']].astype(np.float32);y=((d['target_state'][:,0]-base)/.04).astype(np.float32);s=d['split'];v=np.isfinite(x).all(1)&np.isfinite(y).all(1);tr=v&(s==0);va=v&(s==1);metadata={'source':'Step-1 callback archives (direct, no residual NPZ)','classic_parameter_hash':params.digest(),'target':'40 ms online MPPI-model EKF transition minus classic transition'};mean=x[tr].mean(0);std=np.maximum(x[tr].std(0),1e-4);ym=y[tr].mean(0);ys=np.maximum(y[tr].std(0),1e-3);dev=torch.device(a.device if torch.cuda.is_available() else 'cpu');xt=torch.from_numpy((x-mean)/std).to(dev);yt=torch.from_numpy((y-ym)/ys).to(dev);net=Net();
+ previous=d['history'][:,-4];x=np.c_[state,cmd,ap,cmd[:,0]-previous,base,d['history'],d['imu']].astype(np.float32);y=((d['target_state'][:,0]-base)/.04).astype(np.float32);s=d['split'];v=np.isfinite(x).all(1)&np.isfinite(y).all(1);tr=v&(s==0);va=v&(s==1)
+ if not np.any(tr):raise RuntimeError('no finite Step-1 training samples (split == 0)')
+ validation_source='held-out validation split'
+ if not np.any(va):
+  va=tr.copy();validation_source='training split fallback (no validation bags matched)'
+  print('WARNING: validation split is empty; using finite training samples for checkpoint selection.',flush=True)
+ print(f'one-step samples: train={int(tr.sum())}, validation={int(va.sum())} ({validation_source})',flush=True)
+ metadata={'source':'Step-1 callback archives (direct, no residual NPZ)','classic_parameter_hash':params.digest(),'target':'40 ms online MPPI-model EKF transition minus classic transition','validation_source':validation_source};mean=x[tr].mean(0);std=np.maximum(x[tr].std(0),1e-4);ym=y[tr].mean(0);ys=np.maximum(y[tr].std(0),1e-3)
+ if not all(np.isfinite(value).all() for value in (mean,std,ym,ys)):raise RuntimeError('non-finite normalization statistics in residual training data')
+ dev=torch.device(a.device if torch.cuda.is_available() else 'cpu');xt=torch.from_numpy((x-mean)/std).to(dev);yt=torch.from_numpy((y-ym)/ys).to(dev);net=Net();
  if a.initialize_from:net.load_state_dict(torch.load(Path(a.initialize_from)/'model.pt',map_location='cpu',weights_only=True))
- net=net.to(dev);opt=torch.optim.AdamW(net.parameters(),8e-4,weight_decay=1e-4);idx=np.flatnonzero(tr);b=d['bag_name'];prob=np.array([4 if x[i,0]>=3 else 1 for i in idx],float);counts={q:max(1,np.sum(b[idx]==q)) for q in np.unique(b[idx])};prob*=np.array([1/np.sqrt(counts[b[i]]) for i in idx]);prob/=prob.sum();weights=torch.tensor((1.,2.,2.),device=dev);best=(1e99,None,0);stale=0
+ net=net.to(dev);opt=torch.optim.AdamW(net.parameters(),8e-4,weight_decay=1e-4);idx=np.flatnonzero(tr);b=d['bag_name'];prob=np.array([4 if x[i,0]>=3 else 1 for i in idx],float);counts={q:max(1,np.sum(b[idx]==q)) for q in np.unique(b[idx])};prob*=np.array([1/np.sqrt(counts[b[i]]) for i in idx]);prob/=prob.sum();weights=torch.tensor((1.,2.,2.),device=dev);best=(float('inf'),{k:z.detach().cpu().clone() for k,z in net.state_dict().items()},0);stale=0
  for epoch in range(a.epochs):
   net.train();sample=rng.choice(idx,len(idx),replace=True,p=prob)
   for q in np.array_split(sample,max(1,len(sample)//1024)):
-   pred=net(xt[q]);loss=(nn.functional.smooth_l1_loss(pred,yt[q],reduction='none')*weights).mean();opt.zero_grad();loss.backward();torch.nn.utils.clip_grad_norm_(net.parameters(),5);opt.step()
+   pred=net(xt[q]);loss=(nn.functional.smooth_l1_loss(pred,yt[q],reduction='none')*weights).mean()
+   if not torch.isfinite(loss):raise RuntimeError(f'non-finite training loss at epoch {epoch+1}; inspect Step-1 state/target ranges')
+   opt.zero_grad();loss.backward();torch.nn.utils.clip_grad_norm_(net.parameters(),5);opt.step()
   net.eval()
   with torch.no_grad():score=float(nn.functional.smooth_l1_loss(net(xt[va]),yt[va]))
+  if not np.isfinite(score):raise RuntimeError(f'non-finite validation loss at epoch {epoch+1}')
   if score<best[0]-1e-5:best=(score,{k:z.detach().cpu().clone() for k,z in net.state_dict().items()},epoch+1);stale=0
   else:stale+=1
   if stale>=50:break
@@ -46,6 +58,9 @@ def main():
  with torch.no_grad():net.net[4].weight.mul_(torch.from_numpy(ys)[:,None]);net.net[4].bias.mul_(torch.from_numpy(ys)).add_(torch.from_numpy(ym));pred=net(torch.from_numpy((x-mean)/std)).numpy()
  out=Path(a.out);out.mkdir(parents=True,exist_ok=True);torch.save(net.state_dict(),out/'model.pt');layers=(net.net[0],net.net[2],net.net[4]);blob=np.concatenate([z.detach().numpy().ravel() for layer in layers for z in (layer.weight,layer.bias)]+[mean,std]).astype('<f4');assert len(blob)==3695;blob.tofile(out/'dynamic_40ms_residual.bin');metrics={'seed':a.seed,'best_epoch':best[2],'model_dt':.04,'control_dt':.02,'supervision':'one-step temporary pseudo-label initialization','dataset_metadata':metadata,'input_features':list(IMU_RESIDUAL_FEATURES)}
  for k,name in enumerate(('train','validation','test')):
-  mask=v&(s==k);e=abs(pred[mask]-y[mask]);metrics[name]={'n':int(mask.sum()),'mae':e.mean(0).tolist(),'p95':np.quantile(e,.95,axis=0).tolist()}
+  mask=v&(s==k);count=int(mask.sum())
+  if count:
+   e=abs(pred[mask]-y[mask]);metrics[name]={'n':count,'mae':e.mean(0).tolist(),'p95':np.quantile(e,.95,axis=0).tolist()}
+  else:metrics[name]={'n':0,'mae':None,'p95':None}
  (out/'metrics.json').write_text(json.dumps(metrics,indent=2)+'\n');(out/'contract.json').write_text(json.dumps({'model':'dynamic_mlp_residual_servo_lag_40ms','control_dt':.02,'model_dt':.04,'features':list(IMU_RESIDUAL_FEATURES),'outputs':['delta_ax','delta_ay','delta_yaw_accel'],'substeps':1,'integration':'single Euler step at 0.04 s'},indent=2)+'\n');print(json.dumps(metrics,indent=2))
 if __name__=='__main__':main()

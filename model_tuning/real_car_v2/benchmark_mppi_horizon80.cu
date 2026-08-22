@@ -27,7 +27,7 @@ int main(int argc, char** argv) {
     p.l_f=.163f; p.l_r=.161f; p.F_zf=p.mass*9.81f*p.l_r/(p.l_f+p.l_r);
     p.F_zr=p.mass*9.81f*p.l_f/(p.l_f+p.l_r);
     p.kinematic_steer_scale=.50927964f; p.kinematic_steer_bias=.01015773f;
-    p.steer_servo_time_constant=.15514851f; p.actuator_max_steer_rate=.8344091f;
+    p.steer_servo_time_constant=.15514851f; p.actuator_max_steer_rate=6.5449847f;
     p.speed_servo_kp=.76168889f; p.speed_reference_accel_time_constant=.04f;
     p.speed_reference_brake_time_constant=.02f; p.actuator_max_speed_reference_rate=8.f;
     p.kinematic_yaw_rate_time_constant=.1f; p.kinematic_max_yaw_accel=15.f;

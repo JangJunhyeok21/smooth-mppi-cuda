@@ -27,7 +27,7 @@ int main(int argc,char **argv){
     p.min_speed=std::atof(argv[12]);p.max_speed=std::atof(argv[13]);p.mass=3.74f;p.l_f=.163f;p.l_r=.161f;
     p.kinematic_steer_scale=1.f;p.kinematic_steer_bias=.01015773f;
     p.speed_servo_kp=27.85168694f;p.steer_servo_time_constant=.15514851356820727f;
-    p.actuator_max_steer_rate=.8344090950084138f;p.speed_reference_accel_time_constant=.09013387f;
+    p.actuator_max_steer_rate=6.544984694978735f;p.speed_reference_accel_time_constant=.09013387f;
     p.speed_reference_brake_time_constant=.09717008f;p.actuator_max_speed_reference_rate=5.89577526f;
     p.dynamic_mlp_B_f=std::atof(argv[3]);p.dynamic_mlp_C_f=std::atof(argv[4]);
     p.dynamic_mlp_D_f=std::atof(argv[5]);p.dynamic_mlp_E_f=std::atof(argv[6]);

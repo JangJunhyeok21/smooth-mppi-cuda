@@ -8,7 +8,7 @@
 namespace mppi {
 
 struct LateralVelocityKFParams {
-    float dt{0.02f};
+    float dt{0.04f};
 
     Eigen::Matrix<float, 6, 1> process_var{
         (Eigen::Matrix<float, 6, 1>() <<
@@ -45,7 +45,7 @@ struct LateralVelocityKFParams {
     float steer_scale{1.0f};
     float steer_bias{0.0f};
     float steer_tau{0.1551485f};
-    float max_steer_rate{0.8344091f};
+    float max_steer_rate{6.5449847f};
 
     float speed_accel_tau{0.09013387f};
     float speed_brake_tau{0.09717008f};
@@ -53,12 +53,14 @@ struct LateralVelocityKFParams {
 };
 
 // Causal six-state EKF using the same MPPI classic dynamics as step_1.
+// State order: [x, y, yaw, vx, vy, yaw_rate]
+// Measurement order: [MCL x, MCL y, MCL yaw, odom vx, causal MCL vy, IMU yaw_rate, IMU ax, IMU ay]
 class LateralVelocityKF {
 public:
-    static constexpr int N = 6;
+    static constexpr int N = 6; 
     using State = Eigen::Matrix<float, N, 1>;
     using Covariance = Eigen::Matrix<float, N, N>;
-
+    
     void initialize(const LateralVelocityKFParams &params) {
         params_ = params;
         params_.dt = std::max(params_.dt, 1e-4f);

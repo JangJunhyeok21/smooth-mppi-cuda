@@ -18,6 +18,10 @@ STATE_UNITS = ("m", "m", "rad", "m/s", "m/s", "rad/s")
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--result-dir", type=Path, default=DEFAULT_RESULT_DIR)
+    parser.add_argument("--new-file", default="new_lateral_only.npz")
+    parser.add_argument("--baseline-file", default="deployed_lateral_only.npz")
+    parser.add_argument("--new-label", default="new EKF+MLP")
+    parser.add_argument("--baseline-label", default="deployed MLP")
     parser.add_argument("--dt", type=float, default=0.04)
     parser.add_argument("--no-show", action="store_true")
     return parser.parse_args()
@@ -30,8 +34,8 @@ def angle_error(a: np.ndarray, b: np.ndarray) -> np.ndarray:
 def main() -> None:
     args = parse_args()
     result_dir = args.result_dir.resolve()
-    new = np.load(result_dir / "new_lateral_only.npz")
-    old = np.load(result_dir / "deployed_lateral_only.npz")
+    new = np.load(result_dir / args.new_file)
+    old = np.load(result_dir / args.baseline_file)
     if not np.array_equal(new["starts"], old["starts"]):
         raise RuntimeError("새 모델과 배포 모델의 rollout window 순서가 다릅니다.")
 
@@ -71,8 +75,8 @@ def main() -> None:
 
         ax = traj_axes[row]
         ax.plot(g[:, 0], g[:, 1], "k-o", ms=2.5, label="GT")
-        ax.plot(o[:, 0], o[:, 1], "--", color="tab:blue", label="deployed MLP")
-        ax.plot(n[:, 0], n[:, 1], color=colors[case], label="new EKF+MLP")
+        ax.plot(o[:, 0], o[:, 1], "--", color="tab:blue", label=args.baseline_label)
+        ax.plot(n[:, 0], n[:, 1], color=colors[case], label=args.new_label)
         ax.scatter(n[-1, 0], n[-1, 1], color=colors[case], s=35, zorder=5)
         ax.set_title(
             f"{case.upper()} | mean={new_xy.mean():.3f} m | "
@@ -88,9 +92,9 @@ def main() -> None:
             sax = state_axes[row, col]
             sax.plot(time, g[:, col], "k", linewidth=1.8, label="GT")
             sax.plot(time, o[:, col], "--", color="tab:blue", linewidth=1.2,
-                     label="deployed MLP")
+                     label=args.baseline_label)
             sax.plot(time, n[:, col], color=colors[case], linewidth=1.4,
-                     label="new EKF+MLP")
+                     label=args.new_label)
             sax.set_title(f"{case.upper()} {name} | MAE={state_mae[col]:.3f} {unit}")
             sax.set_ylabel(f"{name} [{unit}]")
             sax.grid(alpha=0.25)

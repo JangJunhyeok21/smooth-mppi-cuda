@@ -19,7 +19,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 from helper_filter_collision_recovery import (
     collision_recovery_mask, physical_inconsistency_mask)
-from classic_model_kalman_smoother import filter_classic_segment
+from classic_model_kalman_filter import filter_classic_segment
+from contract import ClassicModelParameters
 
 # USER SETTINGS. Add every bag storage file or rosbag2 directory here. Running
 # this script without arguments extracts them sequentially.
@@ -37,11 +38,14 @@ OUTPUT_PATH = PROJECT_ROOT / "model_tuning/data/ifac0810_0819_autonomous_physics
 # F5/direct execution is an interactive inspection workflow.  Set this to
 # False only for unattended batch extraction.
 USE_PLOT = True
+# Set True for F5 to skip rosbag extraction and re-open the saved NPZ files.
+REVIEW_SAVED_COLLISIONS = True
 # Bag-to-pose verification shows that the sensor/body convention changed by
 # 2026-08-15. 0810--0813 y/z oppose MPPI FLU; 0815 onward already match it.
 IMU_WZ_SIGN = 1.0; IMU_AX_SIGN = 1.0; IMU_AY_SIGN = 1.0; IMU_EMA_ALPHA = .25
 IMU_SIGN_CUTOVER = dtlib.date(2026, 8, 15)
 POSE_TOPIC = "/newmcl_pose"; VELOCITY_TOPIC = "/odom"; COMMAND_TOPIC = "/ackermann_cmd"; IMU_TOPIC = "/imu/data"
+DEFAULT_MAP_YAML = (PROJECT_ROOT / "f1tenth_gym_ros/src/f1tenth_gym_ros/maps/map1/map1.yaml") # 그냥 시각화 용도임
 APPLIED_COMMAND_TOPIC = "/drive"
 COMMAND_STEER_MATCH_TOL = 1e-4; COMMAND_SPEED_MATCH_TOL = 1e-4
 # A rollout starting shortly before a manual takeover still contains a response
@@ -57,6 +61,10 @@ DT = .02; MAX_POSE_AGE = .10; MAX_VELOCITY_AGE = .10; MAX_COMMAND_AGE = .10; MAX
 MIN_CONTINUOUS_SEGMENT_S = 2.0
 PLOT_ARROW_INTERVAL_S = .10  # data remain 50 Hz; direction arrows are drawn at 10 Hz
 PLOT_TIME_LABEL_INTERVAL_S = 1.0
+REVIEW_WINDOW_S = .50
+REVIEW_MOVING_SPEED = .70
+REVIEW_MAX_POSE_SPEED = .12
+REVIEW_MIN_POSE_ODOM_RATIO = .65
 
 
 def recording_date(path):
@@ -118,7 +126,7 @@ def read_streams(storage, pose_topic, velocity_topic, drive_topic, imu_topic,
                 rosbag2_py.ConverterOptions("cdr", "cdr"))
     types = {x.name: x.type for x in reader.get_all_topics_and_types()}
     topics = (pose_topic, velocity_topic, drive_topic, imu_topic)
-    if applied_command_topic is not None:
+    if applied_command_topic is not None and applied_command_topic in types:
         topics += (applied_command_topic,)
     missing = [x for x in topics if x not in types]
     if missing:
@@ -147,7 +155,8 @@ def read_streams(storage, pose_topic, velocity_topic, drive_topic, imu_topic,
             imu.append((t, msg.angular_velocity.z,
                         msg.linear_acceleration.x, msg.linear_acceleration.y))
     result=tuple(np.asarray(x, np.float64) for x in (pose, velocity, drive, imu))
-    return result if applied_command_topic is None else result+(np.asarray(applied,np.float64),)
+    applied_array=(np.asarray(applied,np.float64) if applied else np.empty((0,4),np.float64))
+    return result if applied_command_topic is None else result+(applied_array,)
 
 
 def expand_boolean_intervals(mask, pre_samples, post_samples):
@@ -171,6 +180,103 @@ def causal_hold(stream, times, max_age):
     return stream[clipped], valid
 
 
+def interpolate_stream(stream,times,angle_columns=()):
+    """Linear continuous-time interpolation without endpoint extrapolation."""
+    stream=stream[np.argsort(stream[:,0])]
+    stream=stream[np.r_[True,np.diff(stream[:,0])>1e-9]]
+    result=np.empty((len(times),stream.shape[1]-1),float)
+    for column in range(1,stream.shape[1]):
+        values=np.unwrap(stream[:,column]) if column in angle_columns else stream[:,column]
+        result[:,column-1]=np.interp(times,stream[:,0],values,left=np.nan,right=np.nan)
+    return result
+
+
+def build_callback_prediction_samples(pose,velocity,drive,imu,signs,cfg,accepted_intervals,
+                                      origin,horizon_s=.0,prediction_dt=.02,
+                                      max_command_age=.10,max_imu_age=.05,
+                                      max_pose_step=.30,max_yaw_step=.45,
+                                      command_history_steps=5):
+    """Build irregular callback anchors with causal actuator state/history.
+
+    The first callback initializes applied steer from the current steer command
+    and speed reference from measured vx. No artificial history padding is
+    used: with a five-callback history, anchors 0--3 are discarded.
+    """
+    steps=max(1,int(round(horizon_s/prediction_dt)))
+    offsets=prediction_dt*np.arange(1,steps+1,dtype=float)
+    inputs=[];targets=[];future_commands=[]
+    velocity=velocity[np.argsort(velocity[:,0])]
+    processed_imu=imu[np.argsort(imu[:,0])].copy()
+    processed_imu[:,1:4]*=np.asarray(signs,float)[None,:]
+    processed_imu[:,1]-=float(cfg.get("imu_wz_bias",0.))
+    processed_imu[:,2]-=float(cfg.get("imu_ax_bias",0.))
+    processed_imu[:,3]-=float(cfg.get("imu_ay_bias",0.))
+    alpha=float(cfg.get("imu_ema_alpha",IMU_EMA_ALPHA))
+    for k in range(1,len(processed_imu)):
+        processed_imu[k,1:4]=alpha*processed_imu[k,1:4]+(1.-alpha)*processed_imu[k-1,1:4]
+    for bag_id,(start,end) in enumerate(accepted_intervals):
+        # A target horizon must stay inside one audited continuous interval.
+        anchors=velocity[(velocity[:,0]>=start)&(velocity[:,0]+offsets[-1]<=end)]
+        if not len(anchors):continue
+        anchor_t=anchors[:,0];pose_now=interpolate_stream(pose,anchor_t,(3,))
+        command,command_valid=causal_hold(drive,anchor_t,max_command_age)
+        inertial,imu_valid=causal_hold(processed_imu,anchor_t,max_imu_age)
+        steer_cmd=command[:,1];speed_cmd=command[:,3]
+        applied_steer=np.empty(len(anchors));speed_reference=np.empty(len(anchors))
+        applied_steer[0]=np.clip(steer_cmd[0],-.55,.55)
+        speed_reference[0]=anchors[0,1]
+        steer_scale=float(cfg.get("kinematic_steer_scale",1.))
+        steer_bias=float(cfg.get("kinematic_steer_bias",0.))
+        steer_tau=max(float(cfg.get("steer_servo_time_constant",.08)),1e-3)
+        max_steer_rate=float(cfg.get("actuator_max_steer_rate",np.inf))
+        accel_tau=max(float(cfg.get("speed_reference_accel_time_constant",.05)),1e-3)
+        brake_tau=max(float(cfg.get("speed_reference_brake_time_constant",.05)),1e-3)
+        max_speed_rate=float(cfg.get("actuator_max_speed_reference_rate",np.inf))
+        for k in range(1,len(anchors)):
+            callback_dt=max(0.,anchor_t[k]-anchor_t[k-1])
+            steer_target=np.clip(steer_scale*steer_cmd[k-1]+steer_bias,-.55,.55)
+            steer_rate=np.clip((steer_target-applied_steer[k-1])/steer_tau,
+                               -max_steer_rate,max_steer_rate)
+            applied_steer[k]=np.clip(applied_steer[k-1]+steer_rate*callback_dt,-.55,.55)
+            tau=accel_tau if speed_cmd[k-1]>=speed_reference[k-1] else brake_tau
+            speed_rate=np.clip((speed_cmd[k-1]-speed_reference[k-1])/tau,
+                               -max_speed_rate,max_speed_rate)
+            speed_reference[k]=speed_reference[k-1]+speed_rate*callback_dt
+        command_history=np.full((len(anchors),2*command_history_steps),np.nan)
+        for k in range(command_history_steps-1,len(anchors)):
+            command_history[k]=np.c_[
+                steer_cmd[k-command_history_steps+1:k+1],
+                speed_cmd[k-command_history_steps+1:k+1]].reshape(-1)
+        future_t=anchor_t[:,None]+offsets[None,:]
+        future_command,future_command_valid=causal_hold(
+            drive,future_t.ravel(),max_command_age)
+        future_command=future_command[:,[1,3]].reshape(len(anchors),steps,2)
+        future_command_valid=future_command_valid.reshape(len(anchors),steps).all(1)
+        future_pose=interpolate_stream(pose,future_t.ravel(),(3,)).reshape(len(anchors),steps,3)
+        future_velocity=interpolate_stream(velocity,future_t.ravel()).reshape(len(anchors),steps,3)
+        valid=(command_valid&imu_valid&future_command_valid&np.isfinite(pose_now).all(1)
+               &np.isfinite(future_pose).all((1,2))&np.isfinite(future_velocity).all((1,2)))
+        valid&=np.isfinite(command_history).all(1)
+        pose_trace=np.concatenate((pose_now[:,None,:],future_pose),axis=1)
+        xy_step=np.linalg.norm(np.diff(pose_trace[:,:,:2],axis=1),axis=2)
+        yaw_step=np.abs(np.diff(pose_trace[:,:,2],axis=1))
+        valid&=(np.max(xy_step,axis=1)<=max_pose_step)
+        valid&=(np.max(yaw_step,axis=1)<=max_yaw_step)
+        if not valid.any():continue
+        current=np.c_[anchor_t-origin,pose_now,anchors[:,1:4],steer_cmd,speed_cmd,
+                      inertial[:,1:4],applied_steer,speed_reference,command_history,
+                      np.full(len(anchors),bag_id)]
+        inputs.append(current[valid]);targets.append(
+            np.concatenate((future_pose,future_velocity),axis=2)[valid])
+        future_commands.append(future_command[valid])
+    if not inputs:
+        input_width=15+2*command_history_steps
+        return (np.empty((0,input_width)),np.empty((0,steps,6)),
+                np.empty((0,steps,2)),offsets)
+    return (np.concatenate(inputs),np.concatenate(targets),
+            np.concatenate(future_commands),offsets)
+
+
 def causal_mcl_body_vy(times,x,y,yaw,window_s=.12):
     """Match the runtime trailing-window MCL regression used as KF vy observation."""
     result=np.full(len(times),np.nan)
@@ -191,7 +297,68 @@ def causal_ema(values,alpha):
     return result
 
 
-def plot_extracted(samples, columns, dt, title, command_topic, signs=(1.,1.,1.)):
+def draw_occupancy_map(axis,map_yaml):
+    """Draw a ROS occupancy map in the same world frame as MCL poses."""
+    import matplotlib.image as mpimg
+    from matplotlib.transforms import Affine2D
+    map_yaml=Path(map_yaml)
+    if not map_yaml.is_file():
+        raise FileNotFoundError(f"map YAML does not exist: {map_yaml}")
+    metadata=yaml.safe_load(map_yaml.read_text())
+    image_path=(map_yaml.parent/metadata["image"]).resolve()
+    if not image_path.is_file():
+        raise FileNotFoundError(f"map image from {map_yaml} does not exist: {image_path}")
+    image=mpimg.imread(image_path)
+    resolution=float(metadata["resolution"]);origin=np.asarray(metadata["origin"],float)
+    height,width=image.shape[:2]
+    extent=(origin[0],origin[0]+width*resolution,
+            origin[1],origin[1]+height*resolution)
+    transform=(Affine2D().rotate_around(origin[0],origin[1],origin[2])+axis.transData
+               if abs(origin[2])>1e-12 else axis.transData)
+    axis.imshow(image,cmap="gray",origin="upper",extent=extent,transform=transform,
+                interpolation="nearest",alpha=.48,zorder=0,label="_nolegend_")
+    axis.plot([],[],color="0.65",lw=6,alpha=.6,label="occupancy map")
+    return {"yaml":str(map_yaml),"image":str(image_path),"resolution":resolution,
+            "origin":origin.tolist(),"shape":[height,width]}
+
+
+def collision_review_mask(samples, columns, window_s=REVIEW_WINDOW_S,
+                          moving_speed=REVIEW_MOVING_SPEED,
+                          max_pose_speed=REVIEW_MAX_POSE_SPEED,
+                          min_pose_odom_ratio=REVIEW_MIN_POSE_ODOM_RATIO):
+    """Mark intervals where command/odom reports motion but MCL is stuck."""
+    names={str(name):index for index,name in enumerate(columns)}
+    t=samples[:,names["t"]];x=samples[:,names["x"]];y=samples[:,names["y"]]
+    odom=np.abs(samples[:,names["vx"]]);command=np.abs(samples[:,names["speed_cmd"]])
+    moving=np.maximum(odom,command)
+    suspect=np.zeros(len(samples),dtype=bool)
+    pose_speed=np.full(len(samples),np.nan);ratio=np.full(len(samples),np.nan)
+    for index in range(len(samples)):
+        end=int(np.searchsorted(t,t[index]+window_s,side="right"))-1
+        if end<=index:continue
+        duration=t[end]-t[index]
+        displacement=np.hypot(x[end]-x[index],y[end]-y[index])
+        pose_speed[index]=displacement/max(duration,1e-6)
+        odom_distance=np.trapz(odom[index:end+1],t[index:end+1])
+        ratio[index]=displacement/max(odom_distance,1e-6)
+        active=float(np.mean(moving[index:end+1]))>=moving_speed
+        suspect[index]=active and (pose_speed[index]<max_pose_speed or
+                                    ratio[index]<min_pose_odom_ratio)
+    expanded=suspect.copy()
+    for index in np.flatnonzero(suspect):
+        expanded[index:np.searchsorted(t,t[index]+window_s,side="right")]=True
+    return expanded,{"pose_speed":pose_speed,"pose_odom_ratio":ratio}
+
+
+def _true_time_spans(t,mask):
+    edges=np.diff(np.r_[False,np.asarray(mask,bool),False].astype(np.int8))
+    starts=np.flatnonzero(edges==1);ends=np.flatnonzero(edges==-1)-1
+    return [(float(t[start]),float(t[end])) for start,end in zip(starts,ends)]
+
+
+def plot_extracted(samples, columns, dt, title, command_topic, signs=(1.,1.,1.),
+                   map_yaml=DEFAULT_MAP_YAML,trim_controls=False,time_offset_s=0.,
+                   bag_count=None,current_bag_number=None,review_collisions=False):
     """Show one bag and block until its window is closed."""
     import matplotlib.pyplot as plt
     names={str(name):index for index,name in enumerate(columns)}
@@ -200,7 +367,7 @@ def plot_extracted(samples, columns, dt, title, command_topic, signs=(1.,1.,1.))
     steer,speed_cmd=samples[:,7],samples[:,9]
     imu_wz,imu_ax,imu_ay=samples[:,12],samples[:,13],samples[:,14]
     segment=samples[:,11].astype(int);t=np.empty(len(samples));wx=np.empty(len(samples));wy=np.empty(len(samples));raw_yaw_rate=np.empty(len(samples))
-    elapsed=0.
+    elapsed=float(time_offset_s)
     for bag_id in np.unique(segment):
         ii=np.flatnonzero(segment==bag_id);local=source_t[ii]-source_t[ii[0]]
         t[ii]=elapsed+local;elapsed=t[ii[-1]]+(np.median(np.diff(local)) if len(ii)>1 else DT)
@@ -227,6 +394,8 @@ def plot_extracted(samples, columns, dt, title, command_topic, signs=(1.,1.,1.))
     wz_sign,ax_sign,ay_sign=signs
     fig,axes=plt.subplots(5,2,figsize=(16,22));fig.suptitle(title,y=.995)
     panels=axes.flat;ax=panels[0]
+    if map_yaml is not None:
+        draw_occupancy_map(ax,map_yaml)
     # MCL samples remain at 50 Hz; only yaw-direction glyphs are decimated.
     stride=max(1,int(round(PLOT_ARROW_INTERVAL_S/dt)))
     # Original MCL samples and their measured yaw direction.
@@ -240,6 +409,11 @@ def plot_extracted(samples, columns, dt, title, command_topic, signs=(1.,1.,1.))
         ii=np.flatnonzero(segment==bag_id)
         ax.plot(x[ii],y[ii],color="tab:green",lw=1.2,
                 label="raw MCL connected samples" if line_label else None)
+        # wrapped=np.flatnonzero(np.abs(np.diff(heading[ii]))>np.pi)+1
+        # if len(wrapped):
+        #     jj=ii[wrapped]
+        #     ax.scatter(x[jj],y[jj],marker="x",s=70,color="red",zorder=8,
+        #                label="raw yaw wrap (unwrapped in callback GT)" if line_label else None)
         line_label=False
     kf_x=samples[:,names["kf_x"]];kf_y=samples[:,names["kf_y"]]
     kf_yaw=samples[:,names["kf_yaw"]]
@@ -252,6 +426,13 @@ def plot_extracted(samples, columns, dt, title, command_topic, signs=(1.,1.,1.))
     ax.quiver(kf_x[::stride],kf_y[::stride],np.cos(kf_yaw[::stride]),np.sin(kf_yaw[::stride]),
               color="tab:blue",angles="xy",scale_units="xy",scale=3.5,width=.004,
               label="MPPI-model KF yaw arrows")
+    review_mask=np.zeros(len(samples),dtype=bool);review_spans=[]
+    if review_collisions:
+        review_mask,_=collision_review_mask(samples,columns)
+        review_spans=_true_time_spans(t,review_mask)
+        if np.any(review_mask):
+            ax.scatter(x[review_mask],y[review_mask],s=24,color="red",marker="x",zorder=9,
+                       label="collision/stuck review candidate")
     label_bucket=np.floor(t/PLOT_TIME_LABEL_INTERVAL_S).astype(int)
     time_indices=np.flatnonzero(np.r_[True,np.diff(label_bucket)>0])
     ax.scatter(kf_x[time_indices],kf_y[time_indices],s=18,color="black",zorder=5,
@@ -282,17 +463,30 @@ def plot_extracted(samples, columns, dt, title, command_topic, signs=(1.,1.,1.))
 
     consistency_axes=panels[7:9]
     odom_ax=odom_dvx-signed_imu_wz*odom_vy
-    consistency_axes[0].plot(t,ax_sign*imu_ax,color="tab:orange",label="signed raw IMU ax")
-    consistency_axes[0].plot(t,odom_dvx,color="tab:green",alpha=.55,label="d(odom vx)/dt")
-    consistency_axes[0].plot(t,odom_ax,color="tab:blue",alpha=.8,label="d(odom vx)/dt - r·odom_vy")
-    consistency_axes[0].set_ylabel("m/s²");consistency_axes[0].set_title("IMU ax vs odom-vx slope")
     kf_vx=samples[:,names["kf_vx"]];kf_vy=samples[:,names["kf_vy"]]
-    kf_r=samples[:,names["kf_yaw_rate"]];kf_dvy=np.empty(len(samples))
+    kf_r=samples[:,names["kf_yaw_rate"]]
+    kf_dvx=np.empty(len(samples));kf_dvy=np.empty(len(samples))
     for bag_id in np.unique(segment):
         ii=np.flatnonzero(segment==bag_id);local=source_t[ii]-source_t[ii[0]]
         edge=2 if len(ii)>=3 else 1
+        kf_dvx[ii]=np.gradient(kf_vx[ii],local,edge_order=edge) if len(ii)>1 else 0.
         kf_dvy[ii]=np.gradient(kf_vy[ii],local,edge_order=edge) if len(ii)>1 else 0.
+    # Body-frame acceleration identities:
+    #   ax = dvx/dt - r*vy, ay = dvy/dt + r*vx.
+    # kf_ax/kf_ay are the classic process-model predictions returned by the
+    # EKF, whereas these state-derived traces differentiate the filtered state.
+    kf_state_ax=kf_dvx-kf_r*kf_vy
     kf_state_ay=kf_dvy+kf_r*kf_vx
+    consistency_axes[0].plot(t,ax_sign*imu_ax,color="tab:orange",label="signed raw IMU ax")
+    consistency_axes[0].plot(t,odom_dvx,color="tab:gray",alpha=.5,label="d(odom vx)/dt")
+    consistency_axes[0].plot(t,odom_ax,color="tab:purple",alpha=.65,
+                             label="d(odom vx)/dt - IMU r·odom vy")
+    consistency_axes[0].plot(t,samples[:,names["kf_ax"]],color="tab:green",alpha=.85,
+                             label="KF model ax (longitudinal actuator prediction)")
+    consistency_axes[0].plot(t,kf_state_ax,color="tab:blue",alpha=.85,
+                             label="d(KF vx)/dt - KF yaw-rate·KF vy")
+    consistency_axes[0].set_ylabel("m/s²")
+    consistency_axes[0].set_title("IMU ax vs odom slope and KF model/state-derived ax")
     consistency_axes[1].plot(t,ay_sign*imu_ay,color="tab:orange",label="signed raw IMU ay")
     consistency_axes[1].plot(t,samples[:,names["kf_ay"]],color="tab:green",alpha=.8,
                              label="KF model ay (tire-force prediction)")
@@ -303,14 +497,186 @@ def plot_extracted(samples, columns, dt, title, command_topic, signs=(1.,1.,1.))
     consistency_axes[1].set_ylabel("m/s²");consistency_axes[1].set_title("IMU ay vs KF model/state-derived ay")
     panels[9].axis("off")
 
-    print(f"Showing {title}. Close this window to process the next bag.")
     for axis in panels[1:9]:
+        for span_start,span_end in review_spans:
+            axis.axvspan(span_start,span_end,color="red",alpha=.13,zorder=0)
         axis.set_xlabel("time [s]");axis.grid(alpha=.25);axis.legend(fontsize=8)
     # Keep titles, x labels and legends from touching the neighboring row.
     fig.subplots_adjust(left=.08,right=.97,bottom=.06,top=.95,hspace=.48,wspace=.25)
-    print(f"Showing {title}. Close this window to process the next bag.")
+    action={"key":"q","time":None}
+    if trim_controls:
+        action={"key":None,"time":None}
+        review_text=(f"; red={len(review_spans)} collision/stuck candidate interval(s)"
+                     if review_collisions else "")
+        fig.suptitle(title+review_text+"\ns/e=cut; q=save; ←=previous unsaved; →=next unsaved; 1..9=jump; j=two-digit jump",y=.997)
+        time_axes=set(panels[1:9])
+        def on_key(event):
+            key=(event.key or "").lower()
+            if key.isdigit() and key!="0":
+                target=int(key)
+                if bag_count is not None and target<=bag_count:
+                    action.update(key="jump",time=None,bag_number=target);plt.close(fig)
+                else:
+                    print(f"Bag {target} is outside 1..{bag_count}.")
+                return
+            if key=="j":
+                try:
+                    target=int(input(f"Jump to bag number [1..{bag_count}]: "))
+                except (ValueError,EOFError):
+                    print("Invalid bag number.");return
+                if bag_count is not None and 1<=target<=bag_count:
+                    action.update(key="jump",time=None,bag_number=target);plt.close(fig)
+                else:
+                    print(f"Bag {target} is outside 1..{bag_count}.")
+                return
+            if key=="left":
+                if current_bag_number is not None and current_bag_number<=1:
+                    print("Already at the first bag.");return
+                action.update(key="previous",time=None);plt.close(fig);return
+            if key=="right":
+                if (current_bag_number is not None and bag_count is not None
+                        and current_bag_number>=bag_count):
+                    print("Already at the last bag.");return
+                action.update(key="next",time=None);plt.close(fig);return
+            if key=="q":
+                action.update(key="q",time=None);plt.close(fig);return
+            if key not in {"s","e"}:
+                return
+            if event.inaxes not in time_axes or event.xdata is None:
+                print("Place the mouse cursor over a time-series panel before pressing s/e.")
+                return
+            action.update(key=key,time=float(event.xdata));plt.close(fig)
+        fig.canvas.mpl_connect("key_press_event",on_key)
+        print("Manual trim: s/e=cut, q=save, left=previous unsaved, "
+              "right=next unsaved, 1..9=jump, j=two-digit jump.")
+    else:
+        print(f"Showing {title}. Close this window to process the next bag.")
     plt.show(block=True)
     plt.close(fig)
+    return action
+
+
+def persist_manual_trim(out,samples,columns,cut_start_s,cut_end_s):
+    """Atomically trim aligned samples and callback horizons in one NPZ."""
+    names={str(name):index for index,name in enumerate(columns)}
+    trimmed=samples.copy();trimmed[:,names["t"]]-=cut_start_s
+    with np.load(out) as archive:
+        payload={name:np.asarray(archive[name]) for name in archive.files}
+    payload["samples"]=trimmed
+    if "alignment_start_epoch_s" in payload:
+        payload["alignment_start_epoch_s"]=np.asarray(
+            float(payload["alignment_start_epoch_s"])+cut_start_s,np.float64)
+    callback_kept=0
+    if "callback_inputs" in payload:
+        callback=payload["callback_inputs"].copy()
+        callback_columns={str(name):index for index,name in enumerate(payload["callback_input_columns"])}
+        callback_time=callback[:,callback_columns["t"]]
+        horizon=(float(np.max(payload["callback_future_offsets_s"]))
+                 if len(payload["callback_future_offsets_s"]) else 0.)
+        keep=(callback_time>=cut_start_s)&(callback_time+horizon<=cut_end_s+1e-9)
+        callback=callback[keep];callback[:,callback_columns["t"]]-=cut_start_s
+        payload["callback_inputs"]=callback
+        for field in ("callback_future_states","callback_future_commands"):
+            if field in payload:payload[field]=payload[field][keep]
+        callback_kept=int(keep.sum())
+    temporary=out.with_name(out.stem+".manual-trim.tmp.npz")
+    np.savez_compressed(temporary,**payload);temporary.replace(out)
+    metadata_path=out.with_suffix(".json")
+    metadata=json.loads(metadata_path.read_text()) if metadata_path.exists() else {}
+    previous_epoch=float(metadata.get("alignment_start_epoch_s",0.))
+    metadata["alignment_start_epoch_s"]=previous_epoch+cut_start_s
+    metadata["output_samples"]=int(len(trimmed))
+    metadata["manual_trim"]={"applied":True,"source_start_s":float(cut_start_s),
+        "source_end_s":float(cut_end_s),"duration_s":float(cut_end_s-cut_start_s),
+        "samples":int(len(trimmed)),"callback_anchors":callback_kept,
+        "controls":"s=start, e=end, q=save/next bag"}
+    metadata_path.write_text(json.dumps(metadata,indent=2)+"\n")
+    print(f"Saved manual trim: {cut_start_s:.3f}..{cut_end_s:.3f} s, "
+          f"{len(trimmed)} samples, {callback_kept} callback anchors -> {out}")
+    return trimmed
+
+
+def interactive_trim_saved_extract(out,samples,columns,dt,title,command_topic,signs,map_yaml,
+                                   bag_count,current_bag_number,review_collisions=False):
+    """Re-render immediately after each s/e cut, and persist only on q."""
+    selected=samples
+    while True:
+        start=float(selected[0,0]);end=float(selected[-1,0])
+        action=plot_extracted(selected,columns,dt,
+            f"{title} | selected source {start:.2f}..{end:.2f} s",
+            command_topic,signs,map_yaml,trim_controls=True,time_offset_s=start,
+            bag_count=bag_count,current_bag_number=current_bag_number,
+            review_collisions=review_collisions)
+        if action["key"]=="jump":
+            target=int(action["bag_number"])
+            print(f"Jumping without saving: {title} -> bag {target}/{bag_count}")
+            return None,target-1
+        if action["key"] in {"previous","next"}:
+            target=(current_bag_number-2 if action["key"]=="previous"
+                    else current_bag_number)
+            print(f"Moving {action['key']} without saving: {title} -> "
+                  f"bag {target+1}/{bag_count}")
+            return None,target
+        if action["key"] in (None,"q"):
+            return persist_manual_trim(out,selected,columns,start,end),None
+        index=int(np.argmin(np.abs(selected[:,0]-action["time"])))
+        candidate=(selected[index:] if action["key"]=="s" else selected[:index+1])
+        if len(candidate)<10:
+            print("Cut rejected: at least 10 samples must remain.")
+            continue
+        selected=candidate
+
+
+def review_saved_extracts(directory,args):
+    """Re-open all saved Step-1 NPZ files and highlight collision candidates."""
+    paths=sorted(Path(directory).expanduser().glob("*.npz"))
+    if not paths:raise SystemExit(f"No saved Step-1 NPZ files found in {directory}")
+    index=0
+    while index<len(paths):
+        path=paths[index]
+        with np.load(path) as archive:
+            if "samples" not in archive or "columns" not in archive:
+                print(f"[{index+1}/{len(paths)}] SKIPPED non-Step1 archive: {path}")
+                index+=1;continue
+            samples=np.asarray(archive["samples"]);columns=np.asarray(archive["columns"])
+            sample_dt=float(archive["dt"]) if "dt" in archive else args.dt
+        mask,_=collision_review_mask(samples,columns)
+        spans=_true_time_spans(samples[:,0],mask)
+        print(f"[{index+1}/{len(paths)}] {path.name}: "
+              f"{len(spans)} collision/stuck candidate interval(s) {spans}")
+        selected,jump_index=interactive_trim_saved_extract(
+            path,samples,columns,sample_dt,
+            f"Collision review {index+1}/{len(paths)}: {path.stem}",args.command_topic,
+            (IMU_WZ_SIGN,IMU_AX_SIGN,IMU_AY_SIGN),args.map_yaml,len(paths),index+1,
+            review_collisions=True)
+        if selected is None and jump_index is not None:
+            index=jump_index;continue
+        index+=1
+
+
+def backup_interactive_outputs(out):
+    """Move existing artifacts aside until the user explicitly presses q."""
+    backups=[]
+    for target in (out,out.with_suffix(".json")):
+        backup=target.with_name(target.name+".before-interactive")
+        if backup.exists():
+            raise RuntimeError(f"stale interactive backup exists: {backup}")
+        if target.exists():
+            target.replace(backup);backups.append((target,backup))
+    return backups
+
+
+def finish_interactive_outputs(out,backups,save):
+    """Commit q output, or restore the pre-run files after an arrow-key skip."""
+    targets=(out,out.with_suffix(".json"))
+    if save:
+        for _,backup in backups:
+            backup.unlink(missing_ok=True)
+        return
+    for target in targets:
+        target.unlink(missing_ok=True)
+    for target,backup in backups:
+        backup.replace(target)
 
 
 def extract_one(storage, out, args):
@@ -318,7 +684,9 @@ def extract_one(storage, out, args):
     signs,date=imu_signs(storage)
     pose,velocity,drive,imu,applied=read_streams(storage,args.pose_topic,args.velocity_topic,
         args.command_topic,args.imu_topic,args.applied_command_topic)
-    streams={"pose":pose,"velocity":velocity,"command":drive,"imu":imu,"applied_command":applied}
+    manual_bag=not len(applied)
+    streams={"pose":pose,"velocity":velocity,"command":drive,"imu":imu}
+    if not manual_bag:streams["applied_command"]=applied
     empty=[name for name,value in streams.items() if not len(value)]
     if empty: raise RuntimeError(f"{storage}: empty streams {empty}")
     start=max(x[0,0] for x in streams.values());end=min(x[-1,0] for x in streams.values())
@@ -326,7 +694,10 @@ def extract_one(storage, out, args):
     times=np.arange(start,end,args.dt)
     pp,pv=causal_hold(pose,times,args.max_pose_age);vv,vvalid=causal_hold(velocity,times,args.max_velocity_age)
     dd,dvalid=causal_hold(drive,times,args.max_command_age);ii,ivalid=causal_hold(imu,times,args.max_imu_age)
-    aa,avalid=causal_hold(applied,times,args.max_command_age)
+    if manual_bag:
+        aa=dd.copy();avalid=np.ones(len(times),bool)
+    else:
+        aa,avalid=causal_hold(applied,times,args.max_command_age)
     valid=pv&vvalid&dvalid&ivalid&avalid;times,pp,vv,dd,ii,aa=(x[valid] for x in (times,pp,vv,dd,ii,aa))
     if not len(times): raise RuntimeError(f"{storage}: no samples survived causal alignment")
     base=np.c_[times-times[0],pp[:,1:4],vv[:,1:4],dd[:,1:4]]
@@ -336,26 +707,41 @@ def extract_one(storage, out, args):
         base,args.dt,lookback_s=args.collision_pre_margin)
     physical_bad,physical_events=physical_inconsistency_mask(base,args.dt,
         pre_margin_s=args.physics_pre_margin,post_margin_s=args.physics_post_margin,
-        moving_vx=args.physics_moving_vx,frozen_pose_speed=args.physics_frozen_pose_speed,
+        moving_vx=args.physics_moving_vx,moving_command=args.physics_moving_command,
+        frozen_pose_speed=args.physics_frozen_pose_speed,
         distance_window_s=args.physics_distance_window,min_odom_distance=args.physics_min_odom_distance,
         min_pose_odom_ratio=args.physics_min_pose_odom_ratio,impact_decel=args.physics_impact_decel,
         max_pose_step=args.physics_max_pose_step,max_yaw_step=args.physics_max_yaw_step)
-    bad=collision|manual|physical_bad;kept=np.flatnonzero(~bad)
-    if not len(kept): raise RuntimeError(f"{storage}: collision filtering removed every sample")
-    breaks=np.flatnonzero((np.diff(kept)>1)|(np.diff(base[kept,0])>1.5*args.dt))+1
-    arrays=[];segments=[];discarded_short_fragments=[]
-    for bag_id,run in enumerate(np.split(kept,breaks)):
-        if len(run)<max(10,int(round(args.min_continuous_segment/args.dt))):
-            discarded_short_fragments.append({"candidate_id":bag_id,"samples":len(run),
-                "duration_s":float(max(0,len(run)-1)*args.dt)})
-            continue
-        part=base[run].copy();source_start=float(part[0,0]);part[:,0]-=source_start
-        arrays.append(np.c_[part,np.ones(len(part)),np.full(len(part),bag_id),ii[run,1:4]])
-        segments.append({"bag_id":bag_id,"samples":len(part),"source_start_s":source_start,
-                         "source_end_s":float(base[run[-1],0])})
-    if not arrays:
-        raise RuntimeError(
-            f"no continuous segment >= {args.min_continuous_segment:.2f} s survived filtering")
+    # A bag is one physical run. Once physics corruption appears,
+    # never splice a later recovery fragment back onto it. Callback jitter or
+    # a temporary sensor-age gap is recorded but is not a terminal collision.
+    # /ackermann_cmd and /drive are not identical actuator-stage signals, so
+    # their mismatch remains a diagnostic and must not cut an autonomous bag.
+    # Reverse is legitimate in manual bags. For autonomous bags only, recovery
+    # reverse is an additional early collision signal; pose-motion consistency
+    # remains the mode-independent collision rule.
+    bad=physical_bad if manual_bag else (physical_bad|collision)
+    bad_indices=np.flatnonzero(bad)
+    time_gaps=np.flatnonzero(np.diff(base[:,0])>1.5*args.dt)
+    bad_cutoff=int(bad_indices[0]) if len(bad_indices) else len(base)
+    cutoff=bad_cutoff
+    cutoff_causes=[]
+    if cutoff==bad_cutoff and len(bad_indices):
+        index=bad_cutoff
+        if physical_bad[index]:cutoff_causes.append("physical_inconsistency")
+        if not manual_bag and collision[index]:cutoff_causes.append("autonomous_reverse_recovery")
+    run=np.arange(cutoff,dtype=int)
+    minimum=max(10,int(round(args.min_continuous_segment/args.dt)))
+    if len(run)<minimum:
+        raise RuntimeError(f"{storage}: only {len(run)} prefix samples before terminal "
+                           f"cutoff {cutoff_causes}; need {minimum}")
+    part=base[run].copy();source_start=float(part[0,0]);part[:,0]-=source_start
+    arrays=[np.c_[part,np.ones(len(part)),np.zeros(len(part)),ii[run,1:4]]]
+    accepted_intervals=[(times[0]+float(base[run[0],0]),
+                         times[0]+float(base[run[-1],0]))]
+    segments=[{"bag_id":0,"samples":len(part),"source_start_s":source_start,
+               "source_end_s":float(base[run[-1],0])}]
+    discarded_short_fragments=[]
     samples=np.concatenate(arrays)
     columns=np.array(["t","x","y","yaw","vx","vy","omega","steer","accel","speed_cmd",
                       "split","bag_id","imu_wz","imu_ax","imu_ay"])
@@ -387,6 +773,16 @@ def extract_one(storage, out, args):
     samples=np.c_[samples,kf]
     columns=np.r_[columns,np.array(("kf_x","kf_y","kf_yaw","kf_vx","kf_vy",
                                     "kf_yaw_rate","kf_ax","kf_ay"))]
+    kf_snapshot={**ClassicModelParameters.from_mapping(cfg).runtime_updates(),
+        "classic_kf_process_var":list(map(float,cfg["classic_kf_process_var"])),
+        "classic_kf_measurement_var":list(map(float,cfg["classic_kf_measurement_var"])),
+        "classic_kf_initial_var":list(map(float,cfg["classic_kf_initial_var"])),
+        "kf_pose_vy_window_s":float(cfg.get("kf_pose_vy_window_s",.12))}
+    callback_inputs,callback_future_states,callback_future_commands,callback_future_offsets_s=(
+        build_callback_prediction_samples(pose,velocity,drive,imu,signs,cfg,
+            accepted_intervals,times[0],args.callback_future_horizon,args.dt,
+            args.max_command_age,args.max_imu_age,args.physics_max_pose_step,
+            args.physics_max_yaw_step))
     out.parent.mkdir(parents=True,exist_ok=True)
     np.savez_compressed(out,samples=samples,dt=args.dt,columns=columns,
                         alignment_start_epoch_s=np.array(start,np.float64),
@@ -397,35 +793,74 @@ def extract_one(storage, out, args):
                         imu_sign_cutover=np.array(IMU_SIGN_CUTOVER.isoformat()),
                         imu_axis_signs=np.array(signs,np.float32),
                         imu_ema_alpha=np.array(IMU_EMA_ALPHA,np.float32),
-                        kf_state_clamp_enabled=np.array(False))
+                        kf_state_clamp_enabled=np.array(False),
+                        kf_parameter_hash=np.array(ClassicModelParameters.from_mapping(cfg).digest()),
+                        kf_config_snapshot_json=np.array(json.dumps(kf_snapshot,sort_keys=True)),
+                        callback_inputs=callback_inputs,
+                        callback_input_columns=np.array(("t","x","y","yaw","vx","vy",
+                            "yaw_rate","steer_cmd","speed_cmd","imu_wz","imu_ax","imu_ay",
+                            "applied_steer","speed_reference",
+                            "steer_t-4","speed_t-4","steer_t-3","speed_t-3",
+                            "steer_t-2","speed_t-2","steer_t-1","speed_t-1",
+                            "steer_t","speed_t","bag_id")),
+                        callback_future_states=callback_future_states,
+                        callback_future_state_columns=np.array(("x","y","yaw","vx","vy","yaw_rate")),
+                        callback_future_commands=callback_future_commands,
+                        callback_future_command_columns=np.array(("steer_cmd","speed_cmd")),
+                        callback_future_offsets_s=callback_future_offsets_s,
+                        callback_anchor_source=np.array("every velocity/odom callback timestamp"),
+                        callback_gt_interpolation=np.array("linear pose(unwrapped yaw)+velocity; no extrapolation"),
+                        callback_actuator_initialization=np.array(
+                            "first applied_steer=steer_cmd; first speed_reference=measured vx"),
+                        callback_history_contract=np.array(
+                            "five actual callbacks ending at anchor; first four anchors discarded"))
     meta={"source":str(storage.resolve()),"pose_topic":args.pose_topic,"velocity_topic":args.velocity_topic,
           "command_topic":args.command_topic,"imu_topic":args.imu_topic,"alignment":"causal_hold",
           "recording_date":date.isoformat(),"imu_sign_cutover":IMU_SIGN_CUTOVER.isoformat(),
           "imu_axis_signs":{"wz":signs[0],"ax":signs[1],"ay":signs[2]},
           "imu_ema_alpha":IMU_EMA_ALPHA,
           "applied_command_topic":args.applied_command_topic,
+          "driving_mode":"manual" if manual_bag else "autonomous",
+          "driving_mode_detection":"manual iff /drive topic is absent",
+          "training_command_source":args.command_topic,
+          "applied_command_topic_available":not manual_bag,
           "alignment_start_epoch_s":float(start),"raw_aligned_samples":len(base),
           "removed_collision_samples":int(collision.sum()),"raw_command_mismatch_samples":int(command_mismatch.sum()),
           "collision_pre_margin_s":args.collision_pre_margin,
-          "removed_manual_with_margin_samples":int(manual.sum()),
+          "removed_manual_with_margin_samples":0,
+          "command_mismatch_with_margin_samples":int(manual.sum()),
           "removed_physical_inconsistency_samples":int(physical_bad.sum()),
           "physical_inconsistency_events":physical_events,
           "physical_filter":{"pre_margin_s":args.physics_pre_margin,"post_margin_s":args.physics_post_margin,
-              "moving_vx_mps":args.physics_moving_vx,"frozen_pose_speed_mps":args.physics_frozen_pose_speed,
+              "moving_vx_mps":args.physics_moving_vx,"moving_command_mps":args.physics_moving_command,
+              "frozen_pose_speed_mps":args.physics_frozen_pose_speed,
               "distance_window_s":args.physics_distance_window,"min_odom_distance_m":args.physics_min_odom_distance,
               "min_mcl_odom_distance_ratio":args.physics_min_pose_odom_ratio,
               "impact_decel_mps2":args.physics_impact_decel,"max_pose_step_m":args.physics_max_pose_step,
               "max_yaw_step_rad":args.physics_max_yaw_step},
-          "manual_filter":{"steer_tolerance":args.command_steer_match_tol,"speed_tolerance":args.command_speed_match_tol,
-                           "pre_margin_s":args.manual_pre_margin,"post_margin_s":args.manual_post_margin},
+          "command_topic_comparison":{"diagnostic_only":True,
+              "steer_tolerance":args.command_steer_match_tol,"speed_tolerance":args.command_speed_match_tol},
           "output_samples":len(samples),"collision_episodes":episodes,"segments":segments,
           "continuous_segment_policy":{"minimum_duration_s":args.min_continuous_segment,
               "discarded_short_fragments":discarded_short_fragments,
-              "mcl_alignment":"causal hold with maximum sample age"},
+              "mcl_alignment":"causal hold with maximum sample age",
+              "terminal_cutoff_index":cutoff,"terminal_cutoff_time_s":float(base[cutoff,0]) if cutoff<len(base) else None,
+              "terminal_cutoff_causes":cutoff_causes,
+              "nonterminal_sensor_gap_count":int(len(time_gaps)),
+              "command_mismatch_used_for_cutoff":False,
+              "reverse_recovery_used_for_cutoff":not manual_bag,
+              "suffix_after_first_anomaly_reused":False},
           "state_estimator":{"method":"causal MPPI classic-model EKF",
+              "classic_parameter_hash":ClassicModelParameters.from_mapping(cfg).digest(),
               "state_order":["x","y","yaw","vx","vy","yaw_rate"],
               "comparison_reference":["MCL x","MCL y","MCL yaw","odom vx","MCL-difference body vy","signed IMU yaw-rate"],
               "segments":kf_reports},
+          "callback_prediction_dataset":{"anchors":int(len(callback_inputs)),
+              "anchor_source":"every retained velocity/odom callback",
+              "future_offsets_s":callback_future_offsets_s.tolist(),
+              "future_state_order":["x","y","unwrapped_yaw","vx","vy","yaw_rate"],
+              "future_command_order":["steer_cmd","speed_cmd"],
+              "continuity":"no extrapolation; no retained segment crossing; pose/yaw jump rejection"},
           "split_policy":"single-bag-identical-train-test"}
     out.with_suffix(".json").write_text(json.dumps(meta,indent=2)+"\n")
     print(json.dumps({**meta,"output":str(out)},indent=2))
@@ -462,6 +897,7 @@ def main():
     p.add_argument("--physics-pre-margin",type=float,default=PHYSICS_PRE_MARGIN_S)
     p.add_argument("--physics-post-margin",type=float,default=PHYSICS_POST_MARGIN_S)
     p.add_argument("--physics-moving-vx",type=float,default=PHYSICS_MOVING_VX)
+    p.add_argument("--physics-moving-command",type=float,default=PHYSICS_MOVING_VX)
     p.add_argument("--physics-frozen-pose-speed",type=float,default=PHYSICS_FROZEN_POSE_SPEED)
     p.add_argument("--physics-distance-window",type=float,default=PHYSICS_DISTANCE_WINDOW_S)
     p.add_argument("--physics-min-odom-distance",type=float,default=PHYSICS_MIN_ODOM_DISTANCE)
@@ -480,22 +916,63 @@ def main():
                    help="discard filtered fragments shorter than this duration [s]")
     p.add_argument("--kf-pose-vy-window",type=float,default=.12,
                    help="causal trailing MCL regression window used by the runtime KF [s]")
+    p.add_argument("--callback-future-horizon",type=float,default=1.2,
+                   help="future GT horizon from every real velocity callback [s]")
+    p.add_argument("--map-yaml",type=Path,default=DEFAULT_MAP_YAML,
+                   help="ROS occupancy-map YAML overlaid on the trajectory panel")
+    p.add_argument("--interactive-trim",action=argparse.BooleanOptionalAction,default=True,
+                   help="s/e/q manual dataset trimming while each bag figure is open")
+    p.add_argument("--review-saved-collisions",action=argparse.BooleanOptionalAction,
+                   default=REVIEW_SAVED_COLLISIONS,
+                   help="skip extraction; review saved Step-1 NPZs and mark collision/stuck candidates")
     args = p.parse_args()
+
+    if args.review_saved_collisions:
+        if not USE_PLOT:raise SystemExit("--review-saved-collisions requires USE_PLOT=True")
+        review_saved_extracts(args.output,args)
+        return
 
     requested=[Path(x) for x in args.bag] if args.bag else list(BAG_PATH)
     if not requested: raise SystemExit("BAG_PATH is empty")
     storages=[resolve_storage(x) for x in requested]
-    for number,storage in enumerate(storages,1):
+    storage_index=0
+    while storage_index<len(storages):
+        number=storage_index+1;storage=storages[storage_index]
         out=output_for_bag(args.output,storage,len(storages)>1)
         print(f"[{number}/{len(storages)}] Extracting {storage} -> {out}")
+        backups=(backup_interactive_outputs(out)
+                 if USE_PLOT and args.interactive_trim else [])
         try:
             samples,columns,signs=extract_one(storage,out,args)
         except RuntimeError as error:
+            if USE_PLOT and args.interactive_trim:
+                finish_interactive_outputs(out,backups,save=False)
             print(f"[{number}/{len(storages)}] SKIPPED: {error}",file=sys.stderr)
+            storage_index+=1
             continue
-        if USE_PLOT: plot_extracted(samples,columns,args.dt,
-                                    f"Bag {number}/{len(storages)}: {storage.parent.name}",
-                                    args.command_topic,signs)
+        if USE_PLOT:
+            title=f"Bag {number}/{len(storages)}: {storage.parent.name}"
+            if args.interactive_trim:
+                try:
+                    selected,jump_index=interactive_trim_saved_extract(
+                        out,samples,columns,args.dt,title,args.command_topic,signs,
+                        args.map_yaml,len(storages),number)
+                except BaseException:
+                    finish_interactive_outputs(out,backups,save=False)
+                    raise
+                finish_interactive_outputs(out,backups,save=selected is not None)
+                if selected is None:
+                    if jump_index is not None:
+                        storage_index=jump_index
+                        continue
+                    print(f"[{number}/{len(storages)}] not saved; moving to next bag")
+                    storage_index+=1
+                    continue
+                samples=selected
+            else:
+                plot_extracted(samples,columns,args.dt,title,args.command_topic,
+                               signs,args.map_yaml)
+        storage_index+=1
 
 
 if __name__ == "__main__":

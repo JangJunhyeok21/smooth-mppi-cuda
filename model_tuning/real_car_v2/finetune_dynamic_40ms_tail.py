@@ -4,7 +4,7 @@ from pathlib import Path
 import importlib.util
 
 HERE = Path(__file__).resolve().parent
-SOURCE = HERE / "step_6_finetune_recursive.py"
+SOURCE = HERE / "residual_recursive_finetuning.py"
 spec = importlib.util.spec_from_file_location("recursive", SOURCE)
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)

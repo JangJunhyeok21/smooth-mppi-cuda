@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 import yaml
 
-from classic_model_kalman_smoother import smooth_classic_segment,wrap,_accelerations
+from classic_model_kalman_filter import smooth_classic_segment,wrap,_accelerations
 
 HERE=Path(__file__).resolve().parent;ROOT=HERE.parents[1]
 DEFAULT_DATA=ROOT/"model_tuning/data/ifac0810_0819_autonomous_physics_clean"

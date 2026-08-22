@@ -19,7 +19,7 @@ def _expanded_intervals(mask, pre_samples, post_samples):
 
 
 def physical_inconsistency_mask(samples, dt, pre_margin_s=1.2, post_margin_s=.5,
-                                moving_vx=.7, frozen_pose_speed=.12,
+                                moving_vx=.7, moving_command=.7, frozen_pose_speed=.12,
                                 distance_window_s=.5, min_odom_distance=.35,
                                 min_pose_odom_ratio=.65, impact_decel=-8.,
                                 max_pose_step=.30, max_yaw_step=.45):
@@ -31,26 +31,37 @@ def physical_inconsistency_mask(samples, dt, pre_margin_s=1.2, post_margin_s=.5,
     """
     count=len(samples)
     if count<2:return np.zeros(count,bool),[]
-    x,y,yaw,vx=(samples[:,i] for i in (1,2,3,4))
+    x,y,yaw,vx,speed_command=(samples[:,i] for i in (1,2,3,4,9))
     position_step=np.hypot(np.diff(x,prepend=x[0]),np.diff(y,prepend=y[0]))
     pose_speed=position_step/dt
     absolute_vx=np.abs(vx)
-    # Causal-hold can repeat one MCL sample. Require a sustained frozen pose,
-    # rather than flagging an individual repeated localization message.
-    frozen_seed=(absolute_vx>moving_vx)&(pose_speed<frozen_pose_speed)
-    frozen_count=max(3,round(.16/dt))
-    frozen=np.convolve(frozen_seed.astype(np.int16),np.ones(frozen_count,np.int16),mode="same") \
-        >= int(np.ceil(.75*frozen_count))
     window=max(3,round(distance_window_s/dt));kernel=np.ones(window)
     pose_distance=np.convolve(position_step,kernel,mode="same")
     odom_distance=np.convolve(absolute_vx*dt,kernel,mode="same")
+    command_distance=np.convolve(np.abs(speed_command)*dt,kernel,mode="same")
+    # Causal-hold naturally repeats MCL samples between localization callbacks.
+    # Judge a genuinely blocked car from distance accumulated over a full
+    # window, never from the fraction of individual zero pose steps.
+    maximum_frozen_distance=frozen_pose_speed*distance_window_s
+    pose_is_frozen=pose_distance<maximum_frozen_distance
+    minimum_odom_distance=max(min_odom_distance,moving_vx*distance_window_s)
+    minimum_command_distance=max(min_odom_distance,moving_command*distance_window_s)
+    frozen=pose_is_frozen&(odom_distance>minimum_odom_distance)
+    # A command can legitimately precede vehicle motion by actuator lag.
+    # Require wheel odometry to corroborate motion before declaring collision.
+    commanded_frozen=(pose_is_frozen&(command_distance>minimum_command_distance)
+                       &(odom_distance>minimum_odom_distance))
     ratio=pose_distance/np.maximum(odom_distance,1e-6)
-    wheel_spin_or_blocked=(odom_distance>min_odom_distance)&(ratio<min_pose_odom_ratio)
+    wheel_spin_or_blocked=frozen&(ratio<min_pose_odom_ratio)
     longitudinal_accel=np.r_[0.,np.diff(vx)/dt]
-    impact=longitudinal_accel<impact_decel
+    # Hard braking alone is valid, especially in manual driving. Treat a large
+    # vx drop as collision evidence only when pose/odom or commanded-motion
+    # consistency is already broken.
+    impact=(longitudinal_accel<impact_decel)&(frozen|commanded_frozen|wheel_spin_or_blocked)
     yaw_step=np.abs((np.diff(yaw,prepend=yaw[0])+np.pi)%(2*np.pi)-np.pi)
     localization_jump=(position_step>max_pose_step)|(yaw_step>max_yaw_step)
     causes={"frozen_pose_with_nonzero_vx":frozen,
+            "commanded_motion_without_pose_change":commanded_frozen,
             "mcl_odom_distance_mismatch":wheel_spin_or_blocked,
             "impact_like_vx_drop":impact,"localization_jump":localization_jump}
     seed=np.logical_or.reduce(tuple(causes.values()))

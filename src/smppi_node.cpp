@@ -491,15 +491,16 @@ private:
         for (size_t t=0; t<count; ++t) {
             const auto &s=best_traj[t];
             const auto &u=optimal_controls[t];
-            const float target=std::max(-mppi_params_.max_steer,std::min(
-                mppi_params_.max_steer,
+            constexpr float max_wheel_steer=.55f;
+            const float target=std::max(-max_wheel_steer,std::min(
+                max_wheel_steer,
                 mppi_params_.kinematic_steer_scale*u.steer+mppi_params_.kinematic_steer_bias));
             const float raw_rate=(target-applied_steer)/std::max(
                 mppi_params_.steer_servo_time_constant,1.0e-3f);
             const float applied_rate=std::max(-mppi_params_.actuator_max_steer_rate,
                 std::min(mppi_params_.actuator_max_steer_rate,raw_rate));
-            applied_steer=std::max(-mppi_params_.max_steer,std::min(
-                mppi_params_.max_steer,
+            applied_steer=std::max(-max_wheel_steer,std::min(
+                max_wheel_steer,
                 applied_steer+applied_rate*mppi_params_.model_dt));
 
             // CUDA와 같은 forward local search를 사용한다.
@@ -738,7 +739,7 @@ private:
         this->declare_parameter("kinematic_yaw_rate_time_constant",0.10);mppi_params_.kinematic_yaw_rate_time_constant=this->get_parameter("kinematic_yaw_rate_time_constant").as_double();
         this->declare_parameter("kinematic_max_yaw_accel",15.0);mppi_params_.kinematic_max_yaw_accel=this->get_parameter("kinematic_max_yaw_accel").as_double();
         this->declare_parameter("steer_servo_time_constant",0.08);mppi_params_.steer_servo_time_constant=this->get_parameter("steer_servo_time_constant").as_double();
-        this->declare_parameter("actuator_max_steer_rate",6.0);mppi_params_.actuator_max_steer_rate=this->get_parameter("actuator_max_steer_rate").as_double();
+        this->declare_parameter("actuator_max_steer_rate",6.544984694978735);mppi_params_.actuator_max_steer_rate=this->get_parameter("actuator_max_steer_rate").as_double();
         mppi_params_.actuator_steer_state=0.0f;
         mppi_params_.actuator_speed_reference_state=0.0f;
         this->declare_parameter("speed_reference_accel_time_constant",0.04);mppi_params_.speed_reference_accel_time_constant=this->get_parameter("speed_reference_accel_time_constant").as_double();
@@ -817,7 +818,25 @@ private:
         this->declare_parameter("imu_wz_bias",0.0);imu_wz_bias_=this->get_parameter("imu_wz_bias").as_double();
         this->declare_parameter("imu_ax_bias",0.0);imu_ax_bias_=this->get_parameter("imu_ax_bias").as_double();
         this->declare_parameter("imu_ay_bias",0.0);imu_ay_bias_=this->get_parameter("imu_ay_bias").as_double();
-        // The classic-model KF uses the same fixed Q/R/P0 as step_1.
+        // Keep the runtime EKF noise contract identical to Step 1/Step 2.
+        this->declare_parameter("classic_kf_process_var",
+            std::vector<double>{2e-5,2e-5,2e-5,3e-3,1e-2,3e-3});
+        this->declare_parameter("classic_kf_measurement_var",
+            std::vector<double>{0.015*0.015,0.015*0.015,0.01*0.01,0.025*0.025,
+                                0.12*0.12,0.02*0.02,0.35*0.35,0.35*0.35});
+        this->declare_parameter("classic_kf_initial_var",
+            std::vector<double>{0.01,0.01,0.005,0.03,0.12,0.02});
+        const auto kf_q=this->get_parameter("classic_kf_process_var").as_double_array();
+        const auto kf_r=this->get_parameter("classic_kf_measurement_var").as_double_array();
+        const auto kf_p0=this->get_parameter("classic_kf_initial_var").as_double_array();
+        if(kf_q.size()!=6||kf_r.size()!=8||kf_p0.size()!=6)
+            throw std::runtime_error("classic KF variance lengths must be Q=6, R=8, P0=6");
+        for(int i=0;i<6;++i){
+            lateral_velocity_kf_params_.process_var(i)=static_cast<float>(kf_q[i]);
+            lateral_velocity_kf_params_.initial_var(i)=static_cast<float>(kf_p0[i]);
+        }
+        for(int i=0;i<8;++i)
+            lateral_velocity_kf_params_.measurement_var(i)=static_cast<float>(kf_r[i]);
         lateral_velocity_kf_params_.mass=mppi_params_.mass;lateral_velocity_kf_params_.lf=mppi_params_.l_f;
         lateral_velocity_kf_params_.lr=mppi_params_.l_r;lateral_velocity_kf_params_.iz=mppi_params_.dynamic_mlp_I_z;
         lateral_velocity_kf_params_.bf=mppi_params_.dynamic_mlp_B_f;lateral_velocity_kf_params_.cf=mppi_params_.dynamic_mlp_C_f;

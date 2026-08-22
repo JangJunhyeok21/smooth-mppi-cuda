@@ -1788,8 +1788,9 @@ namespace mppi
                 const float heading_error=std::atan2(
                     std::sin(desired_heading-current_state.yaw),
                     std::cos(desired_heading-current_state.yaw));
-                float desired_applied_steer=std::min(params_.max_steer,
-                    std::max(-params_.max_steer,0.8f*heading_error));
+                constexpr float max_wheel_steer=.55f;
+                float desired_applied_steer=std::min(max_wheel_steer,
+                    std::max(-max_wheel_steer,0.8f*heading_error));
                 const float steer_scale=std::fabs(params_.kinematic_steer_scale)>1.0e-6f
                     ?params_.kinematic_steer_scale:1.0f;
                 const float recovery_steer=std::min(params_.max_steer,

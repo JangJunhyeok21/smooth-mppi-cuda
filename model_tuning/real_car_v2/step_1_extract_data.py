@@ -28,7 +28,7 @@ NEW_DATA_ROOTS = (
     # Path("/mnt/nas_custom/F1tenth/2026 IFAC/0817 (1)"),
     # Path("/mnt/nas_custom/F1tenth/2026 IFAC/0818"),
     # Path("/mnt/nas_custom/F1tenth/2026 IFAC/0819"),
-    Path("/mnt/nas_custom/F1tenth/2026 IFAC/0820"),
+    Path("/mnt/nas_custom/F1tenth/2026 IFAC/0821"),
 )
 # Keep F5 configuration robust when a single Path is assigned without tuple
 # syntax.  A pathlib.Path is path-like but is not a collection of roots.
@@ -43,15 +43,15 @@ BAG_PATH = sorted({metadata.parent for root in NEW_DATA_ROOTS
 OUTPUT_PATH = PROJECT_ROOT / "model_tuning/data/ifac0810_0819_autonomous_physics_clean"
 # F5/direct execution is an interactive inspection workflow.  Set this to
 # False only for unattended batch extraction.
-USE_PLOT = True
+USE_PLOT = False
 # Set True for F5 to skip rosbag extraction and re-open the saved NPZ files.
-REVIEW_SAVED_COLLISIONS = True
+REVIEW_SAVED_COLLISIONS = False
 # Bag-to-pose verification shows that the sensor/body convention changed by
 # 2026-08-15. 0810--0813 y/z oppose MPPI FLU; 0815 onward already match it.
 IMU_WZ_SIGN = 1.0; IMU_AX_SIGN = 1.0; IMU_AY_SIGN = 1.0; IMU_EMA_ALPHA = .25
 IMU_SIGN_CUTOVER = dtlib.date(2026, 8, 15)
 POSE_TOPIC = "/newmcl_pose"; VELOCITY_TOPIC = "/odom"; COMMAND_TOPIC = "/ackermann_cmd"; IMU_TOPIC = "/imu/data"
-DEFAULT_MAP_YAML = (PROJECT_ROOT / "f1tenth_gym_ros/src/f1tenth_gym_ros/maps/map1/map1.yaml") # 그냥 시각화 용도임
+DEFAULT_MAP_YAML = (PROJECT_ROOT / "data/map2/ifac_in_ctrack_0821.yaml") # 그냥 시각화 용도임
 APPLIED_COMMAND_TOPIC = "/drive"
 COMMAND_STEER_MATCH_TOL = 1e-4; COMMAND_SPEED_MATCH_TOL = 1e-4
 # A rollout starting shortly before a manual takeover still contains a response
@@ -403,7 +403,7 @@ def plot_extracted(samples, columns, dt, title, command_topic, signs=(1.,1.,1.),
         odom_dvx[ii]=np.gradient(vx[ii],local,edge_order=edge) if len(ii)>1 else 0.
         odom_dvy[ii]=np.gradient(odom_vy[ii],local,edge_order=edge) if len(ii)>1 else 0.
     wz_sign,ax_sign,ay_sign=signs
-    fig,axes=plt.subplots(5,2,figsize=(16,22));fig.suptitle(title,y=.995)
+    fig,axes=plt.subplots(4,4,figsize=(22,18));fig.suptitle(title,y=.995)
     panels=axes.flat;ax=panels[0]
     if map_yaml is not None:
         draw_occupancy_map(ax,map_yaml)
@@ -506,9 +506,20 @@ def plot_extracted(samples, columns, dt, title, command_topic, signs=(1.,1.,1.),
     consistency_axes[1].plot(t,odom_dvy+signed_imu_wz*vx,color="tab:purple",alpha=.65,
                              label="d(odom vy)/dt + IMU yaw-rate·odom vx")
     consistency_axes[1].set_ylabel("m/s²");consistency_axes[1].set_title("IMU ay vs KF model/state-derived ay")
-    panels[9].axis("off")
+    command_axes=panels[9:11]
+    command_axes[0].plot(t,speed_cmd,color="tab:red",lw=1.5,label="vx command")
+    command_axes[0].plot(t,vx,color="tab:orange",alpha=.7,label="raw odom vx")
+    command_axes[0].plot(t,kf_vx,color="tab:blue",alpha=.8,label="KF vx")
+    command_axes[0].set_ylabel("m/s")
+    command_axes[0].set_title("Longitudinal command and measured/estimated vx")
+    command_axes[1].plot(t,steer,color="tab:red",lw=1.5,label="steer command")
+    command_axes[1].axhline(0.,color="black",lw=.7,alpha=.4)
+    command_axes[1].set_ylabel("rad")
+    command_axes[1].set_title("Steering command")
+    for axis in panels[11:]:
+        axis.axis("off")
 
-    for axis in panels[1:9]:
+    for axis in panels[1:11]:
         for span_start,span_end in review_spans:
             axis.axvspan(span_start,span_end,color="red",alpha=.13,zorder=0)
         axis.set_xlabel("time [s]");axis.grid(alpha=.25);axis.legend(fontsize=8)
@@ -520,7 +531,7 @@ def plot_extracted(samples, columns, dt, title, command_topic, signs=(1.,1.,1.),
         review_text=(f"; red={len(review_spans)} collision/stuck candidate interval(s)"
                      if review_collisions else "")
         fig.suptitle(title+review_text+"\ns/e=cut; q=save; ←=previous unsaved; →=next unsaved; 1..9=jump; j=two-digit jump",y=.997)
-        time_axes=set(panels[1:9])
+        time_axes=set(panels[1:11])
         def on_key(event):
             key=(event.key or "").lower()
             if key.isdigit() and key!="0":
@@ -641,7 +652,14 @@ def interactive_trim_saved_extract(out,samples,columns,dt,title,command_topic,si
 def review_saved_extracts(directory,args):
     """Re-open all saved Step-1 NPZ files and highlight collision candidates."""
     paths=sorted(Path(directory).expanduser().glob("*.npz"))
-    if not paths:raise SystemExit(f"No saved Step-1 NPZ files found in {directory}")
+    if not paths:
+        raise SystemExit(
+            f"No saved Step-1 NPZ files found in {directory}.\n"
+            "REVIEW_SAVED_COLLISIONS=True (--review-saved-collisions) requests review-only "
+            "mode, but there is nothing to review.\n"
+            "저장된 NPZ가 없는데 saved-collision 검토 모드로 실행했습니다. "
+            "이 의도가 맞는지 확인하세요. 새 bag을 추출하려면 "
+            "REVIEW_SAVED_COLLISIONS=False 또는 --no-review-saved-collisions를 사용하세요.")
     index=0
     while index<len(paths):
         path=paths[index]
@@ -667,11 +685,22 @@ def review_saved_extracts(directory,args):
 
 def backup_interactive_outputs(out):
     """Move existing artifacts aside until the user explicitly presses q."""
+    # An interrupted F5/debug session can leave the last committed files under
+    # ``.before-interactive`` and partially regenerated files at the targets.
+    # Recover the committed pair first instead of forcing the user to delete a
+    # backup that may contain their manual trim decisions.
+    targets=(out,out.with_suffix(".json"))
+    stale=[(target,target.with_name(target.name+".before-interactive"))
+           for target in targets
+           if target.with_name(target.name+".before-interactive").exists()]
+    if stale:
+        print(f"Recovering {len(stale)} stale interactive backup(s) for {out.stem}")
+        for target,backup in stale:
+            target.unlink(missing_ok=True)
+            backup.replace(target)
     backups=[]
-    for target in (out,out.with_suffix(".json")):
+    for target in targets:
         backup=target.with_name(target.name+".before-interactive")
-        if backup.exists():
-            raise RuntimeError(f"stale interactive backup exists: {backup}")
         if target.exists():
             target.replace(backup);backups.append((target,backup))
     return backups

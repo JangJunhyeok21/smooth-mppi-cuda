@@ -207,12 +207,28 @@ private:
         const float ax = std::clamp(
             params_.speed_kp * (speed_reference_ - state(3)),
             params_.min_accel, params_.max_accel);
-        const float ay =
+        const float dynamic_ay =
             (front_lateral_force * std::cos(applied_steer_)
                 + rear_lateral_force) / params_.mass;
-        const float yaw_acceleration =
+        const float dynamic_yaw_acceleration =
             (params_.lf * front_lateral_force * std::cos(applied_steer_)
                 - params_.lr * rear_lateral_force) / params_.iz;
+
+        const float blend_input = std::clamp(
+            (std::abs(state(3)) - 0.2f) / 0.3f, 0.0f, 1.0f);
+        const float dynamic_blend = blend_input * blend_input
+            * (3.0f - 2.0f * blend_input);
+        constexpr float low_speed_time_constant = 0.1f;
+        const float kinematic_yaw_rate = state(3) * std::tan(applied_steer_)
+            / std::max(params_.lf + params_.lr, 1.0e-6f);
+        const float kinematic_ay = state(3) * state(5)
+            - state(4) / low_speed_time_constant;
+        const float kinematic_yaw_acceleration =
+            (kinematic_yaw_rate - state(5)) / low_speed_time_constant;
+        const float ay = dynamic_blend * dynamic_ay
+            + (1.0f - dynamic_blend) * kinematic_ay;
+        const float yaw_acceleration = dynamic_blend * dynamic_yaw_acceleration
+            + (1.0f - dynamic_blend) * kinematic_yaw_acceleration;
 
         return {ax, ay, yaw_acceleration};
     }

@@ -11,6 +11,12 @@ def _pacejka(slip,fz,b,c,d,e):
     return fz*d*np.sin(c*np.arctan(z-e*(z-np.arctan(z))))
 
 
+def _dynamic_speed_blend(vx):
+    """C1 blend: no-slip kinematic below 0.2 m/s, Pacejka above 0.5 m/s."""
+    u=np.clip((abs(vx)-.2)/.3,0.,1.)
+    return u*u*(3.-2.*u)
+
+
 def _accelerations(state,applied,speed_reference,cfg):
     _,_,_,vx,vy,r=state;lf=float(cfg["l_f"]);lr=float(cfg["l_r"])
     mass=float(cfg["mass"]);iz=float(cfg["dynamic_mlp_I_z"]);safe=max(abs(vx),.5)
@@ -20,8 +26,18 @@ def _accelerations(state,applied,speed_reference,cfg):
     fyr=_pacejka(ar,fzr,*[float(cfg[f"dynamic_mlp_{q}_r"]) for q in "BCDE"])
     ax=np.clip(float(cfg["speed_servo_kp"])*(speed_reference-vx),
                float(cfg["min_accel"]),float(cfg["max_accel"]))
-    ay=(fyf*np.cos(applied)+fyr)/mass
-    rdot=(lf*fyf*np.cos(applied)-lr*fyr)/iz
+    dynamic_ay=(fyf*np.cos(applied)+fyr)/mass
+    dynamic_rdot=(lf*fyf*np.cos(applied)-lr*fyr)/iz
+    blend=_dynamic_speed_blend(vx)
+    # Below the dynamic-model validity range, drive vy to zero and yaw rate to
+    # the no-slip bicycle value.  The body identity vy_dot=ay-vx*r makes this
+    # ay choice decay vy without leaving a fictitious stationary tire force.
+    low_speed_tau=.1
+    kinematic_r=vx*np.tan(applied)/max(lf+lr,1e-6)
+    kinematic_ay=vx*r-vy/low_speed_tau
+    kinematic_rdot=(kinematic_r-r)/low_speed_tau
+    ay=blend*dynamic_ay+(1.-blend)*kinematic_ay
+    rdot=blend*dynamic_rdot+(1.-blend)*kinematic_rdot
     return np.array((ax,ay,rdot))
 
 

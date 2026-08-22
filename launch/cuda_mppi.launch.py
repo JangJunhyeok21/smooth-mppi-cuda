@@ -19,6 +19,11 @@ def generate_launch_description():
 
     param_file = LaunchConfiguration("param_file")
     mlp_param_file = LaunchConfiguration("mlp_param_file")
+    dynamics_model = LaunchConfiguration("dynamics_model")
+    csv_file_path = LaunchConfiguration("csv_file_path")
+    is_simulation = LaunchConfiguration("is_simulation")
+    obstacle_avoidance_enabled = LaunchConfiguration(
+        "obstacle_avoidance_enabled")
 
     config_dir = os.path.join(
         get_package_share_directory("smppi_cuda_controller"), "config")
@@ -43,12 +48,23 @@ def generate_launch_description():
                 default_value=default_mlp_param_file,
                 description="Path to MLP-only correction limits YAML file",
             ),
+            DeclareLaunchArgument("dynamics_model", default_value="DYNAMIC_SERVO_LAG"),
+            DeclareLaunchArgument("csv_file_path", default_value=os.path.join(
+                get_package_share_directory("smppi_cuda_controller"),
+                "data", "map2", "map2_mppi_track.csv")),
+            DeclareLaunchArgument("is_simulation", default_value="true"),
+            DeclareLaunchArgument("obstacle_avoidance_enabled", default_value="false"),
             Node(
                 package="smppi_cuda_controller",
                 executable="smppi_node",
                 name="smppi_controller",
                 output="screen",
-                parameters=[param_file, mlp_param_file, path_overrides],
+                parameters=[param_file, mlp_param_file, path_overrides, {
+                    "dynamics_model": dynamics_model,
+                    "csv_file_path": csv_file_path,
+                    "is_simulation": is_simulation,
+                    "obstacle_avoidance_enabled": obstacle_avoidance_enabled,
+                }],
             ),
         ]
     )

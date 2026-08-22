@@ -149,8 +149,13 @@ def main():
                 front_term - parameters.E_f * (front_term - torch.atan(front_term))))
             rear_force = rear_load * parameters.D_r * torch.sin(parameters.C_r * torch.atan(
                 rear_term - parameters.E_r * (rear_term - torch.atan(rear_term))))
-            base_ay = (front_force * torch.cos(applied) + rear_force) / mass
-            yaw_accel = (lf * front_force * torch.cos(applied) - lr * rear_force) / inertia
+            blend_input=torch.clamp((torch.abs(vx)-.2)/.3,0.,1.)
+            dynamic_blend=blend_input*blend_input*(3.-2.*blend_input)
+            dynamic_ay = (front_force * torch.cos(applied) + rear_force) / mass
+            dynamic_yaw_accel = (lf * front_force * torch.cos(applied) - lr * rear_force) / inertia
+            kinematic_yaw_rate=vx*torch.tan(applied)/max(lf+lr,1e-6)
+            base_ay=dynamic_blend*dynamic_ay+(1.-dynamic_blend)*(vx*yaw_rate-vy/.1)
+            yaw_accel=dynamic_blend*dynamic_yaw_accel+(1.-dynamic_blend)*(kinematic_yaw_rate-yaw_rate)/.1
             classic_next = torch.stack((vx + (base_ax + vy * yaw_rate) * DT,
                 vy + (base_ay - vx * yaw_rate) * DT,
                 yaw_rate + yaw_accel * DT), 1)
@@ -159,6 +164,7 @@ def main():
                 history.reshape(len(ids), -1), acceleration), 1)
             residual = torch.clamp(network((features - mean) / std),
                                    -residual_limit, residual_limit)
+            residual=residual*dynamic_blend[:,None]
             state = classic_next + residual * DT
             acceleration = torch.stack((base_ax + residual[:, 0],
                                         base_ay + residual[:, 1]), 1)

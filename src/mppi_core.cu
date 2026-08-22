@@ -433,9 +433,33 @@ namespace mppi
         const float rear_lateral_tire_force =
             params.F_zr * params.dynamic_mlp_D_r
             * sinf(params.dynamic_mlp_C_r * atanf(rear_pacejka_inner));
-        const float classic_lateral_acceleration =
+        const float dynamic_lateral_acceleration =
             (front_lateral_tire_force * cosf(steering_angle)
              + rear_lateral_tire_force) / params.mass;
+        const float classic_yaw_moment =
+            params.l_f * front_lateral_tire_force * cosf(steering_angle)
+            - params.l_r * rear_lateral_tire_force;
+        const float dynamic_yaw_acceleration =
+            classic_yaw_moment / params.dynamic_mlp_I_z;
+        const float blend_input = fminf(1.0f, fmaxf(0.0f,
+            (fabsf(current_state.v) - 0.2f) / 0.3f));
+        const float dynamic_blend = blend_input * blend_input
+            * (3.0f - 2.0f * blend_input);
+        constexpr float LOW_SPEED_TIME_CONSTANT = 0.1f;
+        const float kinematic_yaw_rate = current_state.v * tanf(steering_angle)
+            / fmaxf(params.l_f + params.l_r, 1.0e-6f);
+        const float kinematic_lateral_acceleration =
+            current_state.v * current_state.omega
+            - current_state.vy / LOW_SPEED_TIME_CONSTANT;
+        const float kinematic_yaw_acceleration =
+            (kinematic_yaw_rate - current_state.omega)
+            / LOW_SPEED_TIME_CONSTANT;
+        const float classic_lateral_acceleration =
+            dynamic_blend * dynamic_lateral_acceleration
+            + (1.0f - dynamic_blend) * kinematic_lateral_acceleration;
+        const float classic_yaw_acceleration =
+            dynamic_blend * dynamic_yaw_acceleration
+            + (1.0f - dynamic_blend) * kinematic_yaw_acceleration;
 
         // Body-frame equations: ax=d(vx)/dt-vy*r, ay=d(vy)/dt+vx*r.
         const float classic_next_longitudinal_velocity = current_state.v
@@ -444,11 +468,8 @@ namespace mppi
         const float classic_next_lateral_velocity = current_state.vy
             + (classic_lateral_acceleration
                - current_state.v * current_state.omega) * dynamics_dt;
-        const float classic_yaw_moment =
-            params.l_f * front_lateral_tire_force * cosf(steering_angle)
-            - params.l_r * rear_lateral_tire_force;
         const float classic_next_yaw_rate = current_state.omega
-            + classic_yaw_moment / params.dynamic_mlp_I_z * dynamics_dt;
+            + classic_yaw_acceleration * dynamics_dt;
 
         // Keep this exact 22-D order synchronized with the canonical 40 ms
         // residual dataset/training pipeline:
@@ -502,6 +523,11 @@ namespace mppi
             fmaxf(-params.mlp_max_residual_ay, residual_derivatives[1]));
         residual_derivatives[2] = fminf(params.mlp_max_residual_yaw_accel,
             fmaxf(-params.mlp_max_residual_yaw_accel, residual_derivatives[2]));
+        // The residual network is trained on dynamic-driving data. Fade its
+        // correction out with the same low-speed transition as the base model.
+        residual_derivatives[0] *= dynamic_blend;
+        residual_derivatives[1] *= dynamic_blend;
+        residual_derivatives[2] *= dynamic_blend;
 
         State next_state = current_state;
         next_state.v = classic_next_longitudinal_velocity

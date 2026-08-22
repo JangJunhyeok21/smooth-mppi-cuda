@@ -13,16 +13,19 @@ import numpy as np
 
 
 ROOT = Path(__file__).resolve().parents[1]
-
+MAP_NAME = "map2"
+DEFAULT_INPUT = ROOT / f"data/{MAP_NAME}/{MAP_NAME}_mppi_track.csv"
+DEFAULT_OUTPUT = ROOT / f"data/{MAP_NAME}/{MAP_NAME}_mppi_track_optimal.csv"
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--input", type=Path,
-                        default=ROOT / "data/map1/map1_centerline.csv")
+                        default=DEFAULT_INPUT,
+                        help="STEP3 MPPI-contract CSV containing center, widths, and explicit boundaries")
     parser.add_argument("--output", type=Path,
-                        default=ROOT / "data/map1/map1_raceline.csv")
+                        default=DEFAULT_OUTPUT)
     parser.add_argument("--plot", type=Path,
-                        default=ROOT / "model_tuning/results/map1_raceline.png")
+                        default=ROOT / f"model_tuning/results/{MAP_NAME}_raceline.png")
     parser.add_argument("--alpha-racer-root", type=Path, default=Path(
         "/home/a/alpha-RACER/global_racetrajectory_optimization"))
     parser.add_argument("--vehicle-width", type=float, default=0.90,
@@ -31,6 +34,8 @@ def parse_args() -> argparse.Namespace:
                         help="raceline 곡률 상한 [1/m]")
     parser.add_argument("--step", type=float, default=0.05,
                         help="출력 raceline 간격 [m]")
+    parser.add_argument("--optimizer-step", type=float, default=0.10,
+                        help="IQP 입력 centerline 간격 [m]. 출력 간격과 독립적이다.")
     return parser.parse_args()
 
 
@@ -40,9 +45,35 @@ def main() -> None:
     import trajectory_planning_helpers as tph
 
     raw = np.genfromtxt(args.input, delimiter=",", names=True)
-    # alpha-RACER contract: x, y, right width, left width.
-    reftrack = np.column_stack((raw["x_m"], raw["y_m"],
-                                raw["w_tr_right_m"], raw["w_tr_left_m"]))
+    required = {
+        "x_m", "y_m", "w_tr_left_m", "w_tr_right_m",
+        "left_x_m", "left_y_m", "right_x_m", "right_y_m",
+    }
+    available = set(raw.dtype.names or ())
+    missing = sorted(required - available)
+    if missing:
+        raise ValueError(
+            f"{args.input} is not a STEP3 MPPI track CSV; missing columns "
+            f"{missing}. Use {DEFAULT_INPUT} or pass --input explicitly.")
+    # alpha-RACER contract: x, y, right width, left width. STEP3 stores a
+    # dense 1 cm path; feeding all of it to IQP makes the QP unnecessarily
+    # large. Periodically resample the complete contract at the requested
+    # optimizer/output spacing while retaining the original CSV below for
+    # physical-boundary projection.
+    dense_reftrack = np.column_stack((raw["x_m"], raw["y_m"],
+                                      raw["w_tr_right_m"], raw["w_tr_left_m"]))
+    dense_xy_closed = np.vstack((dense_reftrack[:, :2], dense_reftrack[0, :2]))
+    dense_segments = np.linalg.norm(np.diff(dense_xy_closed, axis=0), axis=1)
+    dense_s = np.r_[0.0, np.cumsum(dense_segments)]
+    if args.step <= 0.0 or args.optimizer_step <= 0.0:
+        raise ValueError("--step and --optimizer-step must be positive")
+    query_s = np.arange(0.0, dense_s[-1], args.optimizer_step)
+    closed_contract = np.vstack((dense_reftrack, dense_reftrack[0]))
+    reftrack = np.column_stack([
+        np.interp(query_s, dense_s, closed_contract[:, column])
+        for column in range(closed_contract.shape[1])])
+    print(f"IQP reference resampled: {len(dense_reftrack)} -> {len(reftrack)} "
+          f"points ({args.optimizer_step:.3f} m); output step={args.step:.3f} m")
     # The map utility already produces a smooth, equally sampled closed line.
     # Build the same spline/normal inputs that alpha-RACER's prep_track hands
     # to TUM's minimum-curvature QP. This also avoids its legacy SciPy fmin
@@ -97,12 +128,13 @@ def main() -> None:
     with args.output.open("w", newline="") as handle:
         writer = csv.writer(handle)
         writer.writerow(["x_m", "y_m", "psi_rad", "kappa_radpm",
-                         "w_tr_left_m", "w_tr_right_m",
+                         "w_tr_left_m", "w_tr_right_m", "w_total_m",
                          "boundary_ref_x_m", "boundary_ref_y_m",
                          "left_x_m", "left_y_m", "right_x_m", "right_y_m"])
         for i in range(len(race)):
             writer.writerow([race[i, 0], race[i, 1], yaw[i], curvature[i],
                              left_width[i], right_width[i],
+                             left_width[i] + right_width[i],
                              center_xy[i, 0], center_xy[i, 1],
                              left_xy[i, 0], left_xy[i, 1],
                              right_xy[i, 0], right_xy[i, 1]])
@@ -116,7 +148,7 @@ def main() -> None:
     points = ax.scatter(race[:, 0], race[:, 1], c=np.abs(curvature), s=8,
                         cmap="turbo", label="minimum-curvature raceline")
     fig.colorbar(points, ax=ax, label="|curvature| [1/m]")
-    ax.axis("equal"); ax.grid(True); ax.legend(); ax.set_title("Map1 optimized raceline")
+    ax.axis("equal"); ax.grid(True); ax.legend(); ax.set_title(f"{MAP_NAME} optimized raceline")
     fig.tight_layout(); fig.savefig(args.plot, dpi=180)
     print(f"wrote {len(race)} points: {args.output}")
     print(f"alpha range [{alpha.min():.3f}, {alpha.max():.3f}] m, "

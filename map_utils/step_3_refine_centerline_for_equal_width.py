@@ -32,11 +32,14 @@ def _load_local_cubic_spline_2d():
 
 CubicSpline2D = _load_local_cubic_spline_2d()
 
-MAP_NAME = "berlin"
-DEFAULT_CENTERLINE = Path(f"/home/a/RL-RACER/simulators/map_paths/{MAP_NAME}/centerline.csv")
-DEFAULT_WIDTH_PROFILE = Path(f"/home/a/RL-RACER/simulators/map_paths/{MAP_NAME}/width_profile.csv")
-DEFAULT_CENTERLINE_OUTPUT = Path(f"/home/a/RL-RACER/simulators/map_paths/{MAP_NAME}/centerline_equal.csv")
-DEFAULT_WIDTH_OUTPUT = Path(f"/home/a/RL-RACER/simulators/map_paths/{MAP_NAME}/width_profile_equal.csv")
+MAP_NAME = "map2"
+ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_CENTERLINE = Path(f"{ROOT}/data/{MAP_NAME}/centerline.csv")
+DEFAULT_WIDTH_PROFILE = Path(f"{ROOT}/data/{MAP_NAME}/width_profile.csv")
+DEFAULT_REFINED_BOUNDARY = Path(f"{ROOT}/data/{MAP_NAME}/refined_width_profile_xy.csv")
+DEFAULT_BOUNDARY_FALLBACK = Path(f"{ROOT}/data/{MAP_NAME}/width_profile_xy.csv")
+DEFAULT_CENTERLINE_OUTPUT = Path(f"{ROOT}/data/{MAP_NAME}/centerline_equal.csv")
+DEFAULT_WIDTH_OUTPUT = Path(f"{ROOT}/data/{MAP_NAME}/width_profile_equal.csv")
 
 USE_SPLINE = True
 
@@ -70,6 +73,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--centerline-csv", type=Path, default=DEFAULT_CENTERLINE, help="Input centerline CSV")
     parser.add_argument("--width-profile-csv", type=Path, default=DEFAULT_WIDTH_PROFILE, help="Input asymmetric width profile")
+    parser.add_argument(
+        "--refined-boundary-xy", type=Path, default=DEFAULT_REFINED_BOUNDARY,
+        help="STEP2 explicit boundary CSV. When present, these coordinates are preserved exactly.")
     parser.add_argument("--centerline-output", type=Path, default=DEFAULT_CENTERLINE_OUTPUT, help="Output midpoint centerline CSV")
     parser.add_argument("--width-output", type=Path, default=DEFAULT_WIDTH_OUTPUT, help="Output equal-width profile CSV")
     parser.add_argument("--xy-output", type=Path, default=None, help="Output refined boundary-point CSV (default: <width-output-stem>_xy.csv)")
@@ -358,25 +364,36 @@ def main() -> None:
     if args.tangent_window <= 0.0:
         raise ValueError(f"--tangent-window must be positive, got {args.tangent_window}")
 
-    old_s, left_width, right_width = load_width_profile(args.width_profile_csv)
-    old_track = TrackMap.from_centerline_csv(
-        str(args.centerline_csv),
-        track_width=1.0,
-        name=args.centerline_csv.stem,
-    )
-    old_centers, left_normals = sample_old_centerline_geometry(
-        old_track,
-        old_s,
-        tangent_window=float(args.tangent_window),
-    )
-    new_centerline, equal_width = equalize_centerline_samples(
-        old_centers,
-        left_normals,
-        left_width,
-        right_width,
-    )
-    raw_centerline = new_centerline
-    if args.spline_refine:
+    explicit_boundary_path = args.refined_boundary_xy
+    if not explicit_boundary_path.is_file() and explicit_boundary_path == DEFAULT_REFINED_BOUNDARY:
+        explicit_boundary_path = DEFAULT_BOUNDARY_FALLBACK
+    preserve_explicit_boundaries = explicit_boundary_path.is_file()
+    explicit_left = explicit_right = None
+    if preserve_explicit_boundaries:
+        with explicit_boundary_path.open(newline="") as stream:
+            refined_rows = list(csv.DictReader(stream))
+        required = {"left_x", "left_y", "right_x", "right_y"}
+        if not refined_rows or not required.issubset(refined_rows[0]):
+            raise ValueError(
+                f"Refined boundary CSV requires {sorted(required)}: "
+                f"{explicit_boundary_path}")
+        explicit_left = np.asarray(
+            [[float(row["left_x"]), float(row["left_y"])] for row in refined_rows])
+        explicit_right = np.asarray(
+            [[float(row["right_x"]), float(row["right_y"])] for row in refined_rows])
+        new_centerline = 0.5 * (explicit_left + explicit_right)
+        equal_width = 0.5 * np.linalg.norm(explicit_left - explicit_right, axis=1)
+        raw_centerline = new_centerline
+    else:
+        old_s, left_width, right_width = load_width_profile(args.width_profile_csv)
+        old_track = TrackMap.from_centerline_csv(
+            str(args.centerline_csv), track_width=1.0, name=args.centerline_csv.stem)
+        old_centers, left_normals = sample_old_centerline_geometry(
+            old_track, old_s, tangent_window=float(args.tangent_window))
+        new_centerline, equal_width = equalize_centerline_samples(
+            old_centers, left_normals, left_width, right_width)
+        raw_centerline = new_centerline
+    if args.spline_refine and not preserve_explicit_boundaries:
         new_centerline = refine_closed_centerline_with_spline(
             raw_centerline,
             prefilter_window=float(args.spline_prefilter_window),
@@ -387,9 +404,17 @@ def main() -> None:
 
     new_s = centerline_arc_lengths(new_centerline)
     width_rows = build_width_rows(new_s, equal_width)
-    boundary_rows = build_boundary_rows(
-        new_centerline, new_s, equal_width, tangent_window=float(args.tangent_window)
-    )
+    if preserve_explicit_boundaries:
+        boundary_rows = [{
+            "s": float(s), "left_width": float(w), "right_width": float(w),
+            "left_x": float(left[0]), "left_y": float(left[1]),
+            "right_x": float(right[0]), "right_y": float(right[1]),
+        } for s, w, left, right in zip(
+            new_s, equal_width, explicit_left, explicit_right)]
+    else:
+        boundary_rows = build_boundary_rows(
+            new_centerline, new_s, equal_width,
+            tangent_window=float(args.tangent_window))
 
     save_centerline(args.centerline_output, new_centerline)
     save_width_profile(args.width_output, width_rows)
@@ -398,7 +423,8 @@ def main() -> None:
         if args.xy_output is None else args.xy_output
     )
     mppi_output = (
-        MPPI_DATA_DIR / f"{infer_map_name(args.centerline_csv)}_centerline.csv"
+        args.centerline_csv.parent /
+        f"{infer_map_name(args.centerline_csv)}_mppi_track.csv"
         if args.mppi_output is None else args.mppi_output
     )
     save_sample_points(xy_output, boundary_rows)
@@ -407,7 +433,7 @@ def main() -> None:
     print(f"Saved {len(width_rows)} equal-width rows to {args.width_output}")
     print(f"Saved {len(boundary_rows)} refined boundary rows to {xy_output}")
     print(f"Saved {len(boundary_rows)} MPPI track rows to {mppi_output}")
-    if args.spline_refine:
+    if args.spline_refine and not preserve_explicit_boundaries:
         raw_metrics = curvature_summary(raw_centerline)
         refined_metrics = curvature_summary(new_centerline)
         print(
@@ -415,6 +441,8 @@ def main() -> None:
             f"(max segment, p95 |curvature|, p95 |delta curvature|): "
             f"raw={raw_metrics}, refined={refined_metrics}"
         )
+    if preserve_explicit_boundaries:
+        print(f"Preserved STEP2 explicit boundaries from {explicit_boundary_path}")
 
 
 if __name__ == "__main__":

@@ -29,6 +29,8 @@ ADAM_RESTARTS = int(os.environ.get("CLASSIC_ADAM_RESTARTS","3"))
 ADAM_STEPS = int(os.environ.get("CLASSIC_ADAM_STEPS","600"))
 SURROGATE_SAMPLES = int(os.environ.get("CLASSIC_SURROGATE_SAMPLES","400"))
 SURROGATE_PROPOSALS = int(os.environ.get("CLASSIC_SURROGATE_PROPOSALS","40000"))
+DE_POPSIZE = int(os.environ.get("CLASSIC_DE_POPSIZE","6"))
+DE_MAXITER = int(os.environ.get("CLASSIC_DE_MAXITER","35"))
 
 NAMES = ("B_f", "C_f", "D_f", "E_f", "B_r", "C_r", "D_r", "E_r")
 BOUNDS = np.asarray((
@@ -68,6 +70,8 @@ ENDPOINT_TAIL_LOSS_WEIGHT = 0.0
 ENDPOINT_TAIL_QUANTILE = 0.90
 GT_CONSISTENCY_MODE = "adjust_states_to_pose"
 VY_POSE_DERIVATIVE_SMOOTH_WINDOW_S = 0.20
+# Longitudinal load transfer. Zero preserves the static axle loads.
+LOAD_TRANSFER_H_CG_M = 0.0
 
 
 class RegressionData(dict):
@@ -419,8 +423,9 @@ def rollout_numpy(parameters, data, window_starts, config, return_residual=False
     lf, lr, mass, iz = [float(config[key]) for key in
                         ("l_f", "l_r", "mass", "dynamic_mlp_I_z")]
     wheelbase = lf + lr
-    front_load = mass*9.81*lr/wheelbase
-    rear_load = mass*9.81*lf/wheelbase
+    static_front_load = mass*9.81*lr/wheelbase
+    static_rear_load = mass*9.81*lf/wheelbase
+    h_cg=float(config.get("load_transfer_h_cg_m",LOAD_TRANSFER_H_CG_M))
     dt = .04
     for step in range(HORIZON):
         row = window_starts + 2*step
@@ -453,12 +458,22 @@ def rollout_numpy(parameters, data, window_starts, config, return_residual=False
         alpha_rear = -np.arctan2(vy-lr*yaw_rate, safe_vx)
         front_term = Bf*alpha_front
         rear_term = Br*alpha_rear
+        front_load=np.maximum(.05*mass*9.81,
+            static_front_load-mass*ax*h_cg/wheelbase)
+        rear_load=np.maximum(.05*mass*9.81,
+            static_rear_load+mass*ax*h_cg/wheelbase)
         fy_front = front_load*Df*np.sin(Cf*np.arctan(
             front_term-Ef*(front_term-np.arctan(front_term))))
         fy_rear = rear_load*Dr*np.sin(Cr*np.arctan(
             rear_term-Er*(rear_term-np.arctan(rear_term))))
-        ay = (fy_front*np.cos(applied_steer)+fy_rear)/mass
-        yaw_accel = (lf*fy_front*np.cos(applied_steer)-lr*fy_rear)/iz
+        dynamic_ay = (fy_front*np.cos(applied_steer)+fy_rear)/mass
+        dynamic_yaw_accel = (lf*fy_front*np.cos(applied_steer)-lr*fy_rear)/iz
+        blend_input=np.clip((np.abs(vx)-.2)/.3,0.,1.)
+        dynamic_blend=blend_input**2*(3.-2.*blend_input)
+        kinematic_yaw_rate=vx*np.tan(applied_steer)/max(wheelbase,1e-6)
+        ay=dynamic_blend*dynamic_ay+(1.-dynamic_blend)*(vx*yaw_rate-vy/.1)
+        yaw_accel=(dynamic_blend*dynamic_yaw_accel
+                   +(1.-dynamic_blend)*(kinematic_yaw_rate-yaw_rate)/.1)
         state = np.column_stack((
             vx+(ax+vy*yaw_rate)*dt,
             vy+(ay-vx*yaw_rate)*dt,
@@ -841,7 +856,10 @@ def torch_rollout_loss(raw_parameters, data, window_starts, config, device):
             -float(config["actuator_max_speed_reference_rate"]),float(config["actuator_max_speed_reference_rate"]))*0.02
     Bf,Cf,Df,Ef,Br,Cr,Dr,Er=parameters
     lf,lr,mass,iz=[float(config[k]) for k in ("l_f","l_r","mass","dynamic_mlp_I_z")]
-    front_load=mass*9.81*lr/(lf+lr); rear_load=mass*9.81*lf/(lf+lr); dt=.04
+    wheelbase=lf+lr
+    static_front_load=mass*9.81*lr/wheelbase
+    static_rear_load=mass*9.81*lf/wheelbase
+    h_cg=float(config.get("load_transfer_h_cg_m",LOAD_TRANSFER_H_CG_M));dt=.04
     for step in range(HORIZON):
         row=starts_tensor+2*step; command=feature[row,3:5]
         target=torch.clamp(float(config["kinematic_steer_scale"])*command[:,0]
@@ -863,10 +881,20 @@ def torch_rollout_loss(raw_parameters, data, window_starts, config, device):
         safe=torch.clamp(torch.abs(vx),min=.5)
         af=applied-torch.atan2(vy+lf*yaw_rate,safe); ar=-torch.atan2(vy-lr*yaw_rate,safe)
         bf=Bf*af;br=Br*ar
+        front_load=torch.clamp(static_front_load-mass*ax*h_cg/wheelbase,
+                               min=.05*mass*9.81)
+        rear_load=torch.clamp(static_rear_load+mass*ax*h_cg/wheelbase,
+                              min=.05*mass*9.81)
         fyf=front_load*Df*torch.sin(Cf*torch.atan(bf-Ef*(bf-torch.atan(bf))))
         fyr=rear_load*Dr*torch.sin(Cr*torch.atan(br-Er*(br-torch.atan(br))))
-        ay=(fyf*torch.cos(applied)+fyr)/mass
-        yaw_accel=(lf*fyf*torch.cos(applied)-lr*fyr)/iz
+        dynamic_ay=(fyf*torch.cos(applied)+fyr)/mass
+        dynamic_yaw_accel=(lf*fyf*torch.cos(applied)-lr*fyr)/iz
+        blend_input=torch.clamp((torch.abs(vx)-.2)/.3,0.,1.)
+        dynamic_blend=blend_input*blend_input*(3.-2.*blend_input)
+        kinematic_yaw_rate=vx*torch.tan(applied)/max(wheelbase,1e-6)
+        ay=dynamic_blend*dynamic_ay+(1.-dynamic_blend)*(vx*yaw_rate-vy/.1)
+        yaw_accel=(dynamic_blend*dynamic_yaw_accel
+                   +(1.-dynamic_blend)*(kinematic_yaw_rate-yaw_rate)/.1)
         state=torch.stack((vx+(ax+vy*yaw_rate)*dt,
                            vy+(ay-vx*yaw_rate)*dt,yaw_rate+yaw_accel*dt),1)
         predictions.append(state)
@@ -981,6 +1009,52 @@ def print_pose_metric_change(title,previous,fitted):
         reduction=100.*(old-new)/old if abs(old)>1e-12 else float("nan")
         print(f"  {label}: {old:.6g} -> {new:.6g} {unit} "
               f"(reduction {reduction:+.2f}%)")
+
+
+def plot_tire_force_curves(data, previous, fitted, config):
+    """Compare normalized Pacejka force curves and mark observed slip ranges."""
+    import matplotlib.pyplot as plt
+    state=(np.asarray(data["teacher_state"],float)
+           if "teacher_state" in data.files else np.asarray(data["features"][:,:3],float))
+    applied=np.asarray(data["features"][:,5],float)
+    valid=np.asarray(data["valid"],bool)&np.isfinite(state).all(1)&np.isfinite(applied)
+    vx,vy,yaw_rate=state[valid].T
+    safe=np.maximum(np.abs(vx),.5)
+    front_observed=applied[valid]-np.arctan2(vy+float(config["l_f"])*yaw_rate,safe)
+    rear_observed=-np.arctan2(vy-float(config["l_r"])*yaw_rate,safe)
+    observed=(front_observed,rear_observed)
+    max_observed=max(float(np.quantile(np.abs(values),.995)) for values in observed)
+    alpha_limit=np.clip(max(np.deg2rad(20.),1.25*max_observed),np.deg2rad(20.),np.deg2rad(60.))
+    alpha=np.linspace(-alpha_limit,alpha_limit,1001)
+
+    def normalized_force(values,offset):
+        b,c,d,e=np.asarray(values[offset:offset+4],float)
+        z=b*alpha
+        return d*np.sin(c*np.arctan(z-e*(z-np.arctan(z))))
+
+    fig,axes=plt.subplots(1,2,figsize=(14,5.5),sharey=True)
+    for axis,title,offset,values in zip(
+            axes,("Front tire","Rear tire"),(0,4),observed):
+        axis.plot(np.rad2deg(alpha),normalized_force(previous,offset),lw=2,
+                  color="tab:orange",label="baseline (pre-fit)")
+        axis.plot(np.rad2deg(alpha),normalized_force(fitted,offset),lw=2,
+                  color="tab:blue",label="regressed candidate")
+        q01,q99=np.quantile(values,(.01,.99));qmin,qmax=np.min(values),np.max(values)
+        axis.axvspan(np.rad2deg(q01),np.rad2deg(q99),color="tab:green",alpha=.14,
+                    label="observed slip 1–99%")
+        axis.axvline(np.rad2deg(qmin),color="tab:green",ls=":",alpha=.7,
+                     label="observed min/max")
+        axis.axvline(np.rad2deg(qmax),color="tab:green",ls=":",alpha=.7)
+        axis.axhline(0.,color="black",lw=.7);axis.axvline(0.,color="black",lw=.7)
+        axis.set_title(f"{title}: normalized lateral force")
+        axis.set_xlabel("slip angle α [deg]");axis.grid(alpha=.25);axis.legend(fontsize=8)
+    axes[0].set_ylabel("Fy / Fz")
+    fig.suptitle("Pacejka Fy–α curves: baseline vs Step 3 candidate")
+    fig.tight_layout()
+    output=OUT/"pacejka_fy_vs_alpha.png";fig.savefig(output,dpi=180)
+    if SHOW_PLOTS:plt.show()
+    plt.close(fig)
+    return output
 
 
 def alternating_pacejka_inertia(initial_tire, data, train, config):
@@ -1403,6 +1477,7 @@ def main():
     global BOUNDS, REFERENCE
     OUT.mkdir(parents=True,exist_ok=True)
     config=yaml.safe_load((ROOT/"config/params.yaml").read_text())["/**"]["ros__parameters"]
+    config["load_transfer_h_cg_m"]=float(LOAD_TRANSFER_H_CG_M)
     data,data_contract=load_regression_data(DATA,config)
     local_fraction=float(os.environ.get("CLASSIC_LOCAL_FRACTION","0"))
     if local_fraction>0:
@@ -1468,12 +1543,14 @@ def main():
             json.dumps(evaluation_report,indent=2)+"\n")
         plot_path=plot_open_loop_evaluation(
             data,current,selected,previous_config,fitted_config,validation,test)
+        tire_plot_path=plot_tire_force_curves(data,current,selected,fitted_config)
         print(json.dumps(evaluation_report,indent=2))
         print_pose_metric_change("Step 3 evaluation-only validation",
             evaluation_report["current_metrics"],
             evaluation_report["saved_fitted_metrics"])
         print("Step 3 evaluation-only mode: optimizer was not executed.")
         print(f"open-loop plot: {plot_path}")
+        print(f"Pacejka Fy-vs-alpha plot: {tire_plot_path}")
         return
     previous_position_scale=float(config.get("kinematic_position_speed_scale",1.0))
     fitted_position_scale=(estimate_position_speed_scale(data,train)
@@ -1485,7 +1562,7 @@ def main():
           f"{fitted_position_scale:.6f}")
     # Existing robust optimizer retained strictly as a comparison baseline.
     de=differential_evolution(lambda p:objective(p,data,train,config),BOUNDS,
-        seed=SEED,popsize=6,maxiter=35,tol=8e-4,polish=False,workers=1)
+        seed=SEED,popsize=DE_POPSIZE,maxiter=DE_MAXITER,tol=8e-4,polish=False,workers=1)
     ls=least_squares(lambda p:(rollout_numpy(p,data,train,config)[0]
         -rollout_numpy(p,data,train,config)[1]).ravel(),de.x,
         bounds=(BOUNDS[:,0],BOUNDS[:,1]),loss="soft_l1",f_scale=.3,max_nfev=100)
@@ -1529,6 +1606,7 @@ def main():
         "evaluation_contract":evaluation_contract,
         "use_validation_test_split":USE_VALIDATION_TEST_SPLIT,
         "gt_consistency_mode":GT_CONSISTENCY_MODE,
+        "load_transfer_h_cg_m":float(LOAD_TRANSFER_H_CG_M),
         "state_target":("MCL-pose-derived [vx,vy,yaw_rate]"
                         if GT_CONSISTENCY_MODE=="adjust_states_to_pose"
                         else "original classic-KF [vx,vy,yaw_rate]"),
@@ -1584,6 +1662,7 @@ def main():
             print("Step 3 parameters were not applied: deployment gate failed")
     plot_path=plot_open_loop_evaluation(
         data,current,selected,previous_config,fitted_config,validation,test)
+    tire_plot_path=plot_tire_force_curves(data,current,selected,fitted_config)
     print(json.dumps(report,indent=2))
     print("\nTuned classic-model parameters "
           f"(selected method: {selected_method}):")
@@ -1597,6 +1676,7 @@ def main():
     print_pose_metric_change("Step 3 validation",
         runtime_previous_metrics["validation"],selected_metrics["validation"])
     print(f"open-loop plot: {plot_path}")
+    print(f"Pacejka Fy-vs-alpha plot: {tire_plot_path}")
 
 
 if __name__=="__main__":main()

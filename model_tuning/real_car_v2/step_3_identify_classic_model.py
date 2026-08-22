@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Step 3: identify Pacejka front/rear parameters and yaw inertia I_z."""
 from pathlib import Path
+import os
 
 import numpy as np
 
@@ -11,20 +12,21 @@ import classic_model_regression as regression
 # User-configurable Step 3 settings
 # ---------------------------------------------------------------------------
 ROOT = Path(__file__).resolve().parents[2]
-DATA_PATH = ROOT / "model_tuning/data/ifac0810_0819_autonomous_physics_clean"
-OUTPUT_DIR = ROOT / "model_tuning/results/dynamic_40ms_regression"
+DATA_PATH = ROOT / "model_tuning/data/0821"
+OUTPUT_DIR = Path(os.environ.get("DYNAMIC_REGRESSION_OUT",
+    ROOT / "model_tuning/results/dynamic_40ms_regression"))
 ROLLOUT_HORIZON_STEPS = 60       # 60 * 40 ms = 2.4 s
 MAX_WINDOWS_PER_BAG = 80
 ACTUATOR_WARMUP_SAMPLES = 40     # 40 * 20 ms = 0.8 s
 RANDOM_SEED = 31
-USE_PLOT = True
-INTERACTIVE_BAG_INSPECTOR = True  # p + time click opens detailed open-loop plots
+USE_PLOT = os.environ.get("STEP3_USE_PLOT","1")!="0"
+INTERACTIVE_BAG_INSPECTOR = os.environ.get("STEP3_INTERACTIVE_PLOT","1")!="0"  # p + time click opens detailed open-loop plots
 TRAJECTORY_TIME_LABEL_INTERVAL_S = 1.0
 EVALUATE_ONLY = False  # True: load saved params and only regenerate diagnostics
 EVALUATION_PARAMS_PATH = OUTPUT_DIR / "params.json"
 # Apply a gate-passing candidate to config/params.yaml for the next numbered
 # stage. A rejected/boundary candidate remains isolated in params.json.
-APPLY_ACCEPTED_PARAMS_TO_YAML = True
+APPLY_ACCEPTED_PARAMS_TO_YAML = os.environ.get("STEP3_APPLY_TO_YAML","1")!="0"
 
 # False: fit with every split and reuse one train bag for performance metrics
 # and plots. This is an in-sample diag01.nostic, not held-out generalization.
@@ -54,16 +56,19 @@ YAW_TRAJECTORY_LOSS_WEIGHT = 1.5
 
 # Smoothing used only by "adjust_states_to_pose" before pose differentiation.
 VY_POSE_DERIVATIVE_SMOOTH_WINDOW_S = 0.20
+# 0 disables longitudinal load transfer. Set a measured/selected CG height to
+# use Fzf=(m*g*l_r-m*ax*h_cg)/L and Fzr=(m*g*l_f+m*ax*h_cg)/L.
+LOAD_TRANSFER_H_CG_M = float(os.environ.get("LOAD_TRANSFER_H_CG_M","0.0"))
 
 # Pacejka bounds: B, C, D, E for front and rear tires.
 PACEJKA_B_F_BOUNDS = (0.2, 30.0)
 PACEJKA_C_F_BOUNDS = (0.0, 2.5)
 PACEJKA_D_F_BOUNDS = (0.05, 3.5)
-PACEJKA_E_F_BOUNDS = (-2.0, 1.0)
+PACEJKA_E_F_BOUNDS = (-10.0, 1.0)
 PACEJKA_B_R_BOUNDS = (0.2, 30.0)
 PACEJKA_C_R_BOUNDS = (0.0, 2.5)
 PACEJKA_D_R_BOUNDS = (0.05, 3.5)
-PACEJKA_E_R_BOUNDS = (-2.0, 1.0)
+PACEJKA_E_R_BOUNDS = (-10.0, 1.0)
 YAW_INERTIA_MIN = 0.005
 YAW_INERTIA_MAX = 0.5
 
@@ -100,6 +105,7 @@ def main():
     regression.POSITION_LOSS_WEIGHT = POSITION_LOSS_WEIGHT
     regression.YAW_TRAJECTORY_LOSS_WEIGHT = YAW_TRAJECTORY_LOSS_WEIGHT
     regression.VY_POSE_DERIVATIVE_SMOOTH_WINDOW_S = VY_POSE_DERIVATIVE_SMOOTH_WINDOW_S
+    regression.LOAD_TRANSFER_H_CG_M = LOAD_TRANSFER_H_CG_M
     regression.BOUNDS = np.asarray((
         PACEJKA_B_F_BOUNDS, PACEJKA_C_F_BOUNDS,
         PACEJKA_D_F_BOUNDS, PACEJKA_E_F_BOUNDS,

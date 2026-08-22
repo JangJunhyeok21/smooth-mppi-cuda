@@ -13,7 +13,7 @@ import visualize_and_regress_longitudinal_actuator as regression
 # User-configurable Step 2 settings
 # ---------------------------------------------------------------------------
 ROOT = Path(__file__).resolve().parents[2]
-SOURCE_DIRS = (ROOT / "model_tuning/data/ifac0810_0819_autonomous_physics_clean",)
+SOURCE_DIRS = (ROOT / "model_tuning/data/0821",)
 OUTPUT_DIR = ROOT / "model_tuning/results/longitudinal_actuator_regression"
 
 # Identified parameter bounds. Units: Kp [1/s], time constants [s].

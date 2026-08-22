@@ -5,7 +5,7 @@ from dataclasses import replace
 from pathlib import Path
 import numpy as np,torch,yaml
 from torch import nn
-HERE=Path(__file__).resolve().parent;sys.path.insert(0,str(HERE));from contract import ClassicModelParameters,IMU_RESIDUAL_FEATURES,Contract,actuator_step,longitudinal_actuator_step
+HERE=Path(__file__).resolve().parent;sys.path.insert(0,str(HERE));from contract import ClassicModelParameters,IMU_RESIDUAL_FEATURES,Contract,actuator_step,longitudinal_actuator_step,low_speed_gate
 from callback_training_data import load_callback_archives
 # User-editable defaults. The script runs without command-line arguments.
 ROOT=HERE.parents[1]
@@ -29,7 +29,7 @@ def main():
  state=d['initial_state'];cmd=d['commands'][:,0];ap=d['actuator'][:,0].copy();sr=d['actuator'][:,1].copy();base=np.empty_like(state)
  lf,lr,m,iz=float(cfg['l_f']),float(cfg['l_r']),float(cfg['mass']),params.Iz;wb=lf+lr;fzf=m*9.81*lr/wb;fzr=m*9.81*lf/wb
  for i in range(len(state)):
-  ap[i],_=actuator_step(ap[i],cmd[i,0],cmd[i,1],state[i,0],c);sr[i],bax=longitudinal_actuator_step(sr[i],cmd[i,1],state[i,0],c);vx,vy,r=state[i];safe=max(abs(vx),.5);af=ap[i]-np.arctan2(vy+lf*r,safe);ar=-np.arctan2(vy-lr*r,safe);bf=params.B_f*af;br=params.B_r*ar;fyf=fzf*params.D_f*np.sin(params.C_f*np.arctan(bf-params.E_f*(bf-np.arctan(bf))));fyr=fzr*params.D_r*np.sin(params.C_r*np.arctan(br-params.E_r*(br-np.arctan(br))));ay=(fyf*np.cos(ap[i])+fyr)/m;rd=(lf*fyf*np.cos(ap[i])-lr*fyr)/iz;base[i]=(vx+(bax+vy*r)*.04,vy+(ay-vx*r)*.04,r+rd*.04)
+  ap[i],_=actuator_step(ap[i],cmd[i,0],cmd[i,1],state[i,0],c);sr[i],bax=longitudinal_actuator_step(sr[i],cmd[i,1],state[i,0],c);vx,vy,r=state[i];safe=max(abs(vx),.5);af=ap[i]-np.arctan2(vy+lf*r,safe);ar=-np.arctan2(vy-lr*r,safe);bf=params.B_f*af;br=params.B_r*ar;fyf=fzf*params.D_f*np.sin(params.C_f*np.arctan(bf-params.E_f*(bf-np.arctan(bf))));fyr=fzr*params.D_r*np.sin(params.C_r*np.arctan(br-params.E_r*(br-np.arctan(br))));blend=low_speed_gate(vx,c);dynamic_ay=(fyf*np.cos(ap[i])+fyr)/m;dynamic_rd=(lf*fyf*np.cos(ap[i])-lr*fyr)/iz;kinematic_r=vx*np.tan(ap[i])/max(wb,1e-6);ay=blend*dynamic_ay+(1-blend)*(vx*r-vy/.1);rd=blend*dynamic_rd+(1-blend)*(kinematic_r-r)/.1;base[i]=(vx+(bax+vy*r)*.04,vy+(ay-vx*r)*.04,r+rd*.04)
  previous=d['history'][:,-4];x=np.c_[state,cmd,ap,cmd[:,0]-previous,base,d['history'],d['imu']].astype(np.float32);y=((d['target_state'][:,0]-base)/.04).astype(np.float32);s=d['split'];v=np.isfinite(x).all(1)&np.isfinite(y).all(1);tr=v&(s==0);va=v&(s==1);metadata={'source':'Step-1 callback archives (direct, no residual NPZ)','classic_parameter_hash':params.digest(),'target':'40 ms online MPPI-model EKF transition minus classic transition'};mean=x[tr].mean(0);std=np.maximum(x[tr].std(0),1e-4);ym=y[tr].mean(0);ys=np.maximum(y[tr].std(0),1e-3);dev=torch.device(a.device if torch.cuda.is_available() else 'cpu');xt=torch.from_numpy((x-mean)/std).to(dev);yt=torch.from_numpy((y-ym)/ys).to(dev);net=Net();
  if a.initialize_from:net.load_state_dict(torch.load(Path(a.initialize_from)/'model.pt',map_location='cpu',weights_only=True))
  net=net.to(dev);opt=torch.optim.AdamW(net.parameters(),8e-4,weight_decay=1e-4);idx=np.flatnonzero(tr);b=d['bag_name'];prob=np.array([4 if x[i,0]>=3 else 1 for i in idx],float);counts={q:max(1,np.sum(b[idx]==q)) for q in np.unique(b[idx])};prob*=np.array([1/np.sqrt(counts[b[i]]) for i in idx]);prob/=prob.sum();weights=torch.tensor((1.,2.,2.),device=dev);best=(1e99,None,0);stale=0

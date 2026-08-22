@@ -170,7 +170,8 @@ def warmup_applied_steer(commands, c):
 
 
 def low_speed_gate(vx, c=Contract()):
-    return np.ones_like(vx, dtype=float) if np.ndim(vx) else 1.0
+    u=np.clip((np.abs(vx)-.2)/.3,0.,1.)
+    return u*u*(3.-2.*u)
 
 
 def residual_gates(vx, c=Contract()):

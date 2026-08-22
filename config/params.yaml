@@ -2,7 +2,7 @@
   ros__parameters:
     # 사용 모델: dynamic_mlp_residual_servo_lag 또는 DYNAMIC_SERVO_LAG
     # MLP 모델만 아래 학습 가중치를 읽고, Classic 모델은 이 파일을 읽지 않는다.
-    dynamics_model: dynamic_mlp_residual_servo_lag
+    dynamics_model: DYNAMIC_SERVO_LAG
     dynamic_mlp_servo_lag_weights_path: /home/a/smooth-mppi-cuda/config/dynamic_40ms_residual_servo_lag.bin
     # IMU는 odom 시각에 causal 정렬되어 6-state MPPI classic-model EKF에 사용된다.
     imu_topic: /imu/data
@@ -161,22 +161,23 @@
     E_r: 0.0597
 
     # 0807 dynamic regression; used only by dynamic_mlp_residual.
-    dynamic_mlp_B_f: 2.953760430861983
-    dynamic_mlp_C_f: 0.5456862161676654
-    dynamic_mlp_D_f: 1.0782877341711266
-    dynamic_mlp_E_f: 0.3651404680862931
-    dynamic_mlp_B_r: 6.134912954899586
-    dynamic_mlp_C_r: 0.844040423951348
-    dynamic_mlp_D_r: 0.6964821942279866
-    dynamic_mlp_E_r: -0.2022697457153276
+    dynamic_mlp_B_f: 4.16766713
+    dynamic_mlp_C_f: 0.0965687874
+    dynamic_mlp_D_f: 3.49991551
+    dynamic_mlp_E_f: -10.0
+    dynamic_mlp_B_r: 6.18341084
+    dynamic_mlp_C_r: 0.184955889
+    dynamic_mlp_D_r: 1.76127063
+    dynamic_mlp_E_r: -3.23353467
     dynamic_mlp_I_z: 0.06362626658698842
 
     # --- Runtime environment and topics ---
     # Required CSV columns: x_m, y_m, w_tr_left_m, w_tr_right_m.
-    # Despite the filename, map1_centerline.csv contains both the centerline
-    # and lane widths. PathPublisher converts them to center/left/right paths.
+    # The MPPI track contains the centerline and left/right lane widths.
+    # PathPublisher converts them to center/left/right paths.
     # Relative paths are resolved from the installed package share directory.
-    csv_file_path: data/map1/map1_centerline.csv
+    # map_utils/step_3_refine_centerline_for_equal_width.py의 최종 산출물.
+    csv_file_path: data/map2/map2_mppi_track.csv
     frame_id: map
     publish_rate: 1.0
     # true : simulator pose + twist come from simulation_odom_topic

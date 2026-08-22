@@ -15,7 +15,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 from callback_training_data import load_callback_archives
 from contract import (ClassicModelParameters, Contract, actuator_step,
-                      longitudinal_actuator_step)
+                      longitudinal_actuator_step, low_speed_gate)
 
 DATA = ROOT / "model_tuning/data/ifac0810_0819_autonomous_physics_clean"
 PARAMS = ROOT / "model_tuning/results/dynamic_40ms_regression/params.json"
@@ -110,8 +110,12 @@ def rollout(data, indices, weights, parameters, disable_mlp, residual_limit):
                 front_term - parameters.E_f * (front_term - np.arctan(front_term))))
             rear_force = rear_load * parameters.D_r * np.sin(parameters.C_r * np.arctan(
                 rear_term - parameters.E_r * (rear_term - np.arctan(rear_term))))
-            base_ay = (front_force * np.cos(applied[row]) + rear_force) / mass
-            yaw_accel = (lf * front_force * np.cos(applied[row]) - lr * rear_force) / inertia
+            blend=low_speed_gate(vx,contract)
+            dynamic_ay = (front_force * np.cos(applied[row]) + rear_force) / mass
+            dynamic_yaw_accel = (lf * front_force * np.cos(applied[row]) - lr * rear_force) / inertia
+            kinematic_yaw_rate=vx*np.tan(applied[row])/max(lf+lr,1e-6)
+            base_ay=blend*dynamic_ay+(1.-blend)*(vx*yaw_rate-vy/.1)
+            yaw_accel=blend*dynamic_yaw_accel+(1.-blend)*(kinematic_yaw_rate-yaw_rate)/.1
             state[row] = (vx + (base_ax + vy * yaw_rate) * DT,
                           vy + (base_ay - vx * yaw_rate) * DT,
                           yaw_rate + yaw_accel * DT)
@@ -121,6 +125,7 @@ def rollout(data, indices, weights, parameters, disable_mlp, residual_limit):
             history.reshape(len(indices), -1), acceleration_trace[-1]), axis=1)
         residual = np.zeros_like(state) if disable_mlp else np.clip(
             forward(features, weights), -residual_limit, residual_limit)
+        residual *= low_speed_gate(current_state[:,0],contract)[:,None]
         state += residual * DT
         acceleration += residual[:, :2]
         yaw = pose[:, 2]

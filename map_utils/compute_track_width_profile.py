@@ -2,9 +2,7 @@ from __future__ import annotations
 
 import argparse
 import csv
-import importlib.util
 import math
-import sys
 from pathlib import Path
 from typing import Any
 
@@ -12,23 +10,83 @@ import numpy as np
 import yaml
 
 
-_TRACK_MAP_CANDIDATES = [
-    Path(__file__).resolve().parents[1] / "multi_car_rl" / "track_map.py",
-    Path("/home/a/RL-RACER/multi_car_rl/track_map.py"),
-]
-TRACK_MAP_PATH = next((path for path in _TRACK_MAP_CANDIDATES if path.is_file()), None)
-if TRACK_MAP_PATH is None:
-    raise FileNotFoundError(
-        "Could not find multi_car_rl/track_map.py in: "
-        + ", ".join(str(path) for path in _TRACK_MAP_CANDIDATES)
-    )
-TRACK_MAP_SPEC = importlib.util.spec_from_file_location("track_map_module", TRACK_MAP_PATH)
-if TRACK_MAP_SPEC is None or TRACK_MAP_SPEC.loader is None:
-    raise ImportError(f"Could not load TrackMap module from {TRACK_MAP_PATH}")
-TRACK_MAP_MODULE = importlib.util.module_from_spec(TRACK_MAP_SPEC)
-sys.modules[TRACK_MAP_SPEC.name] = TRACK_MAP_MODULE
-TRACK_MAP_SPEC.loader.exec_module(TRACK_MAP_MODULE)
-TrackMap = TRACK_MAP_MODULE.TrackMap
+class TrackMap:
+    """Minimal closed-centerline geometry needed by this map utility.
+
+    This intentionally lives here instead of importing the RL-RACER project.
+    Width-profile generation only needs arc length interpolation and tangents;
+    simulator/RL-specific TrackMap functionality would be an unnecessary code
+    dependency.
+    """
+
+    def __init__(self, centerline: np.ndarray, track_width: float,
+                 name: str = "track") -> None:
+        points = np.asarray(centerline, dtype=np.float32)
+        if points.ndim != 2 or points.shape[1] < 2:
+            raise ValueError("centerline must have shape (N, >=2)")
+        if len(points) < 2:
+            raise ValueError("centerline must contain at least two points")
+        if not np.isfinite(points[:, :2]).all():
+            raise ValueError("centerline contains non-finite coordinates")
+        self.centerline = points[:, :2].copy()
+        self.track_width = float(track_width)
+        self.name = str(name)
+
+    @classmethod
+    def from_centerline_csv(cls, csv_path: str | Path, track_width: float,
+                            name: str = "track") -> "TrackMap":
+        path = Path(csv_path)
+        try:
+            points = np.loadtxt(path, delimiter=",", dtype=np.float32)
+        except ValueError as exc:
+            first_line = path.read_text(encoding="utf-8").splitlines()[0]
+            if not any(character.isalpha() for character in first_line):
+                raise exc
+            points = np.loadtxt(path, delimiter=",", dtype=np.float32,
+                                skiprows=1)
+        return cls(points, track_width=track_width, name=name)
+
+    @property
+    def num_points(self) -> int:
+        return int(self.centerline.shape[0])
+
+    @property
+    def segment_vectors(self) -> np.ndarray:
+        return np.roll(self.centerline, -1, axis=0) - self.centerline
+
+    @property
+    def segment_lengths(self) -> np.ndarray:
+        return np.linalg.norm(self.segment_vectors, axis=1).astype(np.float32)
+
+    @property
+    def cumulative_lengths(self) -> np.ndarray:
+        cumulative = np.zeros(self.num_points + 1, dtype=np.float32)
+        cumulative[1:] = np.cumsum(self.segment_lengths, dtype=np.float32)
+        return cumulative
+
+    @property
+    def total_length(self) -> float:
+        return float(self.cumulative_lengths[-1])
+
+    def wrapped_index(self, index: int) -> int:
+        return int(index % self.num_points)
+
+    def tangent_at(self, index: int) -> np.ndarray:
+        previous = self.centerline[self.wrapped_index(index - 1)]
+        following = self.centerline[self.wrapped_index(index + 1)]
+        tangent = following - previous
+        norm = float(np.linalg.norm(tangent))
+        if norm < 1e-8:
+            return np.array([1.0, 0.0], dtype=np.float32)
+        return (tangent / norm).astype(np.float32)
+
+    def index_at_s(self, s_value: float) -> int:
+        if self.total_length <= 0.0:
+            return 0
+        wrapped = float(s_value % self.total_length)
+        index = int(np.searchsorted(self.cumulative_lengths, wrapped,
+                                    side="right") - 1)
+        return self.wrapped_index(index)
 
 
 DEFAULT_MAP_YAML = Path("/home/a/RL-RACER/simulators/maps/map1.yaml")

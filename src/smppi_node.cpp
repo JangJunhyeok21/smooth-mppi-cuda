@@ -115,7 +115,7 @@ public:
         // The no-IMU rollout neither subscribes to nor waits for IMU.  Keep the
         // subscription only for the legacy 21-feature MLP checkpoint.
         if (mppi_params_.dynamics_model == mppi::DYNAMIC_MLP_RESIDUAL_SERVO_LAG ||
-            mppi_params_.dynamics_model == mppi::DYNAMIC_RESIDUAL_SERVO_LAG ||
+            mppi_params_.dynamics_model == mppi::DYNAMIC_SERVO_LAG ||
             uses_lateral_velocity_kf_) {
             imu_sub_ = this->create_subscription<sensor_msgs::msg::Imu>(
                 imu_topic_, live_state_qos,
@@ -619,8 +619,8 @@ private:
         dynamic_mlp_servo_lag_weights_path_=this->get_parameter("dynamic_mlp_servo_lag_weights_path").as_string();
         if (dynamics_model_name_ == "dynamic_mlp_residual_servo_lag") {
             mppi_params_.dynamics_model = mppi::DYNAMIC_MLP_RESIDUAL_SERVO_LAG;
-        } else if (dynamics_model_name_ == "dynamic_residual_servo_lag") {
-            mppi_params_.dynamics_model = mppi::DYNAMIC_RESIDUAL_SERVO_LAG;
+        } else if (dynamics_model_name_ == "DYNAMIC_SERVO_LAG") {
+            mppi_params_.dynamics_model = mppi::DYNAMIC_SERVO_LAG;
         } else {
             throw std::invalid_argument("Unknown dynamics_model: " + dynamics_model_name_);
         }
@@ -891,7 +891,7 @@ private:
         mppi_params_.mlp_max_residual_ay=std::max(0.0f,mppi_params_.mlp_max_residual_ay);
         mppi_params_.mlp_max_residual_yaw_accel=std::max(0.0f,mppi_params_.mlp_max_residual_yaw_accel);
         if((mppi_params_.dynamics_model==mppi::DYNAMIC_MLP_RESIDUAL_SERVO_LAG ||
-            mppi_params_.dynamics_model==mppi::DYNAMIC_RESIDUAL_SERVO_LAG) &&
+            mppi_params_.dynamics_model==mppi::DYNAMIC_SERVO_LAG) &&
            (std::abs(mppi_params_.control_dt-.02f)>1e-6f || std::abs(mppi_params_.model_dt-.04f)>1e-6f))
             throw std::invalid_argument("servo-lag models require control_dt=0.02 and model_dt=0.04");
     }

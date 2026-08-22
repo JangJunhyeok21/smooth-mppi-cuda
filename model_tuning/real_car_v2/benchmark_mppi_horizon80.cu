@@ -12,7 +12,7 @@ int main(int argc, char** argv) {
     mppi::Params p{};
     p.dt=.02f; p.control_dt=.02f; p.model_dt=.04f;
     p.dynamics_model=use_mlp ? mppi::DYNAMIC_MLP_RESIDUAL_SERVO_LAG
-                            : mppi::DYNAMIC_RESIDUAL_SERVO_LAG;
+                            : mppi::DYNAMIC_SERVO_LAG;
     p.max_steer=.4788f; p.min_accel=-10.f; p.max_accel=10.f;
     p.min_speed=0.f; p.max_speed=10.f;
     p.q_v=12.f; p.q_heading=1.f; p.q_du=.12f; p.q_steer=.3f;

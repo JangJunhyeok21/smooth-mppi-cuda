@@ -18,11 +18,13 @@ class Net(nn.Module):
  def __init__(self):super().__init__();self.net=nn.Sequential(nn.Linear(len(IMU_RESIDUAL_FEATURES),64),nn.ReLU(),nn.Linear(64,32),nn.ReLU(),nn.Linear(32,3))
  def forward(self,x):return self.net(x)
 def main():
- p=argparse.ArgumentParser();p.add_argument('dataset',nargs='?',default=str(DATASET_PATH),help='Step-1 bag NPZ directory');p.add_argument('--out',default=str(OUTPUT_PATH));p.add_argument('--initialize-from',help='previous iteration model.pt');p.add_argument('--epochs',type=int,default=EPOCHS);p.add_argument('--seed',type=int,default=SEED);p.add_argument('--device',default=DEVICE);a=p.parse_args();torch.manual_seed(a.seed);rng=np.random.default_rng(a.seed)
+ p=argparse.ArgumentParser();p.add_argument('dataset',nargs='?',default=str(DATASET_PATH),help='Step-1 bag NPZ directory');p.add_argument('--out',default=str(OUTPUT_PATH));p.add_argument('--initialize-from',help='previous iteration model.pt');p.add_argument('--epochs',type=int,default=EPOCHS);p.add_argument('--seed',type=int,default=SEED);p.add_argument('--horizon-steps',type=int,default=30);p.add_argument('--device',default=DEVICE);a=p.parse_args();torch.manual_seed(a.seed);rng=np.random.default_rng(a.seed)
  params=ClassicModelParameters.from_yaml(ROOT/'config/params.yaml');classic_path=Path(os.environ.get('DYNAMIC_CLASSIC_PARAMS',ROOT/'model_tuning/results/dynamic_40ms_regression/params.json'))
  if classic_path.exists():
-  fitted=json.loads(classic_path.read_text()).get('expanded_fitted',{});params=replace(params,**{k:float(v) for k,v in fitted.items() if hasattr(params,k)})
- d=load_callback_archives(Path(a.dataset),model_dt=.04,horizon=30)
+  fitted=json.loads(classic_path.read_text()).get('expanded_fitted',{});updates={k:float(v) for k,v in fitted.items() if hasattr(params,k)}
+  if 'I_z' in fitted:updates['Iz']=float(fitted['I_z'])
+  params=replace(params,**updates)
+ d=load_callback_archives(Path(a.dataset),model_dt=.04,horizon=a.horizon_steps)
  cfg=yaml.safe_load((ROOT/'config/params.yaml').read_text())['/**']['ros__parameters'];c=Contract.from_parameters(params,dt=.04)
  state=d['initial_state'];cmd=d['commands'][:,0];ap=d['actuator'][:,0].copy();sr=d['actuator'][:,1].copy();base=np.empty_like(state)
  lf,lr,m,iz=float(cfg['l_f']),float(cfg['l_r']),float(cfg['mass']),params.Iz;wb=lf+lr;fzf=m*9.81*lr/wb;fzr=m*9.81*lf/wb

@@ -27,9 +27,15 @@ from contract import ClassicModelParameters
 NEW_DATA_ROOTS = (
     # Path("/mnt/nas_custom/F1tenth/2026 IFAC/0817 (1)"),
     # Path("/mnt/nas_custom/F1tenth/2026 IFAC/0818"),
-    Path("/mnt/nas_custom/F1tenth/2026 IFAC/0819"),
-    Path("/mnt/nas_custom/F1tenth/2026 IFAC/0820")
+    # Path("/mnt/nas_custom/F1tenth/2026 IFAC/0819"),
+    Path("/mnt/nas_custom/F1tenth/2026 IFAC/0820"),
 )
+# Keep F5 configuration robust when a single Path is assigned without tuple
+# syntax.  A pathlib.Path is path-like but is not a collection of roots.
+if isinstance(NEW_DATA_ROOTS, (str, Path)):
+    NEW_DATA_ROOTS = (Path(NEW_DATA_ROOTS),)
+else:
+    NEW_DATA_ROOTS = tuple(Path(root) for root in NEW_DATA_ROOTS)
 # Discover rosbag directories recursively. Bags without the required topics are
 # reported as SKIPPED by read_streams instead of silently entering the archive.
 BAG_PATH = sorted({metadata.parent for root in NEW_DATA_ROOTS
@@ -58,6 +64,11 @@ PHYSICS_DISTANCE_WINDOW_S = .5; PHYSICS_MIN_ODOM_DISTANCE = .35
 PHYSICS_MIN_POSE_ODOM_RATIO = .65; PHYSICS_IMPACT_DECEL = -8.0
 PHYSICS_MAX_POSE_STEP = .30; PHYSICS_MAX_YAW_STEP = .45
 DT = .02; MAX_POSE_AGE = .10; MAX_VELOCITY_AGE = .10; MAX_COMMAND_AGE = .10; MAX_IMU_AGE = .05
+# MPPI/residual-model rollout contract. Step 1 stores future GT densely at DT,
+# while HORIZON_STEPS counts the coarser MODEL_DT_S prediction steps consumed
+# by Steps 3/6. The default therefore stores 60 * 40 ms = 2.4 s of future GT.
+MODEL_DT_S = .04
+HORIZON_STEPS = 60
 MIN_CONTINUOUS_SEGMENT_S = 2.0
 PLOT_ARROW_INTERVAL_S = .10  # data remain 50 Hz; direction arrows are drawn at 10 Hz
 PLOT_TIME_LABEL_INTERVAL_S = 1.0
@@ -679,6 +690,37 @@ def finish_interactive_outputs(out,backups,save):
         backup.replace(target)
 
 
+def saved_absolute_time_range(out):
+    """Return an existing extract's retained absolute interval for re-extraction."""
+    out=Path(out)
+    if not out.is_file():return None
+    with np.load(out) as archive:
+        if not {"samples","columns","alignment_start_epoch_s"}.issubset(archive.files):
+            return None
+        samples=np.asarray(archive["samples"]);columns=np.asarray(archive["columns"])
+        if not len(samples):return None
+        names={str(name):index for index,name in enumerate(columns)}
+        start_epoch=float(archive["alignment_start_epoch_s"])
+        return start_epoch+float(samples[0,names["t"]]),start_epoch+float(samples[-1,names["t"]])
+
+
+def reapply_absolute_time_range(out,samples,columns,absolute_range):
+    """Reapply a previously saved manual cut after rebuilding the raw extract."""
+    if absolute_range is None:return samples
+    with np.load(out) as archive:
+        new_epoch=float(archive["alignment_start_epoch_s"])
+    names={str(name):index for index,name in enumerate(columns)}
+    relative_start=absolute_range[0]-new_epoch
+    relative_end=absolute_range[1]-new_epoch
+    time=samples[:,names["t"]]
+    keep=(time>=relative_start-1e-9)&(time<=relative_end+1e-9)
+    selected=samples[keep]
+    if len(selected)<10:
+        raise RuntimeError(
+            f"cannot reapply saved trim {absolute_range}: only {len(selected)} samples remain")
+    return persist_manual_trim(out,selected,columns,relative_start,relative_end)
+
+
 def extract_one(storage, out, args):
     cfg=yaml.safe_load((PROJECT_ROOT/"config/params.yaml").read_text())["/**"]["ros__parameters"]
     signs,date=imu_signs(storage)
@@ -778,9 +820,10 @@ def extract_one(storage, out, args):
         "classic_kf_measurement_var":list(map(float,cfg["classic_kf_measurement_var"])),
         "classic_kf_initial_var":list(map(float,cfg["classic_kf_initial_var"])),
         "kf_pose_vy_window_s":float(cfg.get("kf_pose_vy_window_s",.12))}
+    future_horizon_s=args.horizon_steps*args.model_dt
     callback_inputs,callback_future_states,callback_future_commands,callback_future_offsets_s=(
         build_callback_prediction_samples(pose,velocity,drive,imu,signs,cfg,
-            accepted_intervals,times[0],args.callback_future_horizon,args.dt,
+            accepted_intervals,times[0],future_horizon_s,args.dt,
             args.max_command_age,args.max_imu_age,args.physics_max_pose_step,
             args.physics_max_yaw_step))
     out.parent.mkdir(parents=True,exist_ok=True)
@@ -857,6 +900,10 @@ def extract_one(storage, out, args):
               "segments":kf_reports},
           "callback_prediction_dataset":{"anchors":int(len(callback_inputs)),
               "anchor_source":"every retained velocity/odom callback",
+              "horizon_steps":args.horizon_steps,
+              "model_dt_s":args.model_dt,
+              "future_horizon_s":future_horizon_s,
+              "interpolation_dt_s":args.dt,
               "future_offsets_s":callback_future_offsets_s.tolist(),
               "future_state_order":["x","y","unwrapped_yaw","vx","vy","yaw_rate"],
               "future_command_order":["steer_cmd","speed_cmd"],
@@ -916,16 +963,28 @@ def main():
                    help="discard filtered fragments shorter than this duration [s]")
     p.add_argument("--kf-pose-vy-window",type=float,default=.12,
                    help="causal trailing MCL regression window used by the runtime KF [s]")
-    p.add_argument("--callback-future-horizon",type=float,default=1.2,
-                   help="future GT horizon from every real velocity callback [s]")
+    p.add_argument("--horizon-steps",type=int,default=HORIZON_STEPS,
+                   help="future rollout horizon in MODEL_DT prediction steps")
+    p.add_argument("--model-dt",type=float,default=MODEL_DT_S,
+                   help="MPPI/residual-model prediction interval [s]")
     p.add_argument("--map-yaml",type=Path,default=DEFAULT_MAP_YAML,
                    help="ROS occupancy-map YAML overlaid on the trajectory panel")
     p.add_argument("--interactive-trim",action=argparse.BooleanOptionalAction,default=True,
                    help="s/e/q manual dataset trimming while each bag figure is open")
+    p.add_argument("--preserve-existing-trim",action=argparse.BooleanOptionalAction,default=False,
+                   help="reapply an existing NPZ's absolute retained interval after re-extraction")
     p.add_argument("--review-saved-collisions",action=argparse.BooleanOptionalAction,
                    default=REVIEW_SAVED_COLLISIONS,
                    help="skip extraction; review saved Step-1 NPZs and mark collision/stuck candidates")
     args = p.parse_args()
+
+    if args.horizon_steps < 1:
+        p.error("--horizon-steps must be at least 1")
+    if args.model_dt <= 0. or args.dt <= 0.:
+        p.error("--model-dt and --dt must be positive")
+    model_stride=args.model_dt/args.dt
+    if not np.isclose(model_stride,round(model_stride),rtol=0.,atol=1e-9):
+        p.error("--model-dt must be an integer multiple of --dt so model targets exist exactly")
 
     if args.review_saved_collisions:
         if not USE_PLOT:raise SystemExit("--review-saved-collisions requires USE_PLOT=True")
@@ -939,6 +998,8 @@ def main():
     while storage_index<len(storages):
         number=storage_index+1;storage=storages[storage_index]
         out=output_for_bag(args.output,storage,len(storages)>1)
+        preserved_range=(saved_absolute_time_range(out)
+                         if args.preserve_existing_trim else None)
         print(f"[{number}/{len(storages)}] Extracting {storage} -> {out}")
         backups=(backup_interactive_outputs(out)
                  if USE_PLOT and args.interactive_trim else [])
@@ -950,6 +1011,8 @@ def main():
             print(f"[{number}/{len(storages)}] SKIPPED: {error}",file=sys.stderr)
             storage_index+=1
             continue
+        if preserved_range is not None:
+            samples=reapply_absolute_time_range(out,samples,columns,preserved_range)
         if USE_PLOT:
             title=f"Bag {number}/{len(storages)}: {storage.parent.name}"
             if args.interactive_trim:

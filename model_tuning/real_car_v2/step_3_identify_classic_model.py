@@ -42,7 +42,7 @@ POSITION_SPEED_SCALE_BOUNDS = (0.70, 1.20)
 #   "adjust_pose_to_states": keep KF vx/vy/yaw_rate; integrate them into pose GT
 #   "adjust_states_to_pose": keep raw MCL pose; differentiate it into state GT
 #   "none": keep original KF states and raw MCL pose even when inconsistent
-GT_CONSISTENCY_MODE = "adjust_states_to_pose"
+GT_CONSISTENCY_MODE = "adjust_states_to_pose"  # "adjust_pose_to_states", "adjust_states_to_pose", or "none"
 
 # Open-loop optimization/model-selection weights. Increase POSITION_LOSS_WEIGHT
 # when MPPI path placement is more important than matching individual states.
@@ -57,13 +57,13 @@ VY_POSE_DERIVATIVE_SMOOTH_WINDOW_S = 0.20
 
 # Pacejka bounds: B, C, D, E for front and rear tires.
 PACEJKA_B_F_BOUNDS = (0.2, 30.0)
-PACEJKA_C_F_BOUNDS = (0.5, 2.5)
+PACEJKA_C_F_BOUNDS = (0.0, 2.5)
 PACEJKA_D_F_BOUNDS = (0.05, 3.5)
-PACEJKA_E_F_BOUNDS = (-1.0, 1.0)
+PACEJKA_E_F_BOUNDS = (-2.0, 1.0)
 PACEJKA_B_R_BOUNDS = (0.2, 30.0)
-PACEJKA_C_R_BOUNDS = (0.5, 2.5)
+PACEJKA_C_R_BOUNDS = (0.0, 2.5)
 PACEJKA_D_R_BOUNDS = (0.05, 3.5)
-PACEJKA_E_R_BOUNDS = (-1.0, 1.0)
+PACEJKA_E_R_BOUNDS = (-2.0, 1.0)
 YAW_INERTIA_MIN = 0.005
 YAW_INERTIA_MAX = 0.5
 

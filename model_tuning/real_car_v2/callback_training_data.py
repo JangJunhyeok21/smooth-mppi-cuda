@@ -56,7 +56,8 @@ def load_callback_archives(directory,model_dt=.04,horizon=30):
                 np.isfinite(commands).all((1,2))&np.isfinite(history).all(1)&
                 np.isfinite(imu).all(1)&np.isfinite(actuator).all(1))
         split=2 if path.name in TEST_NAMES else 1 if path.name in VAL_NAMES else 0
-        records.append(dict(initial_pose=initial[finite,:3],initial_state=initial[finite,3:],
+        records.append(dict(anchor_time=anchor_t[finite],
+            initial_pose=initial[finite,:3],initial_state=initial[finite,3:],
             target_pose=target[finite,:,:3],target_state=target[finite,:,3:],
             commands=commands[finite],history=history[finite],imu=imu[finite],
             actuator=actuator[finite],split=np.full(finite.sum(),split,np.int8),

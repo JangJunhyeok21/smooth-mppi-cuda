@@ -219,7 +219,7 @@ namespace mppi
 
     __host__ __device__ inline bool uses_40ms_rollout_knot(int dynamics_model) {
         return dynamics_model == DYNAMIC_MLP_RESIDUAL_SERVO_LAG ||
-               dynamics_model == DYNAMIC_RESIDUAL_SERVO_LAG ||
+               dynamics_model == DYNAMIC_SERVO_LAG ||
                dynamics_model == DYNAMIC_MLP_RESIDUAL_SERVO_LAG_VX_DELTA_24D;
     }
 
@@ -1156,7 +1156,7 @@ namespace mppi
                 x=update_slip_kinematic_with_imu_direct(x,u,p,command_history);
             else if(p.dynamics_model==DYNAMIC_IMU_RECURSIVE)
                 x=update_dynamic_imu_recursive(x,u,p,command_history);
-            else if(p.dynamics_model==DYNAMIC_RESIDUAL_SERVO_LAG)
+            else if(p.dynamics_model==DYNAMIC_SERVO_LAG)
                 x=update_dynamic_mlp_residual(x,u,p,command_history,true,nullptr,false);
             else if(p.dynamics_model==DYNAMIC_MLP_RESIDUAL || p.dynamics_model==DYNAMIC_MLP_RESIDUAL_SERVO_LAG ||
                     p.dynamics_model==DYNAMIC_MLP_RESIDUAL_SERVO_LAG_VX_DELTA_24D)
@@ -1228,7 +1228,7 @@ namespace mppi
                                  params_.dynamics_model==DYNAMIC_IMU_RECURSIVE ||
                                  params_.dynamics_model==DYNAMIC_MLP_RESIDUAL ||
                                  params_.dynamics_model==DYNAMIC_MLP_RESIDUAL_SERVO_LAG ||
-                                 params_.dynamics_model==DYNAMIC_RESIDUAL_SERVO_LAG ||
+                                 params_.dynamics_model==DYNAMIC_SERVO_LAG ||
                                  params_.dynamics_model==DYNAMIC_MLP_RESIDUAL_SERVO_LAG_VX_DELTA_24D);
         const float initial_accel = direct_speed ? params_.min_speed :
             ((params_.dynamics_model == KINEMATIC) ? 1.0f : 0.0f);

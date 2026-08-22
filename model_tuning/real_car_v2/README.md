@@ -54,6 +54,8 @@ ROS 2 bag
    - NPZ callback 계약:
      `callback_inputs[N,13]`, `callback_future_states[N,60,6]`,
      `callback_future_commands[N,60,2]`, `callback_future_offsets_s[60]`.
+     The length is configured with `--horizon-steps` (model rollout steps) and
+     `--model-dt`; future samples remain stored on the `--dt` interpolation grid.
    - `/drive` topic이 없으면 manual bag으로 판별하며 `/ackermann_cmd`를 학습 command로 사용한다.
      `/drive`가 있으면 autonomous bag으로 기록하지만 두 command topic의 차이는 충돌 판정에 쓰지 않는다.
    - 충돌은 큰 odom/command 속도에 비해 MCL 위치 변화가 지속적으로 없거나,

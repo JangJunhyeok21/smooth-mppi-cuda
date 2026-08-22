@@ -43,7 +43,7 @@ enum DynamicsModel : int {
     DYNAMIC_MLP_RESIDUAL = 8,
     DYNAMIC_MLP_RESIDUAL_SERVO_LAG = 9,
     DYNAMIC_MLP_RESIDUAL_SERVO_LAG_VX_DELTA_24D = 11,
-    DYNAMIC_RESIDUAL_SERVO_LAG = 12,
+    DYNAMIC_SERVO_LAG = 12,
 };
 
 enum ObjectiveMode : int {

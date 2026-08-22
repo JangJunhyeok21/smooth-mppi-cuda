@@ -1,6 +1,6 @@
 /**:
   ros__parameters:
-    # 사용 모델: dynamic_mlp_residual_servo_lag 또는 dynamic_residual_servo_lag
+    # 사용 모델: dynamic_mlp_residual_servo_lag 또는 DYNAMIC_SERVO_LAG
     # MLP 모델만 아래 학습 가중치를 읽고, Classic 모델은 이 파일을 읽지 않는다.
     dynamics_model: dynamic_mlp_residual_servo_lag
     dynamic_mlp_servo_lag_weights_path: /home/a/smooth-mppi-cuda/config/dynamic_40ms_residual_servo_lag.bin

@@ -337,9 +337,9 @@ def compute_width_profile(
     tangent_window: float,
     missing_width_fallback: str = "previous_boundary",
 ) -> list[dict[str, float]]:
-    if missing_width_fallback not in {"previous_boundary", "nearest_boundary", "max_width"}:
+    if missing_width_fallback not in {"interpolate", "previous_boundary", "nearest_boundary", "max_width"}:
         raise ValueError(
-            "missing_width_fallback must be 'previous_boundary', "
+            "missing_width_fallback must be 'interpolate', 'previous_boundary', "
             "'nearest_boundary', or 'max_width', "
             f"got {missing_width_fallback!r}"
         )
@@ -395,6 +395,23 @@ def compute_width_profile(
 
     if not rows:
         return rows
+    if missing_width_fallback == "interpolate":
+        s_values = np.asarray([row["s"] for row in rows], dtype=np.float64)
+        left_values = interpolate_missing_widths_circular(
+            s_values,
+            np.asarray([row["left_width"] for row in rows], dtype=np.float64),
+            np.asarray(left_hits, dtype=bool),
+            track_map.total_length,
+        )
+        right_values = interpolate_missing_widths_circular(
+            s_values,
+            np.asarray([row["right_width"] for row in rows], dtype=np.float64),
+            np.asarray(right_hits, dtype=bool),
+            track_map.total_length,
+        )
+        for row, left_value, right_value in zip(rows, left_values, right_values):
+            row["left_width"] = float(left_value)
+            row["right_width"] = float(right_value)
     for idx, row in enumerate(rows):
         center = centers[idx]
         normal = normals[idx]

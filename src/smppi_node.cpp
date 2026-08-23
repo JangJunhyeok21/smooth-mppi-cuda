@@ -6,9 +6,6 @@
 #include "visualization_msgs/msg/marker_array.hpp"
 #include "geometry_msgs/msg/point.hpp"
 #include "geometry_msgs/msg/pose_stamped.hpp"
-#ifdef SMPPI_HAS_F1_MSGS
-#include "f1_msgs/msg/f1state_arr.hpp"
-#endif
 #include "cuda_mppi_controller/cuda_mppi_core.hpp"
 #include "cuda_mppi_controller/kinematic_residual_weights.hpp"
 #include "cuda_mppi_controller/lateral_velocity_kf.hpp"
@@ -105,21 +102,9 @@ public:
                     "Simulation obstacle input: %s [nav_msgs/Odometry]",
                     simulation_obstacle_odom_topic_.c_str());
             } else if (!dynamic_obstacle_prediction_enabled_) {
-#ifdef SMPPI_HAS_F1_MSGS
-                perception_obstacles_sub_ =
-                    this->create_subscription<f1_msgs::msg::F1stateArr>(
-                        real_perception_obstacles_topic_, 10,
-                        std::bind(&MPPINode::perception_obstacles_callback,
-                                  this, std::placeholders::_1));
-                RCLCPP_INFO(this->get_logger(),
-                    "Real perception obstacle input: %s [f1_msgs/F1stateArr, frame=%s]",
-                    real_perception_obstacles_topic_.c_str(),
-                    real_perception_obstacles_frame_.c_str());
-#else
                 RCLCPP_WARN(this->get_logger(),
-                    "f1_msgs was not available at build time; real perception "
-                    "obstacle input is disabled");
-#endif
+                    "Real-car obstacle avoidance has no direct perception "
+                    "fallback; enable the predictor trajectory input");
             }
         }
         // The no-IMU rollout neither subscribes to nor waits for IMU.  Keep the
@@ -184,7 +169,7 @@ private:
                 dynamic_obstacle_prediction_enabled_
                     ? dynamic_obstacle_trajectory_topic_.c_str()
                     : (is_simulation_ ? simulation_obstacle_odom_topic_.c_str()
-                                      : real_perception_obstacles_topic_.c_str()));
+                                      : "disabled (predictor required)"));
         } else {
             RCLCPP_INFO(this->get_logger(), "Obstacle input: disabled");
         }
@@ -222,8 +207,13 @@ private:
         smppi_cuda_controller::msg::DynamicObstacleTrajectory::SharedPtr msg) {
         const int horizon = static_cast<int>(msg->horizon);
         const int obstacle_count = static_cast<int>(msg->obstacle_ids.size());
-        const std::size_t expected = static_cast<std::size_t>(
-            std::max(0, horizon) * std::max(0, obstacle_count));
+        std::size_t expected = 0;
+        if (msg->is_dynamic.size() == static_cast<std::size_t>(obstacle_count)) {
+            for (const bool is_dynamic : msg->is_dynamic) {
+                expected += is_dynamic ? static_cast<std::size_t>(
+                    std::max(0, horizon)) : 1U;
+            }
+        }
         if (horizon <= 0 || horizon > MAX_DYNAMIC_OBSTACLE_HORIZON ||
             obstacle_count <= 0 || obstacle_count > MAX_OBS ||
             msg->x.size() != expected || msg->y.size() != expected ||
@@ -245,11 +235,29 @@ private:
                 msg->dt, expected_dt);
             return;
         }
-        dynamic_obs_x_ = msg->x;
-        dynamic_obs_y_ = msg->y;
-        dynamic_obs_yaw_ = msg->yaw;
-        dynamic_obs_semi_major_ = msg->semi_major;
-        dynamic_obs_semi_minor_ = msg->semi_minor;
+        const std::size_t expanded_size = static_cast<std::size_t>(
+            obstacle_count * horizon);
+        dynamic_obs_x_.clear(); dynamic_obs_x_.reserve(expanded_size);
+        dynamic_obs_y_.clear(); dynamic_obs_y_.reserve(expanded_size);
+        dynamic_obs_yaw_.clear(); dynamic_obs_yaw_.reserve(expanded_size);
+        dynamic_obs_semi_major_.clear();
+        dynamic_obs_semi_major_.reserve(expanded_size);
+        dynamic_obs_semi_minor_.clear();
+        dynamic_obs_semi_minor_.reserve(expanded_size);
+        std::size_t packed_index = 0;
+        for (int obstacle = 0; obstacle < obstacle_count; ++obstacle) {
+            const int packed_points = msg->is_dynamic[obstacle] ? horizon : 1;
+            for (int step = 0; step < horizon; ++step) {
+                const std::size_t source = packed_index +
+                    (msg->is_dynamic[obstacle] ? step : 0);
+                dynamic_obs_x_.push_back(msg->x[source]);
+                dynamic_obs_y_.push_back(msg->y[source]);
+                dynamic_obs_yaw_.push_back(msg->yaw[source]);
+                dynamic_obs_semi_major_.push_back(msg->semi_major[source]);
+                dynamic_obs_semi_minor_.push_back(msg->semi_minor[source]);
+            }
+            packed_index += static_cast<std::size_t>(packed_points);
+        }
         dynamic_obs_is_dynamic_ = msg->is_dynamic;
         dynamic_obstacle_count_ = obstacle_count;
         dynamic_obstacle_horizon_ = horizon;
@@ -262,37 +270,6 @@ private:
         // trajectory.
         mppi_params_.num_obstacles = 0;
     }
-
-#ifdef SMPPI_HAS_F1_MSGS
-    void perception_obstacles_callback(
-        const f1_msgs::msg::F1stateArr::SharedPtr msg) {
-        // The perception contract from integration/full-driving-stack reports
-        // global x/y. Empty frame_id was used by the original publisher; a
-        // non-empty frame must match the configured MPPI map frame.
-        if (!msg->header.frame_id.empty() &&
-            msg->header.frame_id != real_perception_obstacles_frame_) {
-            RCLCPP_ERROR_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
-                "Ignoring perception obstacles in frame '%s'; expected '%s'",
-                msg->header.frame_id.c_str(),
-                real_perception_obstacles_frame_.c_str());
-            return;
-        }
-
-        int count = 0;
-        for (const auto &obstacle : msg->f1_state_arr) {
-            if (count >= MAX_OBS) break;
-            const float obstacle_x = static_cast<float>(obstacle.x);
-            const float obstacle_y = static_cast<float>(obstacle.y);
-            if (!std::isfinite(obstacle_x) || !std::isfinite(obstacle_y)) continue;
-
-            mppi_params_.obs_x[count] = obstacle_x;
-            mppi_params_.obs_y[count] = obstacle_y;
-            ++count;
-        }
-        mppi_params_.num_obstacles = count;
-        obstacle_stamp_ = this->now();
-    }
-#endif
 
     void cache_fixed_model_properties() {
         is_kinematic_residual_model_ = false;
@@ -816,8 +793,6 @@ private:
         dynamic_obstacle_trajectory_topic_ = this->get_parameter(
             "dynamic_obstacle_trajectory_topic").as_string();
         this->declare_parameter("simulation_obstacle_odom_topic", "/opp_racecar/odom"); simulation_obstacle_odom_topic_=this->get_parameter("simulation_obstacle_odom_topic").as_string();
-        this->declare_parameter("real_perception_obstacles_topic", "/f1/perception/object/obstacles/arr"); real_perception_obstacles_topic_=this->get_parameter("real_perception_obstacles_topic").as_string();
-        this->declare_parameter("real_perception_obstacles_frame", "map"); real_perception_obstacles_frame_=this->get_parameter("real_perception_obstacles_frame").as_string();
         this->declare_parameter("obstacle_timeout", 0.5); obstacle_timeout_s_=this->get_parameter("obstacle_timeout").as_double();
         this->declare_parameter("noise_steer_std",      0.4);    mppi_params_.noise_steer_std  = this->get_parameter("noise_steer_std").as_double();
         this->declare_parameter("noise_accel_std",      2.0);    mppi_params_.noise_accel_std  = this->get_parameter("noise_accel_std").as_double();
@@ -1702,9 +1677,6 @@ private:
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr obstacle_odom_sub_;
     rclcpp::Subscription<smppi_cuda_controller::msg::DynamicObstacleTrajectory>::SharedPtr
         dynamic_obstacle_sub_;
-#ifdef SMPPI_HAS_F1_MSGS
-    rclcpp::Subscription<f1_msgs::msg::F1stateArr>::SharedPtr perception_obstacles_sub_;
-#endif
     rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr mcl_pose_sub_;
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr velocity_sub_;
     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_sub_;
@@ -1724,7 +1696,6 @@ private:
     std::string optimal_trajectory_topic_, kf_state_topic_, mlp_input_topic_;
     std::string simulation_obstacle_odom_topic_;
     std::string dynamic_obstacle_trajectory_topic_;
-    std::string real_perception_obstacles_topic_, real_perception_obstacles_frame_;
     std::string dynamic_mlp_servo_lag_weights_path_;
     std::string safe_set_file_path_,objective_mode_name_;
     int safe_set_k_near_{20};

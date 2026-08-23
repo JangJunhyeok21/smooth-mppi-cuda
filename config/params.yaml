@@ -62,11 +62,7 @@
     # s_k=max(0, collision_radius-min_boundary_clearance), cost=q_s*s_k^2.
     # Boundary violation remains finite/selectable; only physical obstacles
     # retain post-rollout hard candidate rejection.
-<<<<<<< HEAD
-    collision_radius: 0.15
-=======
     collision_radius: 0.4
->>>>>>> 554591c (Add dynamic-obstacle prediction and opponent MPPI)
     q_boundary_slack: 5000.0
     q_boundary_terminal_slack: 20000.0
     # true: reject an off-track weighted-control rollout and use the
@@ -92,17 +88,11 @@
     # Separate predictor publishes obstacle-major poses at each 40 ms MPPI knot.
     dynamic_obstacle_prediction_enabled: true
     dynamic_obstacle_trajectory_topic: /mppi/dynamic_obstacle_trajectory
-    # Simulation supplies one opponent as global odometry. Real-car perception
-    # supplies up to MAX_OBS global detections using f1_msgs/F1stateArr.
+    # Legacy simulator-only fallback when prediction is disabled. Real-car
+    # perception is consumed exclusively by the separate predictor node.
     simulation_obstacle_odom_topic: /opp_racecar/odom
-    real_perception_obstacles_topic: /f1/perception/object/obstacles/arr
-    real_perception_obstacles_frame: map
     obstacle_timeout: 0.5
-<<<<<<< HEAD
-    car_radius: 0.4         # 실제 충돌 판정에 쓰는 combined footprint 반경
-=======
     car_radius: 0.24           # ego footprint radius; predictor supplies opponent radius
->>>>>>> 554591c (Add dynamic-obstacle prediction and opponent MPPI)
     # car_radius 진입 전부터 회피를 준비해 속도/조향의 급격한 변화를 막는다.
     obstacle_soft_margin: 0.0  # soft cost 시작 반경 = car_radius + 1.0 m
     # s=max(0, car_radius+margin-distance), cost=q_obs*s^2

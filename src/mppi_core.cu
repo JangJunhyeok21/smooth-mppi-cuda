@@ -721,15 +721,7 @@ namespace mppi
         float min_bnd_dist,
         float applied_steering_angle,
         bool terminal_step,
-        int horizon_step,
-        const float* dynamic_obs_x,
-        const float* dynamic_obs_y,
-        const float* dynamic_obs_yaw,
-        const float* dynamic_obs_semi_major,
-        const float* dynamic_obs_semi_minor,
-        const std::uint8_t* dynamic_obs_is_dynamic,
-        int dynamic_obstacle_count,
-        int dynamic_obstacle_horizon,
+        float obstacle_cost,
         int* last_idx)
     {
         float min_dist_sq = 1e9f;
@@ -860,60 +852,12 @@ namespace mppi
         const float boundary_cost = boundary_slack_weight
             * boundary_slack * boundary_slack;
 
-        // 7. Obstacle soft constraint. car_radius remains the hard physical
-        // guard, but the smooth cost begins outside it. Without this margin the
-        // cost is exactly zero until the hard post-selection suddenly replaces
-        // the entire weighted sequence.
-        float obs_cost = 0.0f;
-        const float obstacle_soft_radius =
-            p.car_radius + p.obstacle_soft_margin;
-        for (int i = 0; i < p.num_obstacles; ++i) {
-            float dx = s.x - p.obs_x[i];
-            float dy = s.y - p.obs_y[i];
-            float dist = sqrtf(dx * dx + dy * dy);
-            const float obstacle_slack=fmaxf(0.0f,obstacle_soft_radius-dist);
-            obs_cost += p.q_obs*obstacle_slack*obstacle_slack;
-        }
-        if (dynamic_obstacle_count > 0 && dynamic_obstacle_horizon > 0) {
-            const int step = min(horizon_step, dynamic_obstacle_horizon - 1);
-            for (int i = 0; i < dynamic_obstacle_count; ++i) {
-                const int index = i * dynamic_obstacle_horizon + step;
-                const float dx = s.x - dynamic_obs_x[index];
-                const float dy = s.y - dynamic_obs_y[index];
-                const float distance = sqrtf(dx * dx + dy * dy);
-                float boundary_radius = p.car_radius + p.obstacle_soft_margin;
-                if (dynamic_obs_is_dynamic[i]) {
-                    const float c = fast_cos(dynamic_obs_yaw[index]);
-                    const float sn = fast_sin(dynamic_obs_yaw[index]);
-                    const float local_x = c * dx + sn * dy;
-                    const float local_y = -sn * dx + c * dy;
-                    // The predictor axes already include the complete vehicle
-                    // collision radius. Only the configurable soft margin is
-                    // added here; adding car_radius again double-inflates it.
-                    const float major = fmaxf(1.0e-3f,
-                        dynamic_obs_semi_major[index] + p.obstacle_soft_margin);
-                    const float minor = fmaxf(1.0e-3f,
-                        dynamic_obs_semi_minor[index] + p.obstacle_soft_margin);
-                    if (distance > 1.0e-6f) {
-                        const float ux = local_x / distance;
-                        const float uy = local_y / distance;
-                        boundary_radius = rsqrtf(
-                            ux * ux / (major * major) + uy * uy / (minor * minor));
-                    } else {
-                        boundary_radius = fmaxf(major, minor);
-                    }
-                }
-                const float slack = fmaxf(0.0f, boundary_radius - distance);
-                obs_cost += p.q_obs * slack * slack;
-            }
-        }
-
         const float tracking_cost=p.objective_mode==LMPC_OBJECTIVE
             ? 0.0f : path_cost+vel_cost+error_speed_cost;
         return tracking_cost + friction_ellipse_cost
              + front_slip_cost
              + rear_slip_cost
-             + steer_cost + rate_cost + boundary_cost + obs_cost;
+             + steer_cost + rate_cost + boundary_cost + obstacle_cost;
     }
 
     // 두 경로 인덱스 사이의 실제 중심선 arc length. 경로점 개수 대신 m 단위
@@ -1194,13 +1138,19 @@ namespace mppi
                 min_boundary_clearance = fminf(min_boundary_clearance, min_dist);
             }
 
+            float step_obstacle_cost = 0.0f;
             for (int obstacle_index = 0;
                  obstacle_index < p.num_obstacles && obstacle_index < MAX_OBS;
                  ++obstacle_index) {
                 const float dx = x.x - p.obs_x[obstacle_index];
                 const float dy = x.y - p.obs_y[obstacle_index];
+                const float signed_clearance =
+                    sqrtf(dx * dx + dy * dy) - p.car_radius;
                 min_obstacle_clearance = fminf(
-                    min_obstacle_clearance, sqrtf(dx * dx + dy * dy));
+                    min_obstacle_clearance, signed_clearance);
+                const float soft_slack = fmaxf(
+                    0.0f, p.obstacle_soft_margin - signed_clearance);
+                step_obstacle_cost += p.q_obs * soft_slack * soft_slack;
             }
             if (dynamic_obstacle_count > 0 && dynamic_obstacle_horizon > 0) {
                 const int dynamic_step = min(t, dynamic_obstacle_horizon - 1);
@@ -1210,8 +1160,8 @@ namespace mppi
                     const float dx = x.x - dynamic_obs_x[index];
                     const float dy = x.y - dynamic_obs_y[index];
                     const float distance = sqrtf(dx * dx + dy * dy);
-                    float obstacle_radius = 0.0f;
-                    if (dynamic_obs_is_dynamic[obstacle_index] && distance > 1.0e-6f) {
+                    float obstacle_radius;
+                    if (distance > 1.0e-6f) {
                         const float c = fast_cos(dynamic_obs_yaw[index]);
                         const float sn = fast_sin(dynamic_obs_yaw[index]);
                         const float local_x = c * dx + sn * dy;
@@ -1222,18 +1172,18 @@ namespace mppi
                         const float uy = local_y / distance;
                         obstacle_radius = rsqrtf(
                             ux * ux / (major * major) + uy * uy / (minor * minor));
-                    } else if (dynamic_obs_is_dynamic[obstacle_index]) {
+                    } else {
                         obstacle_radius = fmaxf(dynamic_obs_semi_major[index],
                                                 dynamic_obs_semi_minor[index]);
                     }
-                    // Clearance summaries share one scalar with legacy static
-                    // circles, whose safety threshold is car_radius. Offset an
-                    // already-inflated dynamic ellipse so that the common
-                    // comparison remains equivalent to distance >= ellipse.
-                    const float effective_clearance = distance - obstacle_radius +
-                        (dynamic_obs_is_dynamic[obstacle_index] ? p.car_radius : 0.0f);
+                    // min_obstacle_clearance < 0이면 이미 타원 안(충돌)
+                    // min_obstacle_clearance > 0이면 타원 밖(안전)
+                    const float signed_clearance = distance - obstacle_radius;
                     min_obstacle_clearance = fminf(
-                        min_obstacle_clearance, effective_clearance);
+                        min_obstacle_clearance, signed_clearance);
+                    const float soft_slack = fmaxf(
+                        0.0f, p.obstacle_soft_margin - signed_clearance);
+                    step_obstacle_cost += p.q_obs * soft_slack * soft_slack;
                 }
             }
 
@@ -1244,10 +1194,7 @@ namespace mppi
                     ref_xs, ref_ys, ref_yaws, path_len,
                     u_clamped, last_u, p, min_dist, mlp_command_history[10],
                     t == T - 1,
-                    t, dynamic_obs_x, dynamic_obs_y, dynamic_obs_yaw,
-                    dynamic_obs_semi_major, dynamic_obs_semi_minor,
-                    dynamic_obs_is_dynamic,
-                    dynamic_obstacle_count, dynamic_obstacle_horizon,
+                    step_obstacle_cost,
                     &local_path_idx);
             }
 
@@ -1885,7 +1832,8 @@ namespace mppi
             for(int i=0;i<params_.num_obstacles;++i) {
                 const float dx=state.x-params_.obs_x[i];
                 const float dy=state.y-params_.obs_y[i];
-                minimum=std::min(minimum,std::sqrt(dx*dx+dy*dy));
+                minimum=std::min(minimum,
+                    std::sqrt(dx*dx+dy*dy)-params_.car_radius);
             }
             if(dynamic_obstacle_count_ > 0 && dynamic_obstacle_horizon_ > 0) {
                 const int dynamic_step=std::min(static_cast<int>(step),
@@ -1895,8 +1843,8 @@ namespace mppi
                     const float dx=state.x-h_dynamic_obs_x_[index];
                     const float dy=state.y-h_dynamic_obs_y_[index];
                     const float distance=std::sqrt(dx*dx+dy*dy);
-                    float obstacle_radius=0.0f;
-                    if(h_dynamic_obs_is_dynamic_[i] && distance>1.0e-6f) {
+                    float obstacle_radius;
+                    if(distance>1.0e-6f) {
                         const float c=std::cos(h_dynamic_obs_yaw_[index]);
                         const float sn=std::sin(h_dynamic_obs_yaw_[index]);
                         const float local_x=c*dx+sn*dy;
@@ -1906,12 +1854,11 @@ namespace mppi
                         const float minor=std::max(1.0e-3f,h_dynamic_obs_semi_minor_[index]);
                         obstacle_radius=1.0f/std::sqrt(
                             ux*ux/(major*major)+uy*uy/(minor*minor));
-                    } else if(h_dynamic_obs_is_dynamic_[i]) {
+                    } else {
                         obstacle_radius=std::max(h_dynamic_obs_semi_major_[index],
                                                  h_dynamic_obs_semi_minor_[index]);
                     }
-                    minimum=std::min(minimum,distance-obstacle_radius+
-                        (h_dynamic_obs_is_dynamic_[i] ? params_.car_radius : 0.0f));
+                    minimum=std::min(minimum,distance-obstacle_radius);
                 }
             }
         }
@@ -1995,7 +1942,7 @@ namespace mppi
         if(params_.weighted_trajectory_safety_enabled) {
             const bool weighted_obstacle_unsafe =
                 trajectory_min_obstacle_clearance(weighted_control_trajectory_)
-                    < params_.car_radius;
+                    < 0.0f;
             const bool weighted_boundary_unsafe =
                 trajectory_min_boundary_clearance(weighted_control_trajectory_)
                     < 0.0f;
@@ -2012,7 +1959,7 @@ namespace mppi
                 });
                 int safe_candidate=-1;
                 for(int k:candidates) {
-                    if(h_min_obstacle_clearances_[k] >= params_.car_radius &&
+                    if(h_min_obstacle_clearances_[k] >= 0.0f &&
                        h_min_boundary_clearances_[k] >= 0.0f) {
                         safe_candidate=k;
                         break;

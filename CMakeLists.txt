@@ -53,9 +53,8 @@ find_package(Eigen3 REQUIRED NO_MODULE)
 find_package(rosidl_default_generators REQUIRED)
 # [수정 3] fastrtps_cpp 종속성 제거 (기본 typesupport가 알아서 처리함)
 find_package(std_msgs REQUIRED)
-# f1_msgs is only used by the real-car perception obstacle subscriber.  Keep
-# simulator/controller builds usable on machines that do not have that
-# integration workspace installed.
+# f1_msgs is used only by the separate predictor; the MPPI node consumes the
+# package-owned DynamicObstacleTrajectory contract.
 find_package(f1_msgs QUIET)
 
 # CUDA 라이브러리 찾기
@@ -144,13 +143,6 @@ set(SMPPI_NODE_DEPENDENCIES
   geometry_msgs
   sensor_msgs
 )
-if(f1_msgs_FOUND)
-  list(APPEND SMPPI_NODE_DEPENDENCIES f1_msgs)
-  target_compile_definitions(smppi_node PRIVATE SMPPI_HAS_F1_MSGS=1)
-  message(STATUS "f1_msgs found: real-car perception obstacle input enabled")
-else()
-  message(WARNING "f1_msgs not found: real-car perception obstacle input disabled")
-endif()
 ament_target_dependencies(smppi_node ${SMPPI_NODE_DEPENDENCIES})
 ament_target_dependencies(dynamic_obstacle_predictor_node
   rclcpp nav_msgs visualization_msgs geometry_msgs)
@@ -197,6 +189,7 @@ install(TARGETS smppi_lib
 install(PROGRAMS
   scripts/map2_opponent_driver.py
   scripts/collect_mppi_mdn_episode.py
+  scripts/simulated_perception_obstacles.py
   DESTINATION lib/${PROJECT_NAME})
 
 install(DIRECTORY launch config data msg

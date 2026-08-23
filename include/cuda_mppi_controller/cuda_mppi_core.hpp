@@ -269,7 +269,8 @@ private:
     int model_knot_phase_{0};
     std::vector<float> h_costs_;        
     std::vector<float> h_weights_;      
-    // Per-rollout safety summaries.  Keeping these on the device avoids
+    // Per-rollout signed safety clearances: >= 0 is outside the obstacle or
+    // boundary, < 0 is penetration. Keeping these on the device avoids
     // copying K*T states to the CPU when the weighted trajectory is unsafe.
     std::vector<float> h_min_boundary_clearances_;
     std::vector<float> h_min_obstacle_clearances_;

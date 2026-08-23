@@ -17,8 +17,10 @@ dynamic_obstacle_predictor:
     model_path: config/predictor/dynamic_obstacle_frenet_speed_mdn/frenet_mdn.ts
     track_csv: data/map2/map2_mppi_track_optimal.csv
 
-    # v below this threshold is treated as a static circular obstacle.
+    # |v| <= threshold: fixed-pose circular ellipse. |v| > threshold: MDN.
     dynamic_speed_threshold: 1.0
+    # Static obstacle ellipse semi-major == semi-minor == this radius.
+    static_car_radius: 0.24
     opponent_radius: 0.12
     maximum_radius: 0.75
     longitudinal_ellipse_gain: 3.1

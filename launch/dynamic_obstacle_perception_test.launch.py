@@ -18,6 +18,7 @@ from launch.actions import (
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 def _f1_msgs_prefix():
@@ -76,6 +77,9 @@ def generate_launch_description():
         DeclareLaunchArgument(
             "track_csv",
             default_value="data/map2/map2_mppi_track_optimal.csv"),
+        DeclareLaunchArgument("static_x", default_value="1.2929498265693544"),
+        DeclareLaunchArgument("static_y", default_value="-2.148326999195452"),
+        DeclareLaunchArgument("static_yaw", default_value="2.140535854443902"),
         # Use the exact same simulator + ego/opponent MPPI composition as the
         # normal overtaking launch.  Only replace predictor input with the
         # synthetic F1stateArr perception bridge below.
@@ -93,5 +97,13 @@ def generate_launch_description():
             package="smppi_cuda_controller",
             executable="simulated_perception_obstacles.py",
             name="simulated_perception_obstacles",
-            output="screen"),
+            output="screen",
+            parameters=[{
+                "static_x": ParameterValue(
+                    LaunchConfiguration("static_x"), value_type=float),
+                "static_y": ParameterValue(
+                    LaunchConfiguration("static_y"), value_type=float),
+                "static_yaw": ParameterValue(
+                    LaunchConfiguration("static_yaw"), value_type=float),
+            }]),
     ])

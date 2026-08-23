@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Step 4: identify steering mapping and servo lag after classic fitting."""
+"""Step 4: identify applied wheel-angle lag after classic fitting."""
 from pathlib import Path
 
 import steering_actuator_regression as regression
@@ -11,10 +11,6 @@ import steering_actuator_regression as regression
 ROOT = Path(__file__).resolve().parents[2]
 DATA_PATH = ROOT / "model_tuning/data/0821"
 OUTPUT_DIR = ROOT / "model_tuning/results/steering_actuator_regression"
-STEER_SCALE_MIN = 0.15
-STEER_SCALE_MAX = 1.2
-STEER_BIAS_MIN_RAD = -0.15
-STEER_BIAS_MAX_RAD = 0.15
 STEER_TIME_CONSTANT_MIN_S = 0.01
 STEER_TIME_CONSTANT_MAX_S = 0.6
 RANDOM_SEED = 31
@@ -35,10 +31,6 @@ def main():
     """Apply the visible Step 4 settings and run the implementation."""
     regression.DATA = Path(DATA_PATH).expanduser().resolve()
     regression.OUT = Path(OUTPUT_DIR).expanduser().resolve()
-    regression.STATIC_BOUNDS = (
-        (STEER_SCALE_MIN, STEER_SCALE_MAX),
-        (STEER_BIAS_MIN_RAD, STEER_BIAS_MAX_RAD),
-    )
     regression.TAU_BOUNDS = (
         STEER_TIME_CONSTANT_MIN_S, STEER_TIME_CONSTANT_MAX_S)
     regression.SEED = RANDOM_SEED

@@ -206,7 +206,7 @@ def estimate_dataset(samples, columns, dt, params=None, steer_scale=1.1058064699
             alpha = float(np.clip(imu_ema_alpha, 0.0, 1.0))
             filtered_wz = alpha*wz + (1.0-alpha)*filtered_wz
             filtered_ay = alpha*ay + (1.0-alpha)*filtered_ay
-        delta = np.clip(steer_scale*row[names["steer"]] + steer_bias, -max_steer, max_steer)
+        delta = np.clip(row[names["steer"]], -max_steer, max_steer)
         pose_vy = math.nan
         if use_pose_vy and all(name in names for name in ("x", "y", "yaw")):
             pose_history.append((float(stamp),float(row[names["x"]]),float(row[names["y"]])))
@@ -252,7 +252,7 @@ def estimate_dataset_pose_only(samples, columns, dt, params=None,
             estimate=0.0
             covariance=min(covariance+cfg.process_var_vy,max(cfg.initial_var_vy,1e-8))
         else:
-            delta=np.clip(steer_scale*row[names["steer"]]+steer_bias,-max_steer,max_steer)
+            delta=np.clip(row[names["steer"]],-max_steer,max_steer)
             dvy,_,_=dynamics._dynamics(max(abs_vx,cfg.min_longitudinal_speed),delta,estimate,filtered_wz)
             estimate += dt*dvy
             covariance=max(covariance+cfg.process_var_vy,1e-8)

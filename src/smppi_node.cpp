@@ -571,10 +571,9 @@ private:
         for (size_t t=0; t<count; ++t) {
             const auto &s=best_traj[t];
             const auto &u=optimal_controls[t];
-            constexpr float max_wheel_steer=.55f;
+            const float max_wheel_steer=mppi_params_.max_steer;
             const float target=std::max(-max_wheel_steer,std::min(
-                max_wheel_steer,
-                mppi_params_.kinematic_steer_scale*u.steer+mppi_params_.kinematic_steer_bias));
+                max_wheel_steer, u.steer));
             const float raw_rate=(target-applied_steer)/std::max(
                 mppi_params_.steer_servo_time_constant,1.0e-3f);
             const float applied_rate=std::max(-mppi_params_.actuator_max_steer_rate,
@@ -819,10 +818,11 @@ private:
         this->declare_parameter("l_f",    0.163);  mppi_params_.l_f  = this->get_parameter("l_f").as_double();
         this->declare_parameter("l_r",    0.162);  mppi_params_.l_r  = this->get_parameter("l_r").as_double();
         this->declare_parameter("I_z",    0.04712);mppi_params_.I_z  = this->get_parameter("I_z").as_double();
-        this->declare_parameter("kinematic_steer_scale",1.2896732099);
-        mppi_params_.kinematic_steer_scale=this->get_parameter("kinematic_steer_scale").as_double();
-        this->declare_parameter("kinematic_steer_bias",-0.0347926021);
-        mppi_params_.kinematic_steer_bias=this->get_parameter("kinematic_steer_bias").as_double();
+        // Ackermann steering_angle is a wheel-angle command. VESC performs
+        // the hardware servo conversion, so runtime dynamics use identity
+        // command mapping and model only the applied-wheel-angle lag.
+        mppi_params_.kinematic_steer_scale=1.0f;
+        mppi_params_.kinematic_steer_bias=0.0f;
         this->declare_parameter("kinematic_no_slip",true);
         mppi_params_.kinematic_no_slip=this->get_parameter("kinematic_no_slip").as_bool();
         this->declare_parameter("Cm0",    0.04);   mppi_params_.Cm0  = this->get_parameter("Cm0").as_double();
@@ -936,8 +936,8 @@ private:
         lateral_velocity_kf_params_.dr=mppi_params_.dynamic_mlp_D_r;lateral_velocity_kf_params_.er=mppi_params_.dynamic_mlp_E_r;
         lateral_velocity_kf_params_.speed_kp=mppi_params_.speed_servo_kp;
         lateral_velocity_kf_params_.min_accel=mppi_params_.min_accel;lateral_velocity_kf_params_.max_accel=mppi_params_.max_accel;
-        lateral_velocity_kf_params_.steer_scale=mppi_params_.kinematic_steer_scale;lateral_velocity_kf_params_.steer_bias=mppi_params_.kinematic_steer_bias;
-        lateral_velocity_kf_params_.steer_tau=mppi_params_.steer_servo_time_constant;lateral_velocity_kf_params_.max_steer_rate=mppi_params_.actuator_max_steer_rate;
+        lateral_velocity_kf_params_.steer_scale=1.0f;lateral_velocity_kf_params_.steer_bias=0.0f;
+        lateral_velocity_kf_params_.steer_tau=mppi_params_.steer_servo_time_constant;lateral_velocity_kf_params_.max_steer=mppi_params_.max_steer;lateral_velocity_kf_params_.max_steer_rate=mppi_params_.actuator_max_steer_rate;
         lateral_velocity_kf_params_.speed_accel_tau=mppi_params_.speed_reference_accel_time_constant;
         lateral_velocity_kf_params_.speed_brake_tau=mppi_params_.speed_reference_brake_time_constant;
         lateral_velocity_kf_params_.max_speed_rate=mppi_params_.actuator_max_speed_reference_rate;
@@ -1236,15 +1236,13 @@ private:
                                  const builtin_interfaces::msg::Time &stamp) {
         if(mppi_params_.dynamics_model!=mppi::DYNAMIC_MLP_RESIDUAL_SERVO_LAG)
             return;
-        constexpr float max_steer_angle=.55f;
+        const float max_steer_angle=mppi_params_.max_steer;
         const float dt=mppi_params_.model_dt;
         const float speed_command=std::clamp(optimal_control.accel,
             mppi_params_.min_speed,mppi_params_.max_speed);
         const float previous_command=mppi_params_.residual_command_history[8];
         const float steer_target=std::clamp(
-            mppi_params_.kinematic_steer_scale*optimal_control.steer+
-                mppi_params_.kinematic_steer_bias,
-            -max_steer_angle,max_steer_angle);
+            optimal_control.steer,-max_steer_angle,max_steer_angle);
         const float steer_rate=std::clamp(
             (steer_target-mppi_params_.actuator_steer_state)/
                 std::max(mppi_params_.steer_servo_time_constant,1.0e-3f),
@@ -1354,13 +1352,14 @@ private:
                 current_state_.ay=aligned_imu_valid_?aligned_imu_[2]
                     :current_state_.v*current_state_.omega;
             }
-            const float target=std::clamp(mppi_params_.kinematic_steer_scale*last_steer_cmd_+
-                mppi_params_.kinematic_steer_bias,-.55f,.55f);
+            const float target=std::clamp(last_steer_cmd_,
+                -mppi_params_.max_steer,mppi_params_.max_steer);
             const float rate=std::clamp((target-mppi_params_.actuator_steer_state)/
                 std::max(1e-3f,mppi_params_.steer_servo_time_constant),
                 -mppi_params_.actuator_max_steer_rate,mppi_params_.actuator_max_steer_rate);
             mppi_params_.actuator_steer_state=std::clamp(
-                mppi_params_.actuator_steer_state+rate*mppi_params_.dt,-.55f,.55f);
+                mppi_params_.actuator_steer_state+rate*mppi_params_.dt,
+                -mppi_params_.max_steer,mppi_params_.max_steer);
             const float speed_tau=last_speed_cmd_>=mppi_params_.actuator_speed_reference_state
                 ? mppi_params_.speed_reference_accel_time_constant
                 : mppi_params_.speed_reference_brake_time_constant;

@@ -43,9 +43,10 @@ def rollout(params,x,starts,cfg,return_trace=False):
     Bf,Cf,Df,Ef,Br,Cr,Dr,Er=expand(params);lf,lr,m,iz=map(float,(cfg['l_f'],cfg['l_r'],cfg['mass'],cfg['dynamic_mlp_I_z']));wb=lf+lr
     fzf=m*9.81*lr/wb;fzr=m*9.81*lf/wb
     for k in range(H):
-        steer_target=np.clip(float(cfg['kinematic_steer_scale'])*cmd[:,k,0]+float(cfg['kinematic_steer_bias']),-.55,.55)
+        max_steer=float(cfg['max_steer'])
+        steer_target=np.clip(cmd[:,k,0],-max_steer,max_steer)
         steer_rate=np.clip((steer_target-applied)/float(cfg['steer_servo_time_constant']),-float(cfg['actuator_max_steer_rate']),float(cfg['actuator_max_steer_rate']))
-        applied=np.clip(applied+steer_rate*dt,-.55,.55)
+        applied=np.clip(applied+steer_rate*dt,-max_steer,max_steer)
         speed_cmd=np.clip(cmd[:,k,1],float(cfg['min_speed']),4.0)
         tau=np.where(speed_cmd>=speed_ref,float(cfg['speed_reference_accel_time_constant']),float(cfg['speed_reference_brake_time_constant']))
         ref_rate=np.clip((speed_cmd-speed_ref)/np.maximum(tau,1e-3),-float(cfg['actuator_max_speed_reference_rate']),float(cfg['actuator_max_speed_reference_rate']))

@@ -100,10 +100,8 @@ namespace mppi
     __host__ __device__ State update_kinematic(const State &s, const Control &u, const Params &p)
     {
         const float wheelbase = p.l_f + p.l_r;
-        // Identified mapping from /drive steering command to effective tire
-        // angle.  The selected checkpoint was trained with the no-slip branch.
-        const float steer = fminf(.55f,fmaxf(-.55f,
-            p.kinematic_steer_scale*u.steer+p.kinematic_steer_bias));
+        // Ackermann steering_angle is already the commanded wheel angle.
+        const float steer = fminf(p.max_steer,fmaxf(-p.max_steer,u.steer));
         const float beta = p.kinematic_no_slip ? 0.f :
             atanf((p.l_r / wheelbase) * tanf(steer));
         const float next_v = fminf(p.max_speed, fmaxf(p.min_speed, s.v + u.accel * p.dt));
@@ -256,7 +254,7 @@ namespace mppi
                                                     const Params &p,float *history)
     {
         const float speed_cmd=fminf(p.max_speed,fmaxf(p.min_speed,u.accel));
-        const float steer=fminf(.55f,fmaxf(-.55f,p.kinematic_steer_scale*u.steer+p.kinematic_steer_bias));
+        const float steer=fminf(p.max_steer,fmaxf(-p.max_steer,u.steer));
         const float base_ax=fminf(p.max_accel,fmaxf(p.min_accel,p.speed_servo_kp*(speed_cmd-s.v)));
         // min/max_speed constrain the command only. The predicted state is the
         // unconstrained result of integrating the bounded acceleration.
@@ -281,12 +279,12 @@ namespace mppi
                                                             const Params &p,float *history)
     {
         const float speed_cmd=fminf(p.max_speed,fmaxf(p.min_speed,u.accel));
-        const float steer_target=fminf(.55f,fmaxf(-.55f,p.kinematic_steer_scale*u.steer+p.kinematic_steer_bias));
+        const float steer_target=fminf(p.max_steer,fmaxf(-p.max_steer,u.steer));
         const float previous_command=history[8];
         const float previous_delta=history[10];
         const float steer_rate=fminf(p.actuator_max_steer_rate,fmaxf(-p.actuator_max_steer_rate,
             (steer_target-previous_delta)/fmaxf(p.steer_servo_time_constant,1e-3f)));
-        const float steer=fminf(.55f,fmaxf(-.55f,previous_delta+steer_rate*p.dt));
+        const float steer=fminf(p.max_steer,fmaxf(-p.max_steer,previous_delta+steer_rate*p.dt));
         const float beta=atan2f(s.vy,s.v);
         const float base_ax=fminf(p.max_accel,fmaxf(p.min_accel,p.speed_servo_kp*(speed_cmd-s.v)));
         const float base_vx=s.v+base_ax*p.dt,base_vy=s.vy;
@@ -310,7 +308,7 @@ namespace mppi
                                                    const Params &p,float *history)
     {
         const float speed_cmd=fminf(p.max_speed,fmaxf(p.min_speed,u.accel));
-        const float steer=fminf(.55f,fmaxf(-.55f,p.kinematic_steer_scale*u.steer+p.kinematic_steer_bias));
+        const float steer=fminf(p.max_steer,fmaxf(-p.max_steer,u.steer));
         const float base_ax=fminf(p.max_accel,fmaxf(p.min_accel,p.speed_servo_kp*(speed_cmd-s.v)));
         const float base_w=s.v*tanf(steer)/(p.l_f+p.l_r),base_ay=s.v*base_w;
         float raw[20]={s.v,s.vy,s.omega,s.ax,s.ay,u.steer,speed_cmd,base_ax,base_ay,base_w};
@@ -336,7 +334,7 @@ namespace mppi
         bool use_servo_lag,
         float *vx_history = nullptr)
     {
-        constexpr float MAX_STEERING_ANGLE = 0.55f;
+        const float max_steering_angle = params.max_steer;
         constexpr float MIN_DYNAMIC_SPEED = 0.5f;
         // The servo-lag checkpoint is a single 40 ms transition model.  ROS
         // still solves/publishes at 50 Hz; this dt only spaces rollout knots.
@@ -360,26 +358,24 @@ namespace mppi
         float steering_angle;
         if (use_servo_lag) {
             const float target_steering_angle = fminf(
-                MAX_STEERING_ANGLE,
-                fmaxf(-MAX_STEERING_ANGLE,
-                      params.kinematic_steer_scale * control.steer
-                          + params.kinematic_steer_bias));
+                max_steering_angle,
+                fmaxf(-max_steering_angle, control.steer));
             const float steering_rate = fminf(
                 params.actuator_max_steer_rate,
                 fmaxf(-params.actuator_max_steer_rate,
                       (target_steering_angle - previous_actuator_steering_angle)
                           / fmaxf(params.steer_servo_time_constant, 1.0e-3f)));
             steering_angle = fminf(
-                MAX_STEERING_ANGLE,
-                fmaxf(-MAX_STEERING_ANGLE,
+                max_steering_angle,
+                fmaxf(-max_steering_angle,
                       previous_actuator_steering_angle + steering_rate * dynamics_dt));
         } else {
             // Causal no-lag contract: the command available at prediction
             // time t is the previous Ackermann steering command. Do not apply
             // servo scale/bias/tau in this model.
             steering_angle = fminf(
-                MAX_STEERING_ANGLE,
-                fmaxf(-MAX_STEERING_ANGLE, previous_steering_command));
+                max_steering_angle,
+                fmaxf(-max_steering_angle, previous_steering_command));
         }
 
         float &actuator_speed_reference = command_history[11];
@@ -1305,19 +1301,8 @@ namespace mppi
             ? params_.model_dt : params_.dt;
         params_.filter_coeffs = compute_butterworth_coeffs(3.0f, knot_dt);
         h_states_.resize(K * T);
-        // A zero steering command is not physically neutral when the
-        // identified command mapping contains a bias.  Starting every rollout
-        // at zero therefore makes the car curve while the low-pass exploration
-        // noise is still too small to compensate.  Warm-start at the command
-        // whose effective tire angle is zero and use a modest acceleration so
-        // the first horizon can optimize a moving trajectory immediately.
-        float neutral_steer = 0.0f;
-        if (fabsf(params_.kinematic_steer_scale) > 1.0e-6f) {
-            neutral_steer = -params_.kinematic_steer_bias /
-                            params_.kinematic_steer_scale;
-        }
-        neutral_steer = fminf(params_.max_steer,
-                              fmaxf(-params_.max_steer, neutral_steer));
+        // Zero wheel-angle command is the neutral steering command.
+        const float neutral_steer = 0.0f;
         const bool direct_speed=(params_.dynamics_model==KINEMATIC_NOSLIP_NO_IMU_DIRECT_SPEED ||
                                  params_.dynamics_model==SLIP_KINEMATIC_WITH_IMU_DIRECT_SPEED ||
                                  params_.dynamics_model==DYNAMIC_IMU_RECURSIVE ||
@@ -1730,11 +1715,8 @@ namespace mppi
                     const float curvature=angle_normalize(
                         after_heading-before_heading)/stencil_length;
                     const float target_tire_steer=atanf((params_.l_f+params_.l_r)*curvature);
-                    const float scale=fabsf(params_.kinematic_steer_scale)>1.0e-6f
-                        ? params_.kinematic_steer_scale : 1.0f;
                     h_prev_controls_[t].steer=fminf(params_.max_steer,
-                        fmaxf(-params_.max_steer,
-                            (target_tire_steer-params_.kinematic_steer_bias)/scale));
+                        fmaxf(-params_.max_steer, target_tire_steer));
                 }
             }
             direct_speed_warm_start_initialized_=true;
@@ -2006,14 +1988,11 @@ namespace mppi
                 const float heading_error=std::atan2(
                     std::sin(desired_heading-current_state.yaw),
                     std::cos(desired_heading-current_state.yaw));
-                constexpr float max_wheel_steer=.55f;
+                const float max_wheel_steer=params_.max_steer;
                 float desired_applied_steer=std::min(max_wheel_steer,
                     std::max(-max_wheel_steer,0.8f*heading_error));
-                const float steer_scale=std::fabs(params_.kinematic_steer_scale)>1.0e-6f
-                    ?params_.kinematic_steer_scale:1.0f;
                 const float recovery_steer=std::min(params_.max_steer,
-                    std::max(-params_.max_steer,
-                        (desired_applied_steer-params_.kinematic_steer_bias)/steer_scale));
+                    std::max(-params_.max_steer, desired_applied_steer));
                 weighted_controls.assign(T_,{
                     recovery_steer,
                     fminf(params_.min_speed,fmaxf(0.0f,current_state.v))});

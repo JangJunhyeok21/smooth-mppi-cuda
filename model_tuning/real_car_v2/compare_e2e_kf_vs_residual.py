@@ -69,9 +69,11 @@ def rollout_residual(data, weights, cfg, mlp_cfg):
         if k:
             history = np.concatenate((history[:, 1:], command[:, None]), axis=1)
         current = state.copy(); previous_steer = history[:, -2, 0]
-        steer_target = np.clip(p.steer_scale*command[:, 0] + p.steer_bias, -.55, .55)
+        steer_target = np.clip(
+            command[:, 0], -p.max_steer, p.max_steer)
         applied = np.clip(applied + np.clip((steer_target-applied)/max(p.steer_tau, 1e-3),
-                                            -p.max_steer_rate, p.max_steer_rate)*dt, -.55, .55)
+                                            -p.max_steer_rate, p.max_steer_rate)*dt,
+                          -p.max_steer, p.max_steer)
         tau = np.where(command[:, 1] >= speed_reference, p.speed_accel_tau, p.speed_brake_tau)
         speed_reference += np.clip((command[:, 1]-speed_reference)/np.maximum(tau, 1e-3),
                                    -p.v_ref_slew_rate_max, p.v_ref_slew_rate_max)*dt

@@ -60,15 +60,14 @@ def _jacobian(function,state):
 
 def _actuator_sequences(odom_vx,steer_cmd,speed_cmd,dt,cfg):
     n=len(odom_vx);applied=np.empty(n);reference=np.empty(n)
-    applied[0]=np.clip(float(cfg["kinematic_steer_scale"])*steer_cmd[0]
-        +float(cfg["kinematic_steer_bias"]),-.55,.55)
+    max_steer=float(cfg["max_steer"])
+    applied[0]=np.clip(steer_cmd[0],-max_steer,max_steer)
     reference[0]=odom_vx[0]
     for k in range(1,n):
-        target=np.clip(float(cfg["kinematic_steer_scale"])*steer_cmd[k-1]
-            +float(cfg["kinematic_steer_bias"]),-.55,.55)
+        target=np.clip(steer_cmd[k-1],-max_steer,max_steer)
         rate=np.clip((target-applied[k-1])/max(float(cfg["steer_servo_time_constant"]),1e-3),
             -float(cfg["actuator_max_steer_rate"]),float(cfg["actuator_max_steer_rate"]))
-        applied[k]=np.clip(applied[k-1]+rate*dt,-.55,.55)
+        applied[k]=np.clip(applied[k-1]+rate*dt,-max_steer,max_steer)
         tau=float(cfg["speed_reference_accel_time_constant"]
                   if speed_cmd[k-1]>=reference[k-1]
                   else cfg["speed_reference_brake_time_constant"])

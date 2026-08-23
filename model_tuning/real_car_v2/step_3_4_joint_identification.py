@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """Joint Step 3/4 identification by alternating blocks and local polishing.
 
-This avoids the inconsistent one-pass sequence in which Step 4 changes the
-steering map after Step 3 has already fitted the tires.  Every candidate is
-scored as one complete 12-parameter model on the same validation windows.
+This alternates tire/inertia fitting with the applied wheel-angle lag. The
+Ackermann command-to-wheel mapping is fixed to identity.
 """
 from pathlib import Path
 import json
@@ -61,8 +60,6 @@ PACEJKA_D_F_BOUNDS=(.05,3.5);PACEJKA_E_F_BOUNDS=(-1.,1.)
 PACEJKA_B_R_BOUNDS=(.2,30.);PACEJKA_C_R_BOUNDS=(.5,2.5)
 PACEJKA_D_R_BOUNDS=(.05,3.5);PACEJKA_E_R_BOUNDS=(-1.,1.)
 YAW_INERTIA_BOUNDS=(.005,.5)
-STEER_SCALE_BOUNDS=(.15,1.2)
-STEER_BIAS_BOUNDS=(-.15,.15)
 STEER_TIME_CONSTANT_BOUNDS=(.01,.6)
 
 # The fitted values are written to OUTPUT_DIR regardless.  Runtime YAML is
@@ -73,8 +70,7 @@ INTERACTIVE_BAG_INSPECTOR=True
 
 
 TIRE_NAMES=classic.NAMES
-PARAMETER_NAMES=(*TIRE_NAMES,"I_z","kinematic_steer_scale",
-                 "kinematic_steer_bias","steer_servo_time_constant")
+PARAMETER_NAMES=(*TIRE_NAMES,"I_z","steer_servo_time_constant")
 
 
 def configure_modules():
@@ -123,9 +119,9 @@ def split_windows(data):
 def unpack(vector,base_config):
     vector=np.asarray(vector,float);config=dict(base_config)
     config["dynamic_mlp_I_z"]=float(vector[8])
-    config["kinematic_steer_scale"]=float(vector[9])
-    config["kinematic_steer_bias"]=float(vector[10])
-    config["steer_servo_time_constant"]=float(vector[11])
+    config["kinematic_steer_scale"]=1.0
+    config["kinematic_steer_bias"]=0.0
+    config["steer_servo_time_constant"]=float(vector[9])
     config["kinematic_position_speed_scale"]=1.0
     return vector[:8],config
 
@@ -169,24 +165,19 @@ def tire_inertia_block(current,data,train,base_config,round_index):
 
 def steering_block(current,data,train,base_config,round_index):
     tire,config=unpack(current,base_config)
-    steady,transient=steering.excitation_subsets(data,train)
-    steady=limited(steady,OPTIMIZER_WINDOW_LIMIT)
+    _,transient=steering.excitation_subsets(data,train)
     transient=limited(transient,OPTIMIZER_WINDOW_LIMIT)
-    static=differential_evolution(lambda value:classic.objective(
-        tire,data,steady,steering.with_steering(config,value[0],value[1],current[11])),
-        (STEER_SCALE_BOUNDS,STEER_BIAS_BOUNDS),seed=RANDOM_SEED+50+round_index,
-        maxiter=STEERING_BLOCK_MAX_ITERATIONS,popsize=8,polish=True,workers=1)
     lag=minimize_scalar(lambda value:classic.objective(
-        tire,data,transient,steering.with_steering(config,static.x[0],static.x[1],value)),
+        tire,data,transient,steering.with_steering(config,1.0,0.0,value)),
         bounds=STEER_TIME_CONSTANT_BOUNDS,method="bounded",options={"xatol":1e-6})
-    result=current.copy();result[9:]=(*static.x,lag.x)
+    result=current.copy();result[9]=lag.x
     return result
 
 
 def joint_polish(current,data,train,base_config):
     subset=limited(train,OPTIMIZER_WINDOW_LIMIT)
-    bounds=[*map(tuple,classic.BOUNDS),YAW_INERTIA_BOUNDS,STEER_SCALE_BOUNDS,
-            STEER_BIAS_BOUNDS,STEER_TIME_CONSTANT_BOUNDS]
+    bounds=[*map(tuple,classic.BOUNDS),YAW_INERTIA_BOUNDS,
+            STEER_TIME_CONSTANT_BOUNDS]
     result=minimize(lambda value:score(value,data,subset,base_config),current,
         method="Powell",bounds=bounds,options={"maxiter":JOINT_POLISH_MAX_ITERATIONS,
         "xtol":1e-5,"ftol":1e-7})
@@ -197,8 +188,6 @@ def update_yaml(vector):
     values=dict(zip(PARAMETER_NAMES,vector))
     yaml_keys={**{name:f"dynamic_mlp_{name}" for name in TIRE_NAMES},
                "I_z":"dynamic_mlp_I_z",
-               "kinematic_steer_scale":"kinematic_steer_scale",
-               "kinematic_steer_bias":"kinematic_steer_bias",
                "steer_servo_time_constant":"steer_servo_time_constant"}
     reverse={yaml_key:values[name] for name,yaml_key in yaml_keys.items()}
     lines=CONFIG_PATH.read_text().splitlines();found=set()
@@ -220,8 +209,7 @@ def main():
     if min(len(train),len(validation),len(test))==0:
         raise RuntimeError("joint Step 3/4 has an empty train/validation/test window set")
     current=np.asarray([*[base_config[f"dynamic_mlp_{name}"] for name in TIRE_NAMES],
-        base_config["dynamic_mlp_I_z"],base_config["kinematic_steer_scale"],
-        base_config["kinematic_steer_bias"],base_config["steer_servo_time_constant"]],float)
+        base_config["dynamic_mlp_I_z"],base_config["steer_servo_time_constant"]],float)
     accepted=current.copy();baseline_metric,baseline_score=validation_metrics(
         current,data,validation,base_config)
     baseline_test_metric,baseline_test_score=validation_metrics(
@@ -291,14 +279,15 @@ def main():
     (OUTPUT_DIR/"joint_regression.json").write_text(json.dumps(report,indent=2)+"\n")
     (OUTPUT_DIR/"params.json").write_text(json.dumps({
         "expanded_fitted":{**dict(zip(TIRE_NAMES,accepted[:8].tolist())),
-            "I_z":float(accepted[8]),"kinematic_steer_scale":float(accepted[9]),
-            "kinematic_steer_bias":float(accepted[10]),
-            "steer_servo_time_constant":float(accepted[11]),
+            "I_z":float(accepted[8]),"kinematic_steer_scale":1.0,
+            "kinematic_steer_bias":0.0,
+            "steer_servo_time_constant":float(accepted[9]),
             "kinematic_position_speed_scale":1.0},**report},indent=2)+"\n")
     if gate and UPDATE_CONFIG:update_yaml(accepted)
     previous_tire,previous_config=unpack(current,base_config)
     steering.plot_open_loop_evaluation(data,fitted_tire,base_config,
-        current[9:],accepted[9:],validation,test)
+        np.asarray((1.0,0.0,current[9])),
+        np.asarray((1.0,0.0,accepted[9])),validation,test)
     classic.plot_open_loop_evaluation(data,previous_tire,fitted_tire,
         previous_config,fitted_config,validation,test)
     print("\nJoint Step 3/4 parameter changes:")

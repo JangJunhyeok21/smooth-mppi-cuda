@@ -45,6 +45,7 @@ struct LateralVelocityKFParams {
     float steer_scale{1.0f};
     float steer_bias{0.0f};
     float steer_tau{0.1551485f};
+    float max_steer{0.4788f};
     float max_steer_rate{6.5449847f};
 
     float speed_accel_tau{0.09013387f};
@@ -73,8 +74,7 @@ public:
         covariance_ = params_.initial_var.asDiagonal();
 
         applied_steer_ = std::clamp(
-            params_.steer_scale * steer_command + params_.steer_bias,
-            -0.55f, 0.55f);
+            steer_command, -params_.max_steer, params_.max_steer);
         speed_reference_ = vx;
         last_steer_command_ = steer_command;
         last_speed_command_ = speed_command;
@@ -294,15 +294,15 @@ private:
 
     void updateActuators(float steer_command, float speed_command) {
         const float target_steer = std::clamp(
-            params_.steer_scale * steer_command + params_.steer_bias,
-            -0.55f, 0.55f);
+            steer_command, -params_.max_steer, params_.max_steer);
         const float steer_rate = std::clamp(
             (target_steer - applied_steer_)
                 / std::max(params_.steer_tau, 1e-3f),
             -params_.max_steer_rate,
             params_.max_steer_rate);
         applied_steer_ = std::clamp(
-            applied_steer_ + steer_rate * params_.dt, -0.55f, 0.55f);
+            applied_steer_ + steer_rate * params_.dt,
+            -params_.max_steer, params_.max_steer);
 
         const float speed_tau = speed_command >= speed_reference_
             ? params_.speed_accel_tau

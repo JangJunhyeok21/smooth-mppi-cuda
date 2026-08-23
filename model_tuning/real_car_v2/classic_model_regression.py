@@ -278,16 +278,17 @@ def load_regression_data(path,config):
     # These fields preserve the established 20-D contract. Classic rollouts
     # reconstruct actuator state candidate-by-candidate from the warm-up
     # commands, so feature[:,5] is diagnostic rather than an optimizer input.
-    feature[0,5]=np.clip(feature[0,3],-.55,.55)
+    max_steer=float(config["max_steer"])
+    feature[0,5]=np.clip(feature[0,3],-max_steer,max_steer)
     times=samples[:,names["t"]]
     steer_tau=max(float(config["steer_servo_time_constant"]),1e-3)
     steer_rate=float(config["actuator_max_steer_rate"])
     for index in range(1,count):
         dt=max(0.,times[index]-times[index-1])
-        target=np.clip(float(config["kinematic_steer_scale"])*feature[index-1,3]
-                       +float(config["kinematic_steer_bias"]),-.55,.55)
+        target=np.clip(feature[index-1,3],-max_steer,max_steer)
         rate=np.clip((target-feature[index-1,5])/steer_tau,-steer_rate,steer_rate)
-        feature[index,5]=np.clip(feature[index-1,5]+rate*dt,-.55,.55)
+        feature[index,5]=np.clip(
+            feature[index-1,5]+rate*dt,-max_steer,max_steer)
     feature[:,6]=feature[:,3]-np.r_[feature[0,3],feature[:-1,3]]
     for index in range(count):
         for history_index in range(5):
@@ -384,12 +385,12 @@ def starts(data, split):
 def rollout_numpy(parameters, data, window_starts, config, return_residual=False,
                   return_acceleration=False):
     feature = data["features"]
+    max_steer=float(config["max_steer"])
     state = feature[window_starts, :3].astype(np.float64).copy()
     if "teacher_state" in data.files:
         state[:]=data["teacher_state"][window_starts]
-    applied_steer = np.clip(float(config["kinematic_steer_scale"])
-        * feature[window_starts-WARMUP_SAMPLES, 3]
-        + float(config["kinematic_steer_bias"]), -.55, .55)
+    applied_steer = np.clip(
+        feature[window_starts-WARMUP_SAMPLES, 3], -max_steer, max_steer)
     # ``speed_reference`` is a causal hidden actuator state.  Reconstruct it
     # forward from the beginning of the warm-up interval.  Initializing it
     # from state[:, 0] used vx at the *rollout start* and then applied past
@@ -403,12 +404,12 @@ def rollout_numpy(parameters, data, window_starts, config, return_residual=False
     # because that field was generated with the previous steering parameters.
     for offset in range(-WARMUP_SAMPLES, 0):
         warm_command = feature[window_starts+offset, 3:5]
-        warm_target = np.clip(float(config["kinematic_steer_scale"])*warm_command[:,0]
-                              + float(config["kinematic_steer_bias"]), -.55, .55)
+        warm_target = np.clip(warm_command[:,0], -max_steer, max_steer)
         warm_rate = np.clip((warm_target-applied_steer)/float(config["steer_servo_time_constant"]),
                             -float(config["actuator_max_steer_rate"]),
                             float(config["actuator_max_steer_rate"]))
-        applied_steer = np.clip(applied_steer+warm_rate*.02, -.55, .55)
+        applied_steer = np.clip(
+            applied_steer+warm_rate*.02, -max_steer, max_steer)
         warm_tau = np.where(warm_command[:,1] >= speed_reference,
             float(config["speed_reference_accel_time_constant"]),
             float(config["speed_reference_brake_time_constant"]))
@@ -433,14 +434,13 @@ def rollout_numpy(parameters, data, window_starts, config, return_residual=False
         if step:history=np.concatenate((history[:,1:],command[:,None]),axis=1)
         previous_command=history[:,-2,0]
         current_state=state.copy()
-        steer_target = np.clip(
-            float(config["kinematic_steer_scale"])*command[:, 0]
-            + float(config["kinematic_steer_bias"]), -.55, .55)
+        steer_target = np.clip(command[:, 0], -max_steer, max_steer)
         steer_rate = np.clip(
             (steer_target-applied_steer)/float(config["steer_servo_time_constant"]),
             -float(config["actuator_max_steer_rate"]),
             float(config["actuator_max_steer_rate"]))
-        applied_steer = np.clip(applied_steer + steer_rate*dt, -.55, .55)
+        applied_steer = np.clip(
+            applied_steer + steer_rate*dt, -max_steer, max_steer)
         speed_command = np.clip(command[:, 1], float(config["min_speed"]), 4.)
         tau = np.where(speed_command >= speed_reference,
                        float(config["speed_reference_accel_time_constant"]),
@@ -836,19 +836,19 @@ def torch_rollout_loss(raw_parameters, data, window_starts, config, device):
     teacher_state=(torch.as_tensor(data["teacher_state"],device=device,dtype=torch.float64)
                    if "teacher_state" in data.files else None)
     if teacher_state is not None:state=teacher_state[starts_tensor].clone()
-    applied=torch.clamp(float(config["kinematic_steer_scale"])
-        *feature[starts_tensor-WARMUP_SAMPLES,3]+float(config["kinematic_steer_bias"]),-.55,.55)
+    max_steer=float(config["max_steer"])
+    applied=torch.clamp(
+        feature[starts_tensor-WARMUP_SAMPLES,3],-max_steer,max_steer)
     # Match rollout_numpy exactly: initialize the hidden longitudinal state at
     # the past warm-up boundary, never from the future rollout-start vx.
     speed_reference = feature[starts_tensor-WARMUP_SAMPLES, 0].clone()
     predictions=[]; truths=[]
     for offset in range(-WARMUP_SAMPLES,0):
         warm=feature[starts_tensor+offset,3:5]
-        target=torch.clamp(float(config["kinematic_steer_scale"])*warm[:,0]
-                           +float(config["kinematic_steer_bias"]),-.55,.55)
+        target=torch.clamp(warm[:,0],-max_steer,max_steer)
         rate=torch.clamp((target-applied)/float(config["steer_servo_time_constant"]),
                          -float(config["actuator_max_steer_rate"]),float(config["actuator_max_steer_rate"]))
-        applied=torch.clamp(applied+rate*.02,-.55,.55)
+        applied=torch.clamp(applied+rate*.02,-max_steer,max_steer)
         tau=torch.where(warm[:,1]>=speed_reference,
             torch.full_like(speed_reference,float(config["speed_reference_accel_time_constant"])),
             torch.full_like(speed_reference,float(config["speed_reference_brake_time_constant"])))
@@ -862,12 +862,11 @@ def torch_rollout_loss(raw_parameters, data, window_starts, config, device):
     h_cg=float(config.get("load_transfer_h_cg_m",LOAD_TRANSFER_H_CG_M));dt=.04
     for step in range(HORIZON):
         row=starts_tensor+2*step; command=feature[row,3:5]
-        target=torch.clamp(float(config["kinematic_steer_scale"])*command[:,0]
-                           +float(config["kinematic_steer_bias"]),-.55,.55)
+        target=torch.clamp(command[:,0],-max_steer,max_steer)
         rate=torch.clamp((target-applied)/float(config["steer_servo_time_constant"]),
                          -float(config["actuator_max_steer_rate"]),
                          float(config["actuator_max_steer_rate"]))
-        applied=torch.clamp(applied+rate*dt,-.55,.55)
+        applied=torch.clamp(applied+rate*dt,-max_steer,max_steer)
         speed=torch.clamp(command[:,1],float(config["min_speed"]),4.)
         tau=torch.where(speed>=speed_reference,
             torch.full_like(speed,float(config["speed_reference_accel_time_constant"])),
@@ -1486,11 +1485,10 @@ def main():
         for index in (3,7):BOUNDS[index]=(center[index]-.2,center[index]+.2)
         BOUNDS[:,0]=np.maximum(BOUNDS[:,0],original[:,0]);BOUNDS[:,1]=np.minimum(BOUNDS[:,1],original[:,1])
         REFERENCE=center
-    # Keep regression experiments isolated from the deployed runtime YAML.
-    config["kinematic_steer_scale"]=float(os.environ.get(
-        "KINEMATIC_STEER_SCALE_OVERRIDE",config["kinematic_steer_scale"]))
-    config["kinematic_steer_bias"]=float(os.environ.get(
-        "KINEMATIC_STEER_BIAS_OVERRIDE",config["kinematic_steer_bias"]))
+    # Ackermann steering is already wheel angle. These compatibility fields
+    # must remain identity and are not regression variables.
+    config["kinematic_steer_scale"]=1.0
+    config["kinematic_steer_bias"]=0.0
     split_starts = tuple(starts(data, index) for index in range(3))
     if USE_VALIDATION_TEST_SPLIT:
         train, validation, test = split_starts

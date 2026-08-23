@@ -124,8 +124,8 @@
     l_f: 0.1833
     l_r: 0.1407
     # tiv_imu_bagdisjoint_kinematic_classic 식별 결과. l_f/l_r/mass는 학습 시 고정값.
-    kinematic_steer_scale: 1.19958229  # Step 4 vehicle-response identification
-    kinematic_steer_bias: 0.00227245701  # Step 4 vehicle-response identification
+    kinematic_steer_scale: 1.0  # fixed identity: command is wheel angle
+    kinematic_steer_bias: 0.0   # fixed identity: VESC handles servo conversion
     kinematic_position_speed_scale: 1.0  # offline state is physical ground-relative body velocity
     kinematic_no_slip: true               # residual checkpoint 학습 조건(beta=0)
     # vx_cmd 추종 회귀값: 종방향 residual 없이 실제 바퀴속도 응답을 재현

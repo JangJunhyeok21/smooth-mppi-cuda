@@ -132,12 +132,15 @@ def main():
                 history = torch.cat((history[:, 1:], command[:, None]), 1)
             previous_steer = history[:, -2, 0]
             current_state = state
-            steer_target = torch.clamp(parameters.steer_scale * command[:, 0]
-                                       + parameters.steer_bias, -.55, .55)
+            steer_target = torch.clamp(command[:, 0],
+                                       -parameters.max_steer,
+                                       parameters.max_steer)
             steer_rate = torch.clamp((steer_target - applied) / parameters.steer_tau,
                                      -parameters.max_steer_rate,
                                      parameters.max_steer_rate)
-            applied = torch.clamp(applied + steer_rate * DT, -.55, .55)
+            applied = torch.clamp(applied + steer_rate * DT,
+                                  -parameters.max_steer,
+                                  parameters.max_steer)
             tau = torch.where(command[:, 1] >= speed_reference,
                               torch.full_like(speed_reference, parameters.speed_accel_tau),
                               torch.full_like(speed_reference, parameters.speed_brake_tau))

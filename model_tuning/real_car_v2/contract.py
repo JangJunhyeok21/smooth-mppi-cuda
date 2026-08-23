@@ -13,8 +13,8 @@ import numpy as np
 
 DT = 0.02
 IDENTIFIED_PARAMETER_NAMES = (
-    "speed_kp", "speed_accel_tau", "speed_brake_tau", "steer_scale",
-    "steer_bias", "steer_tau", "Iz", "B_f", "C_f", "D_f", "E_f",
+    "speed_kp", "speed_accel_tau", "speed_brake_tau", "steer_tau",
+    "Iz", "B_f", "C_f", "D_f", "E_f",
     "B_r", "C_r", "D_r", "E_r")
 FEATURES = ("vx", "vy", "yaw_rate", "steer_cmd", "speed_cmd", "applied_steer",
             "steer_cmd_delta", "base_next_vx", "base_next_vy", "base_next_yaw_rate",
@@ -32,9 +32,11 @@ class ClassicModelParameters:
     v_ref_slew_rate_max: float = 8.0
     ax_min: float = -1.0
     ax_max: float = 1.0
-    steer_scale: float = 0.50927964
-    steer_bias: float = 0.01015773
+    # Ackermann steering input is already the commanded wheel angle.
+    steer_scale: float = 1.0
+    steer_bias: float = 0.0
     steer_tau: float = 0.15514851356820727
+    max_steer: float = 0.4788
     max_steer_rate: float = 6.544984694978735
     Iz: float = 0.04712
     B_f: float = 5.0
@@ -57,9 +59,10 @@ class ClassicModelParameters:
             v_ref_slew_rate_max=get("v_ref_slew_rate_max", "actuator_max_speed_reference_rate", default=cls.v_ref_slew_rate_max),
             ax_min=get("ax_min", "min_accel", default=cls.ax_min),
             ax_max=get("ax_max", "max_accel", default=cls.ax_max),
-            steer_scale=get("kinematic_steer_scale", "steer_scale", default=cls.steer_scale),
-            steer_bias=get("kinematic_steer_bias", "steer_bias", default=cls.steer_bias),
+            steer_scale=1.0,
+            steer_bias=0.0,
             steer_tau=get("steer_servo_time_constant", "steer_tau", default=cls.steer_tau),
+            max_steer=get("max_steer", default=cls.max_steer),
             max_steer_rate=get("actuator_max_steer_rate", "max_steer_rate", default=cls.max_steer_rate),
             Iz=get("dynamic_mlp_I_z", "Iz", default=cls.Iz),
             **{q: get(f"dynamic_mlp_{q}", q, default=getattr(cls, q))
@@ -88,6 +91,7 @@ class ClassicModelParameters:
             "kinematic_steer_scale": self.steer_scale,
             "kinematic_steer_bias": self.steer_bias,
             "steer_servo_time_constant": self.steer_tau,
+            "max_steer": self.max_steer,
             "actuator_max_steer_rate": self.max_steer_rate,
             "dynamic_mlp_I_z": self.Iz,
             **{f"dynamic_mlp_{q}": getattr(self, q)
@@ -100,6 +104,7 @@ class Contract:
     steer_scale: float = ClassicModelParameters.steer_scale
     steer_bias: float = ClassicModelParameters.steer_bias
     steer_tau: float = ClassicModelParameters.steer_tau
+    max_steer: float = ClassicModelParameters.max_steer
     max_steer_rate: float = ClassicModelParameters.max_steer_rate
     speed_kp: float = ClassicModelParameters.speed_kp
     speed_accel_tau: float = ClassicModelParameters.speed_accel_tau
@@ -116,7 +121,8 @@ class Contract:
     @classmethod
     def from_parameters(cls, p, dt=DT):
         return cls(dt=dt, steer_scale=p.steer_scale, steer_bias=p.steer_bias,
-                   steer_tau=p.steer_tau, max_steer_rate=p.max_steer_rate,
+                   steer_tau=p.steer_tau, max_steer=p.max_steer,
+                   max_steer_rate=p.max_steer_rate,
                    speed_kp=p.speed_kp, speed_accel_tau=p.speed_accel_tau,
                    speed_brake_tau=p.speed_brake_tau,
                    max_speed_reference_rate=p.v_ref_slew_rate_max,
@@ -138,9 +144,9 @@ def artifact_metadata(iteration_id, parameters, kf_version, config_paths=()):
 
 
 def actuator_step(steer, steer_cmd, speed_cmd, vx, c=Contract()):
-    target = np.clip(c.steer_scale*steer_cmd+c.steer_bias, -.55, .55)
+    target = np.clip(steer_cmd, -c.max_steer, c.max_steer)
     rate = np.clip((target-steer)/max(c.steer_tau, 1e-3), -c.max_steer_rate, c.max_steer_rate)
-    steer2 = np.clip(steer+rate*c.dt, -.55, .55)
+    steer2 = np.clip(steer+rate*c.dt, -c.max_steer, c.max_steer)
     ax = np.clip(c.speed_kp*(speed_cmd-vx)-c.drag*vx, c.min_accel, c.max_accel)
     return steer2, ax
 
@@ -163,7 +169,7 @@ def warmup_speed_reference(commands, initial_vx, c):
 
 def warmup_applied_steer(commands, c):
     commands = np.asarray(commands, float)
-    steer = float(np.clip(c.steer_scale*commands[0]+c.steer_bias, -.55, .55)) if len(commands) else 0.0
+    steer = float(np.clip(commands[0], -c.max_steer, c.max_steer)) if len(commands) else 0.0
     for command in commands[1:]:
         steer, _ = actuator_step(steer, command, 0.0, 0.0, c)
     return steer

@@ -43,15 +43,15 @@ BAG_PATH = sorted({metadata.parent for root in NEW_DATA_ROOTS
 OUTPUT_PATH = PROJECT_ROOT / "model_tuning/data/ifac0810_0819_autonomous_physics_clean"
 # F5/direct execution is an interactive inspection workflow.  Set this to
 # False only for unattended batch extraction.
-USE_PLOT = False
+USE_PLOT = True
 # Set True for F5 to skip rosbag extraction and re-open the saved NPZ files.
-REVIEW_SAVED_COLLISIONS = False
+REVIEW_SAVED_COLLISIONS = True
 # Bag-to-pose verification shows that the sensor/body convention changed by
 # 2026-08-15. 0810--0813 y/z oppose MPPI FLU; 0815 onward already match it.
 IMU_WZ_SIGN = 1.0; IMU_AX_SIGN = 1.0; IMU_AY_SIGN = 1.0; IMU_EMA_ALPHA = .25
 IMU_SIGN_CUTOVER = dtlib.date(2026, 8, 15)
 POSE_TOPIC = "/newmcl_pose"; VELOCITY_TOPIC = "/odom"; COMMAND_TOPIC = "/ackermann_cmd"; IMU_TOPIC = "/imu/data"
-DEFAULT_MAP_YAML = (PROJECT_ROOT / "data/map2/ifac_in_ctrack_0821.yaml") # 그냥 시각화 용도임
+DEFAULT_MAP_YAML = (PROJECT_ROOT / "data/map2/map2.yaml") # 그냥 시각화 용도임
 APPLIED_COMMAND_TOPIC = "/drive"
 COMMAND_STEER_MATCH_TOL = 1e-4; COMMAND_SPEED_MATCH_TOL = 1e-4
 # A rollout starting shortly before a manual takeover still contains a response
@@ -72,6 +72,18 @@ HORIZON_STEPS = 60
 MIN_CONTINUOUS_SEGMENT_S = 2.0
 PLOT_ARROW_INTERVAL_S = .10  # data remain 50 Hz; direction arrows are drawn at 10 Hz
 PLOT_TIME_LABEL_INTERVAL_S = 1.0
+# Keep the dense 4x4 diagnostic figure readable without legends covering most
+# of each subplot.  Increase this value temporarily when inspecting labels.
+PLOT_LEGEND_FONT_SIZE = 5.5
+PLOT_LEGEND_OPTIONS = {
+    "fontsize": PLOT_LEGEND_FONT_SIZE,
+    "handlelength": 1.0,
+    "handletextpad": .35,
+    "labelspacing": .20,
+    "borderpad": .25,
+    "columnspacing": .55,
+    "framealpha": .45,
+}
 REVIEW_WINDOW_S = .50
 REVIEW_MOVING_SPEED = .70
 REVIEW_MAX_POSE_SPEED = .12
@@ -234,10 +246,9 @@ def build_callback_prediction_samples(pose,velocity,drive,imu,signs,cfg,accepted
         inertial,imu_valid=causal_hold(processed_imu,anchor_t,max_imu_age)
         steer_cmd=command[:,1];speed_cmd=command[:,3]
         applied_steer=np.empty(len(anchors));speed_reference=np.empty(len(anchors))
-        applied_steer[0]=np.clip(steer_cmd[0],-.55,.55)
+        max_steer=float(cfg.get("max_steer",.4788))
+        applied_steer[0]=np.clip(steer_cmd[0],-max_steer,max_steer)
         speed_reference[0]=anchors[0,1]
-        steer_scale=float(cfg.get("kinematic_steer_scale",1.))
-        steer_bias=float(cfg.get("kinematic_steer_bias",0.))
         steer_tau=max(float(cfg.get("steer_servo_time_constant",.08)),1e-3)
         max_steer_rate=float(cfg.get("actuator_max_steer_rate",np.inf))
         accel_tau=max(float(cfg.get("speed_reference_accel_time_constant",.05)),1e-3)
@@ -245,10 +256,12 @@ def build_callback_prediction_samples(pose,velocity,drive,imu,signs,cfg,accepted
         max_speed_rate=float(cfg.get("actuator_max_speed_reference_rate",np.inf))
         for k in range(1,len(anchors)):
             callback_dt=max(0.,anchor_t[k]-anchor_t[k-1])
-            steer_target=np.clip(steer_scale*steer_cmd[k-1]+steer_bias,-.55,.55)
+            steer_target=np.clip(steer_cmd[k-1],-max_steer,max_steer)
             steer_rate=np.clip((steer_target-applied_steer[k-1])/steer_tau,
                                -max_steer_rate,max_steer_rate)
-            applied_steer[k]=np.clip(applied_steer[k-1]+steer_rate*callback_dt,-.55,.55)
+            applied_steer[k]=np.clip(
+                applied_steer[k-1]+steer_rate*callback_dt,
+                -max_steer,max_steer)
             tau=accel_tau if speed_cmd[k-1]>=speed_reference[k-1] else brake_tau
             speed_rate=np.clip((speed_cmd[k-1]-speed_reference[k-1])/tau,
                                -max_speed_rate,max_speed_rate)
@@ -453,7 +466,7 @@ def plot_extracted(samples, columns, dt, title, command_topic, signs=(1.,1.,1.),
                     textcoords="offset points",fontsize=7,color="black",
                     bbox={"boxstyle":"round,pad=.15","fc":"white","ec":"none","alpha":.7})
     ax.set_title("Raw MCL pose/yaw arrows and MPPI-model KF trajectory");ax.set_xlabel("x [m]");ax.set_ylabel("y [m]")
-    ax.axis("equal");ax.grid(alpha=.25);ax.legend()
+    ax.axis("equal");ax.grid(alpha=.25);ax.legend(**PLOT_LEGEND_OPTIONS)
     signed_imu_wz=wz_sign*imu_wz
     state_axes=panels[1:7]
     state_specs=(("kf_x",x,"MCL x","x","m"),("kf_y",y,"MCL y","y","m"),
@@ -522,7 +535,8 @@ def plot_extracted(samples, columns, dt, title, command_topic, signs=(1.,1.,1.),
     for axis in panels[1:11]:
         for span_start,span_end in review_spans:
             axis.axvspan(span_start,span_end,color="red",alpha=.13,zorder=0)
-        axis.set_xlabel("time [s]");axis.grid(alpha=.25);axis.legend(fontsize=8)
+        axis.set_xlabel("time [s]");axis.grid(alpha=.25)
+        axis.legend(**PLOT_LEGEND_OPTIONS)
     # Keep titles, x labels and legends from touching the neighboring row.
     fig.subplots_adjust(left=.08,right=.97,bottom=.06,top=.95,hspace=.48,wspace=.25)
     action={"key":"q","time":None}

@@ -169,16 +169,17 @@ ros2 launch ekf_pose smppi_with_ekf.launch.py
 ## 동적 장애물 Frenet MDN 학습부터 MPPI 실행까지
 
 현재 실시간 predictor는 Python ROS 노드가 아니라
-`src/dynamic_obstacle_predictor_node.cpp`의 C++/LibTorch 노드다. 학습과
-오프라인 평가는 Python으로 수행하고, 최종 `frenet_mdn.ts` TorchScript 파일만
-C++ 노드에서 읽는다.
+`src/dynamic_obstacle_predictor_node.cpp`의 C++/ONNX Runtime 노드다. 학습과
+오프라인 평가는 Python으로 수행하고, 최종 fixed-shape `frenet_mdn.onnx`
+파일을 C++ 노드에서 읽는다. 입력/출력 Tensor 메모리는 시작할 때 한 번만
+할당하고 60-step recursive rollout 동안 재사용한다.
 
 전체 흐름은 다음과 같다.
 
 ```text
 충돌 없는 simulator MPPI episode 수집
   -> 40 ms Frenet one-step dataset 생성
-  -> one-step MDN 학습 및 TorchScript export
+  -> speed-aware one-step MDN 학습 및 ONNX export
   -> 60-step recursive test 평가
   -> C++ predictor가 50 Hz로 obstacle trajectory 발행
   -> MPPI가 horizon별 회전 타원 obstacle cost 적용
@@ -189,7 +190,8 @@ C++ 노드에서 읽는다.
 - ROS 2 Humble
 - CUDA가 사용 가능한 NVIDIA GPU: 데이터 수집 중 MPPI 실행에 필요
 - `/home/a/anaconda3/envs/RL`: `numpy`, `torch`, `matplotlib`
-- Python PyTorch 설치에 포함된 LibTorch 헤더와 라이브러리
+- 학습 환경: Python `torch`, `onnx`, `numpy`, `matplotlib`
+- 실행 환경: ONNX Runtime C++ (`onnxruntime_cxx_api.h`, `libonnxruntime.so`)
 - `f1tenth_gym_ros` 빌드 완료
 
 ```bash
@@ -198,13 +200,255 @@ source /opt/ros/humble/setup.bash
 source /home/a/smooth-mppi-cuda/f1tenth_gym_ros/install/setup.bash
 
 colcon build --packages-select smppi_cuda_controller --symlink-install \
-  --cmake-args -DCMAKE_BUILD_TYPE=Release
+  --cmake-args -DCMAKE_BUILD_TYPE=Release \
+  -DSMPPI_ONNXRUNTIME_ROOT=/opt/onnxruntime/onnxruntime-linux-x64-1.20.1
 source install/setup.bash
+```
+
+Orin/aarch64에서는 x64 바이너리를 복사하지 말고 aarch64용 ONNX Runtime을
+설치한 뒤 해당 루트를 지정한다.
+
+```bash
+colcon build --packages-select smppi_cuda_controller --symlink-install \
+  --cmake-args -DCMAKE_BUILD_TYPE=Release \
+  -DSMPPI_ONNXRUNTIME_ROOT=/opt/onnxruntime/onnxruntime-linux-aarch64-1.20.1
 ```
 
 실차 `F1stateArr`를 사용하려면 빌드할 때 `f1_msgs`가 검색되어야 한다. 빌드
 로그에 `f1_msgs not found`가 나오면 C++ predictor는 `simulation` 모드만
 지원하며 `perception` 모드로 실행하면 즉시 오류를 낸다.
+
+### 0.1 새 맵용 predictor 준비 절차
+
+아래 예시는 새 맵 이름을 `new_map`으로 둔다. 모든 단계에서 같은 방향과 같은
+track CSV를 사용해야 한다. predictor 입력에 곡률과 좌우 폭이 포함되므로 맵이
+바뀌면 최소한 새 맵 rollout 평가를 해야 하며, 곡률·폭 분포가 기존 map2와 많이
+다르면 새 데이터를 수집해 재학습한다.
+
+#### A. ROS map 파일 배치
+
+```text
+data/new_map/new_map.yaml
+data/new_map/new_map.pgm       # YAML의 image 항목과 확장자가 일치해야 함
+```
+
+YAML의 `resolution`, `origin`, `image`가 실제 이미지와 맞는지 먼저 RViz/map
+server로 확인한다. 이후 map utility는 항상 명시적인 경로 인자를 사용한다.
+스크립트 상단의 `MAP_NAME`을 일시적으로 수정할 필요가 없다.
+
+#### B. centerline, 폭과 MPPI track 생성
+
+STEP 1에서 맵 위를 클릭하여 닫힌 centerline과 초기 좌우 폭을 만든다.
+
+```bash
+python map_utils/step_1_live_centerline_width_preview_gui.py \
+  --map-yaml data/new_map/new_map.yaml \
+  --centerline-output data/new_map/centerline.csv \
+  --width-output data/new_map/width_profile.csv \
+  --xy-output data/new_map/width_profile_xy.csv
+```
+
+STEP 2에서 잘못 잡힌 좌우 boundary point를 GUI로 수정한다.
+
+```bash
+python map_utils/step_2_refine_width_profile_gui.py \
+  --map-yaml data/new_map/new_map.yaml \
+  --input data/new_map/width_profile_xy.csv \
+  --centerline data/new_map/centerline.csv \
+  --output data/new_map/refined_width_profile_xy.csv
+```
+
+STEP 3에서 고정한 좌우 경계의 중점으로 centerline을 옮기고 MPPI 계약 CSV를
+만든다. 이 출력만으로도 MPPI와 predictor를 실행할 수 있다.
+
+```bash
+python map_utils/step_3_refine_centerline_for_equal_width.py \
+  --centerline-csv data/new_map/centerline.csv \
+  --width-profile-csv data/new_map/width_profile.csv \
+  --refined-boundary-xy data/new_map/refined_width_profile_xy.csv \
+  --centerline-output data/new_map/centerline_equal.csv \
+  --width-output data/new_map/width_profile_equal.csv \
+  --xy-output data/new_map/width_profile_equal_xy.csv \
+  --mppi-output data/new_map/new_map_mppi_track.csv
+```
+
+필요하면 STEP 4로 minimum-curvature raceline을 만든다. 이 경우 MPPI와
+predictor 모두 `_optimal.csv`를 사용한다.
+
+```bash
+python map_utils/step_4_generate_minimum_curvature_raceline.py \
+  --input data/new_map/new_map_mppi_track.csv \
+  --output data/new_map/new_map_mppi_track_optimal.csv \
+  --plot model_tuning/results/new_map_raceline.png
+```
+
+최종 CSV 첫 줄에는 최소한 다음 필드가 있어야 한다.
+
+```text
+x_m,y_m,psi_rad,kappa_radpm,w_tr_left_m,w_tr_right_m
+```
+
+MPPI 경계 시각화까지 일치시키려면 `left_x_m,left_y_m,right_x_m,right_y_m`도
+있어야 한다. `psi_rad`는 경로 접선 방향이어야 하고 `w_tr_left_m` 및
+`w_tr_right_m`는 음수가 아니어야 한다.
+
+```bash
+head -1 data/new_map/new_map_mppi_track_optimal.csv
+```
+
+#### C. simulator와 두 MPPI를 같은 맵으로 맞추기
+
+simulator launch는 확장자를 제외한 절대 map base path를 환경변수로 받을 수
+있다. centerline 기반 spawn도 이 디렉터리의 CSV를 사용한다.
+
+```bash
+export F1TENTH_SIM_MAP_PATH=$PWD/data/new_map/new_map
+```
+
+다음 세 설정은 반드시 같은 최종 CSV를 가리켜야 한다.
+
+```yaml
+# config/params.yaml
+csv_file_path: data/new_map/new_map_mppi_track_optimal.csv
+track_csv: data/new_map/new_map_mppi_track_optimal.csv
+
+# config/opponent_params.yaml
+csv_file_path: data/new_map/new_map_mppi_track_optimal.csv
+track_csv: data/new_map/new_map_mppi_track_optimal.csv
+
+# config/dynamic_obstacle_predictor.yaml
+track_csv: data/new_map/new_map_mppi_track_optimal.csv
+```
+
+`params.yaml`과 `opponent_params.yaml`은 ROS wildcard parameter 파일이므로 실제
+키의 기존 들여쓰기를 유지한다. predictor용 `track_csv`는
+`dynamic_obstacle_predictor.yaml`에서 관리한다.
+
+#### D. 새 맵 데이터 수집과 학습 여부 결정
+
+기존 모델을 먼저 새 맵에서 평가할 수 있지만, 아래 경우에는 재학습한다.
+
+- 새 맵 곡률 또는 좌우 폭 범위가 학습 map보다 큼
+- 반대 방향 주행으로 `psi`, curvature 부호 관계가 바뀜
+- 속도 영역이나 상대차량 주행 정책이 달라짐
+- recursive ADE/FDE 또는 worst trajectory가 허용 범위를 벗어남
+
+새 맵에서 충돌 없는 episode를 수집할 때 `--track`과 simulator map을 동일하게
+지정한다.
+
+```bash
+export F1TENTH_SIM_MAP_PATH=$PWD/data/new_map/new_map
+
+/home/a/anaconda3/envs/RL/bin/python \
+  model_tuning/dynamic_obstacle_prediction/collect_and_train_simulator_mdn.py \
+  --episodes 30 \
+  --duration-s 25 \
+  --maximum-attempts 90 \
+  --track data/new_map/new_map_mppi_track_optimal.csv \
+  --data-out model_tuning/data/simulator_mppi_mdn_new_map \
+  --collect-only
+```
+
+speed-aware 72D 모델을 학습한다. `--include-speed`를 빼면 현재 배포 YAML과
+입력 차원이 맞지 않는다.
+
+```bash
+/home/a/anaconda3/envs/RL/bin/python \
+  model_tuning/dynamic_obstacle_prediction/train_frenet_recursive_mdn.py \
+  --data model_tuning/data/simulator_mppi_mdn_new_map \
+  --track data/new_map/new_map_mppi_track_optimal.csv \
+  --out model_tuning/results/dynamic_obstacle_frenet_speed_mdn_new_map \
+  --include-speed \
+  --epochs 120 \
+  --seed 20260823
+```
+
+학습은 `frenet_mdn.pt`, `frenet_mdn.ts`, `frenet_mdn.onnx`와
+`metadata.json`을 생성한다. 실시간 C++ 노드는 ONNX만 사용한다.
+
+#### E. recursive 평가 후 모델 배포
+
+```bash
+MPLBACKEND=Agg /home/a/anaconda3/envs/RL/bin/python \
+  model_tuning/dynamic_obstacle_prediction/evaluate_frenet_recursive_mdn.py \
+  --out model_tuning/results/dynamic_obstacle_frenet_speed_mdn_new_map \
+  --data model_tuning/data/simulator_mppi_mdn_new_map \
+  --track data/new_map/new_map_mppi_track_optimal.csv
+
+mkdir -p config/predictor/dynamic_obstacle_frenet_speed_mdn_new_map
+cp model_tuning/results/dynamic_obstacle_frenet_speed_mdn_new_map/frenet_mdn.onnx \
+   config/predictor/dynamic_obstacle_frenet_speed_mdn_new_map/
+cp model_tuning/results/dynamic_obstacle_frenet_speed_mdn_new_map/metadata.json \
+   config/predictor/dynamic_obstacle_frenet_speed_mdn_new_map/
+```
+
+`config/dynamic_obstacle_predictor.yaml`을 새 asset과 track으로 바꾼다.
+
+```yaml
+include_speed_feature: true
+model_path: config/predictor/dynamic_obstacle_frenet_speed_mdn_new_map/frenet_mdn.onnx
+track_csv: data/new_map/new_map_mppi_track_optimal.csv
+```
+
+ONNX asset과 YAML은 install space에 복사되므로 변경 후 패키지를 다시 빌드하고
+새 터미널에서 `install/setup.bash`를 source한다.
+
+```bash
+colcon build --packages-select smppi_cuda_controller --symlink-install \
+  --cmake-args -DCMAKE_BUILD_TYPE=Release \
+  -DSMPPI_ONNXRUNTIME_ROOT=/opt/onnxruntime/onnxruntime-linux-x64-1.20.1
+source install/setup.bash
+```
+
+#### F. 단독 predictor 및 전체 시스템 검증
+
+```bash
+# predictor만 실행
+ros2 launch smppi_cuda_controller dynamic_obstacle_predictor.launch.py
+
+# 전체 simulator + ego/opponent MPPI + predictor
+F1TENTH_SIM_MAP_PATH=$PWD/data/new_map/new_map \
+ros2 launch smppi_cuda_controller dynamic_obstacle_overtaking.launch.py
+```
+
+정상 계약과 실시간성을 확인한다.
+
+```bash
+ros2 topic echo --once --field horizon /mppi/dynamic_obstacle_trajectory
+# 기대값: 60
+
+ros2 topic hz /mppi/dynamic_obstacle_trajectory
+# 기대값: 약 50 Hz
+
+ros2 topic echo --once --field is_dynamic /mppi/dynamic_obstacle_trajectory
+ros2 topic hz /mppi/dynamic_obstacle_prediction_markers
+# 기본값: 약 5 Hz
+```
+
+노드는 100회마다 다음 시간을 출력한다.
+
+```text
+ONNX MDN timing (last 100): prediction/message ... ms,
+ROS publish ... ms, total ... ms, obstacles=...
+```
+
+현재 x86 PC의 동적 객체 1개/60-step 실측은 prediction 약 `0.67~0.93 ms`,
+전체 약 `0.68~0.94 ms`였다. Orin에서는 반드시 탑재 환경에서 다시 측정한다.
+`total`이 20 ms를 넘으면 50 Hz deadline을 지키지 못한 것이다. RViz Marker는
+제어 입력이 아니므로 연산이 빠듯하면 `publish_markers: false`로 끄거나
+`marker_publish_rate_hz`를 낮추고 `marker_horizon_stride`를 높인다.
+
+#### G. 실차로 전환
+
+```yaml
+input_mode: perception
+perception_topic: /f1/perception/object/obstacles/arr
+```
+
+실차 입력의 `x,y,yaw`는 최종 track CSV와 같은 map frame이어야 한다. `id`는
+history 동안 안정적이어야 하며 `v` 단위는 m/s이다. 정지 객체는
+`dynamic_speed_threshold` 이하에서 원형 정적 장애물로 처리하고, 그보다 빠른
+객체만 ONNX MDN의 60-step trajectory를 사용한다.
 
 ### 1. 학습 데이터 자동 수집
 
@@ -271,7 +515,8 @@ t, x, y, yaw, vx, vy, yaw_rate, speed_cmd, steer_cmd
   model_tuning/dynamic_obstacle_prediction/train_frenet_recursive_mdn.py \
   --data model_tuning/data/simulator_mppi_mdn \
   --track data/map2/map2_mppi_track_optimal.csv \
-  --out model_tuning/results/dynamic_obstacle_frenet_mdn \
+  --out model_tuning/results/dynamic_obstacle_frenet_speed_mdn \
+  --include-speed \
   --epochs 120 \
   --seed 20260823
 ```
@@ -284,9 +529,10 @@ train에 들어간다. 더 안정적인 일반화 평가를 위해서는 20~30�
 학습 출력은 다음과 같다.
 
 ```text
-model_tuning/results/dynamic_obstacle_frenet_mdn/
+model_tuning/results/dynamic_obstacle_frenet_speed_mdn/
   frenet_mdn.pt       # 재학습/checkpoint용 PyTorch 파일
-  frenet_mdn.ts       # C++ 실시간 predictor가 읽는 TorchScript
+  frenet_mdn.ts       # Python/legacy 비교용 TorchScript
+  frenet_mdn.onnx     # C++ 실시간 predictor 배포 파일
   metadata.json       # dt, horizon, history, one-step test metric
 ```
 
@@ -294,19 +540,19 @@ model_tuning/results/dynamic_obstacle_frenet_mdn/
 > 반드시 확인한다.
 
 ```bash
-ls -lh model_tuning/results/dynamic_obstacle_frenet_mdn/frenet_mdn.{pt,ts}
-cat model_tuning/results/dynamic_obstacle_frenet_mdn/metadata.json
+ls -lh model_tuning/results/dynamic_obstacle_frenet_speed_mdn/frenet_mdn.{pt,ts,onnx}
+cat model_tuning/results/dynamic_obstacle_frenet_speed_mdn/metadata.json
 ```
 
 ### 3. 현재 네트워크 입출력 계약
 
 모든 raw episode를 `40 ms` 등간격으로 보간한 뒤 최근 6개 state, 즉
-`0.20 s` history를 사용한다. MDN 입력은 66차원이다.
+`0.20 s` history를 사용한다. 현재 speed-aware MDN 입력은 72차원이다.
 
 ```text
-history: 6 × [delta_s, d, curvature, left_width, right_width, delta_t] = 36
-lookahead: 10 × [curvature, left_width, right_width]                  = 30
-total                                                               = 66
+history: 6 × [delta_s, d, v, curvature, left_width, right_width, delta_t] = 42
+lookahead: 10 × [curvature, left_width, right_width]                      = 30
+total                                                                   = 72
 ```
 
 lookahead는 현재 Frenet `s`부터 `0.5 m` 간격으로 `0.0~4.5 m`를 읽는다.
@@ -324,14 +570,17 @@ one-step MDN의 각 mixture 출력은 다음 4차원이다.
 
 ```bash
 MPLBACKEND=Agg /home/a/anaconda3/envs/RL/bin/python \
-  model_tuning/dynamic_obstacle_prediction/evaluate_frenet_recursive_mdn.py
+  model_tuning/dynamic_obstacle_prediction/evaluate_frenet_recursive_mdn.py \
+  --out model_tuning/results/dynamic_obstacle_frenet_speed_mdn \
+  --data model_tuning/data/simulator_mppi_mdn \
+  --track data/map2/map2_mppi_track_optimal.csv
 ```
 
 평가는 `metadata.json`에 기록된 test episode에서 60-step rollout을 반복하며
 ADE, FDE, P95 ADE와 worst ADE를 출력한다. 결과 그림은 다음에 저장된다.
 
 ```text
-model_tuning/results/dynamic_obstacle_frenet_mdn/recursive_test_performance.png
+model_tuning/results/dynamic_obstacle_frenet_speed_mdn/recursive_test_performance.png
 ```
 
 그림에는 best/median/P95/worst의 global `x-y` GT, recursive prediction과
@@ -340,7 +589,7 @@ model_tuning/results/dynamic_obstacle_frenet_mdn/recursive_test_performance.png
 
 ### 5. C++ predictor 설정
 
-`config/params.yaml`의 `dynamic_obstacle_predictor`를 확인한다.
+predictor의 모든 설정은 `config/dynamic_obstacle_predictor.yaml`에서 관리한다.
 
 ```yaml
 dynamic_obstacle_predictor:
@@ -349,23 +598,29 @@ dynamic_obstacle_predictor:
     simulation_odom_topic: /opp_racecar/odom
     perception_topic: /f1/perception/object/obstacles/arr
     output_topic: /mppi/dynamic_obstacle_trajectory
-    model_path: /home/a/smooth-mppi-cuda/model_tuning/results/dynamic_obstacle_frenet_mdn/frenet_mdn.ts
-    track_csv: /home/a/smooth-mppi-cuda/data/map2/map2_mppi_track_optimal.csv
-    opponent_radius: 0.24
+    include_speed_feature: true
+    model_path: config/predictor/dynamic_obstacle_frenet_speed_mdn/frenet_mdn.onnx
+    track_csv: data/map2/map2_mppi_track_optimal.csv
+    opponent_radius: 0.12
+    static_car_radius: 0.24
     maximum_radius: 0.75
     longitudinal_ellipse_gain: 3.1
     lateral_ellipse_gain: 2.1
     publish_rate_hz: 50.0
+    publish_markers: true
+    marker_publish_rate_hz: 5.0
+    marker_horizon_stride: 4
     dynamic_speed_threshold: 1.0
 ```
 
-`track_csv`는 학습에 사용한 track과 같아야 한다. `model_path`의 TorchScript는
-실행 시 읽으므로 동일한 66D 모델로 재학습한 경우 C++ 재빌드는 필요 없고
-노드 재시작만 필요하다.
+`track_csv`는 학습에 사용한 track과 같아야 한다. `model_path`는 package share
+기준 상대경로다. 현재 노드는 `[1,72]` fixed-shape ONNX를 요구한다. ONNX 또는
+YAML asset을 바꾸면 install space 반영을 위해 패키지를 다시 빌드한 뒤 노드를
+재시작한다.
 
-속력 `|v| >= dynamic_speed_threshold`인 객체에는 recursive MDN과 회전 타원
-cost를 적용한다. `|v| < 1 m/s`인 객체는 정적으로 취급하고 현재 pose를
-유지하며 기존 원형 `car_radius + obstacle_soft_margin` cost를 사용한다.
+속력 `|v| > dynamic_speed_threshold`인 객체에는 recursive MDN과 회전 타원
+cost를 적용한다. 그 이하인 객체는 정적으로 취급하고 현재 pose와
+`static_car_radius` 원 하나를 publish한다.
 
 동적 객체의 `semi_major`, `semi_minor`는 predictor에서 이미 차량 충돌 반경을
 포함한다. MPPI는 중복으로 `car_radius`를 더하지 않고 다음 경계만 사용한다.
@@ -419,7 +674,7 @@ ros2 topic echo /mppi/dynamic_obstacle_trajectory --field semi_minor
 출력된다.
 
 ```text
-MDN timing (last 100): prediction/message ... ms, ROS publish ... ms, total ... ms
+ONNX MDN timing (last 100): prediction/message ... ms, ROS publish ... ms, total ... ms
 ```
 
 MPPI는 `/mppi/dynamic_obstacle_trajectory`를 구독하고 obstacle-major layout

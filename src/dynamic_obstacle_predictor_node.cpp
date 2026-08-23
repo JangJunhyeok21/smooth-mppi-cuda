@@ -1,9 +1,12 @@
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <deque>
 #include <fstream>
 #include <limits>
+#include <memory>
 #include <sstream>
 #include <string>
 #include <unordered_map>
@@ -12,8 +15,7 @@
 #include <nav_msgs/msg/odometry.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <ament_index_cpp/get_package_share_directory.hpp>
-#include <ATen/Parallel.h>
-#include <torch/script.h>
+#include <onnxruntime_cxx_api.h>
 #include <visualization_msgs/msg/marker_array.hpp>
 #include "smppi_cuda_controller/msg/dynamic_obstacle_trajectory.hpp"
 #ifdef SMPPI_HAS_F1_MSGS
@@ -22,6 +24,7 @@
 
 namespace {
 constexpr int kHistory=6,kLookahead=10,kHorizon=60,kLegacyInput=66,kSpeedInput=72;
+constexpr int kMixtures=3,kOutputDim=4;
 constexpr double kDt=0.04,kPi=3.14159265358979323846;
 double wrap(double a){return std::remainder(a,2.0*kPi);}
 std::string package_relative_path(const std::string&path){
@@ -45,50 +48,60 @@ struct Track {
 
 class Predictor:public rclcpp::Node{
  using Msg=smppi_cuda_controller::msg::DynamicObstacleTrajectory;
- Track track_;torch::jit::script::Module model_;std::unordered_map<long,std::deque<Raw>> histories_;
+ Track track_;std::unordered_map<long,std::deque<Raw>> histories_;
+ Ort::Env ort_env_{ORT_LOGGING_LEVEL_WARNING,"smppi_dynamic_obstacle_predictor"};
+ Ort::SessionOptions ort_options_;std::unique_ptr<Ort::Session> ort_session_;
+ Ort::MemoryInfo ort_memory_{Ort::MemoryInfo::CreateCpu(OrtArenaAllocator,OrtMemTypeDefault)};
+ std::array<float,kSpeedInput> input_buffer_{};
+ std::array<float,kMixtures> logits_buffer_{};
+ std::array<float,kMixtures*kOutputDim> mu_buffer_{};
+ std::array<float,kMixtures*kOutputDim> sigma_buffer_{};
+ Ort::Value input_tensor_{nullptr};
+ std::array<Ort::Value,3> output_tensors_{Ort::Value{nullptr},Ort::Value{nullptr},Ort::Value{nullptr}};
  rclcpp::Publisher<Msg>::SharedPtr pub_;rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr marker_pub_;
  rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
 #ifdef SMPPI_HAS_F1_MSGS
  rclcpp::Subscription<f1_msgs::msg::F1stateArr>::SharedPtr perception_sub_;
 #endif
- rclcpp::TimerBase::SharedPtr timer_;double physical_,static_car_radius_,max_radius_,long_gain_,lat_gain_,dynamic_speed_threshold_;bool include_speed_feature_;std::string mode_;
+ rclcpp::TimerBase::SharedPtr timer_;double physical_,static_car_radius_,max_radius_,long_gain_,lat_gain_,dynamic_speed_threshold_,marker_period_;bool include_speed_feature_,publish_markers_;int marker_stride_;std::string mode_;
+ std::chrono::steady_clock::time_point last_marker_publish_{};
  std::uint64_t timing_samples_{0};double prediction_ms_sum_{0.0},publish_ms_sum_{0.0};
  static std::string track_path(rclcpp::Node*n){return package_relative_path(n->declare_parameter<std::string>("track_csv","data/map2/map2_mppi_track_optimal.csv"));}
  static double yaw(const geometry_msgs::msg::Quaternion&q){return std::atan2(2*(q.w*q.z+q.x*q.y),1-2*(q.y*q.y+q.z*q.z));}
- std::vector<float> features(const std::deque<State>&h)const{std::vector<float>v;v.reserve(include_speed_feature_?kSpeedInput:kLegacyInput);for(int i=0;i<kHistory;++i){double ds=0,dt=0;if(i){ds=std::remainder(h[i].s-h[i-1].s,track_.length);dt=h[i].t-h[i-1].t;}v.push_back(float(ds));v.push_back(float(h[i].d));if(include_speed_feature_)v.push_back(float(h[i].v));v.insert(v.end(),{float(h[i].k),float(h[i].left),float(h[i].right),float(dt)});}for(int j=0;j<kLookahead;++j){int i=track_.at(h.back().s+.5*j);v.insert(v.end(),{float(track_.k[i]),float(track_.left[i]),float(track_.right[i])});}return v;}
+ builtin_interfaces::msg::Duration marker_lifetime()const{const auto ns=static_cast<std::int64_t>(1.0e9*std::max(.25,1.5*marker_period_));builtin_interfaces::msg::Duration value;value.sec=static_cast<std::int32_t>(ns/1000000000LL);value.nanosec=static_cast<std::uint32_t>(ns%1000000000LL);return value;}
+ void fill_features(const std::deque<State>&h){int n=0;for(int i=0;i<kHistory;++i){double ds=0,dt=0;if(i){ds=std::remainder(h[i].s-h[i-1].s,track_.length);dt=h[i].t-h[i-1].t;}input_buffer_[n++]=float(ds);input_buffer_[n++]=float(h[i].d);if(include_speed_feature_)input_buffer_[n++]=float(h[i].v);input_buffer_[n++]=float(h[i].k);input_buffer_[n++]=float(h[i].left);input_buffer_[n++]=float(h[i].right);input_buffer_[n++]=float(dt);}for(int j=0;j<kLookahead;++j){int i=track_.at(h.back().s+.5*j);input_buffer_[n++]=float(track_.k[i]);input_buffer_[n++]=float(track_.left[i]);input_buffer_[n++]=float(track_.right[i]);}}
+ void infer(const std::deque<State>&h,float&var_s,float&var_d,int&best){fill_features(h);const char*inputs[]={"features"};const char*outputs[]={"logits","mu","sigma"};ort_session_->Run(Ort::RunOptions{nullptr},inputs,&input_tensor_,1,outputs,output_tensors_.data(),3);float max_logit=logits_buffer_[0];best=0;for(int m=1;m<kMixtures;++m){if(logits_buffer_[m]>max_logit){max_logit=logits_buffer_[m];best=m;}}float sum=0,mean_s=0,mean_d=0;std::array<float,kMixtures>prob{};for(int m=0;m<kMixtures;++m){prob[m]=std::exp(logits_buffer_[m]-max_logit);sum+=prob[m];}for(int m=0;m<kMixtures;++m){prob[m]/=sum;mean_s+=prob[m]*mu_buffer_[m*kOutputDim];mean_d+=prob[m]*mu_buffer_[m*kOutputDim+1];}float step_var_s=0,step_var_d=0;for(int m=0;m<kMixtures;++m){const float ds=mu_buffer_[m*kOutputDim]-mean_s,dd=mu_buffer_[m*kOutputDim+1]-mean_d;step_var_s+=prob[m]*(sigma_buffer_[m*kOutputDim]*sigma_buffer_[m*kOutputDim]+ds*ds);step_var_d+=prob[m]*(sigma_buffer_[m*kOutputDim+1]*sigma_buffer_[m*kOutputDim+1]+dd*dd);}var_s+=step_var_s;var_d+=step_var_d;}
  bool resample(const std::deque<Raw>&raw,std::deque<State>&out)const{if(raw.size()<2)return false;double now=raw.back().t,first=now-(kHistory-1)*kDt;if(first<raw.front().t)return false;size_t cursor=0;for(int j=0;j<kHistory;++j){double q=first+j*kDt;while(cursor+1<raw.size()&&raw[cursor+1].t<q)++cursor;if(cursor+1>=raw.size())return false;const auto&a=raw[cursor];const auto&b=raw[cursor+1];double u=(q-a.t)/std::max(1e-9,b.t-a.t);Raw r{q,a.x+u*(b.x-a.x),a.y+u*(b.y-a.y),a.yaw+u*wrap(b.yaw-a.yaw),a.v+u*(b.v-a.v)};out.push_back(track_.project(r));}return true;}
- void predict_one(long id,const std::deque<Raw>&raw,Msg&msg,visualization_msgs::msg::MarkerArray&markers,int obstacle){
+ void predict_one(long id,const std::deque<Raw>&raw,Msg&msg,visualization_msgs::msg::MarkerArray&markers,int obstacle,bool visualize){
   if(raw.empty())return;
   const bool is_dynamic=std::abs(raw.back().v)>dynamic_speed_threshold_;
-  double var_s=0,var_d=0;msg.obstacle_ids.push_back(id);msg.is_dynamic.push_back(is_dynamic);
+  float var_s=0,var_d=0;msg.obstacle_ids.push_back(id);msg.is_dynamic.push_back(is_dynamic);
   if(!is_dynamic){
    const auto&current=raw.back();msg.x.push_back(current.x);msg.y.push_back(current.y);msg.yaw.push_back(current.yaw);msg.semi_major.push_back(static_car_radius_);msg.semi_minor.push_back(static_car_radius_);
-   visualization_msgs::msg::Marker mk;mk.header=msg.header;mk.ns="mdn_prediction_"+std::to_string(id);mk.id=obstacle*kHorizon;mk.type=mk.CYLINDER;mk.action=mk.ADD;mk.pose.position.x=current.x;mk.pose.position.y=current.y;mk.pose.position.z=.05;mk.pose.orientation.z=std::sin(current.yaw/2);mk.pose.orientation.w=std::cos(current.yaw/2);mk.scale.x=2*static_car_radius_;mk.scale.y=2*static_car_radius_;mk.scale.z=.05;mk.color.r=.6f;mk.color.g=.6f;mk.color.b=.6f;mk.color.a=.57f;markers.markers.push_back(mk);return;
+   if(visualize){visualization_msgs::msg::Marker mk;mk.header=msg.header;mk.ns="mdn_prediction_"+std::to_string(id);mk.id=obstacle*kHorizon;mk.type=mk.CYLINDER;mk.action=mk.ADD;mk.lifetime=marker_lifetime();mk.pose.position.x=current.x;mk.pose.position.y=current.y;mk.pose.position.z=.05;mk.pose.orientation.z=std::sin(current.yaw/2);mk.pose.orientation.w=std::cos(current.yaw/2);mk.scale.x=2*static_car_radius_;mk.scale.y=2*static_car_radius_;mk.scale.z=.05;mk.color.r=.6f;mk.color.g=.6f;mk.color.b=.6f;mk.color.a=.57f;markers.markers.push_back(mk);}return;
   }
   std::deque<State>h;if(!resample(raw,h)){msg.obstacle_ids.pop_back();msg.is_dynamic.pop_back();return;}
   for(int step=0;step<kHorizon;++step){
    auto old=h.back();double sv=old.s,d=old.d,e=old.e;
    if(is_dynamic){
-    auto f=features(h);auto input=torch::from_blob(f.data(),{1,static_cast<long>(f.size())},torch::kFloat32).clone();auto tuple=model_.forward({input}).toTuple();auto logits=tuple->elements()[0].toTensor()[0];auto mu=tuple->elements()[1].toTensor()[0];auto sigma=tuple->elements()[2].toTensor()[0];auto p=torch::softmax(logits,0);auto mean=(p.unsqueeze(1)*mu).sum(0);auto variance=(p.unsqueeze(1)*(sigma.square()+(mu-mean).square())).sum(0);var_s+=variance[0].item<double>();var_d+=variance[1].item<double>();int m=logits.argmax().item<int>();auto z=mu[m];sv=std::fmod(old.s+z[0].item<double>()+track_.length,track_.length);d=old.d+z[1].item<double>();e=wrap(old.e+z[2].item<double>());int next=track_.at(sv);h.pop_front();h.push_back({old.t+kDt,sv,d,e,std::max(0.,z[3].item<double>()),track_.k[next],track_.left[next],track_.right[next]});
+    int m=0;infer(h,var_s,var_d,m);const float*z=mu_buffer_.data()+m*kOutputDim;sv=std::fmod(old.s+z[0]+track_.length,track_.length);d=old.d+z[1];e=wrap(old.e+z[2]);int next=track_.at(sv);h.pop_front();h.push_back({old.t+kDt,sv,d,e,std::max(0.,double(z[3])),track_.k[next],track_.left[next],track_.right[next]});
    }
-   int ti=track_.at(sv);double angle=track_.psi[ti]+e,px=track_.x[ti]-d*std::sin(track_.psi[ti]),py=track_.y[ti]+d*std::cos(track_.psi[ti]);double a=is_dynamic?std::min(max_radius_,physical_+long_gain_*std::sqrt(std::max(0.,var_s))):static_car_radius_,b=is_dynamic?std::min(max_radius_,physical_+lat_gain_*std::sqrt(std::max(0.,var_d))):static_car_radius_;msg.x.push_back(px);msg.y.push_back(py);msg.yaw.push_back(angle);msg.semi_major.push_back(a);msg.semi_minor.push_back(b);
-   visualization_msgs::msg::Marker mk;mk.header=msg.header;mk.ns="mdn_prediction_"+std::to_string(id);mk.id=obstacle*kHorizon+step;mk.type=mk.CYLINDER;mk.action=mk.ADD;mk.pose.position.x=px;mk.pose.position.y=py;mk.pose.position.z=.05;mk.pose.orientation.z=std::sin(angle/2);mk.pose.orientation.w=std::cos(angle/2);mk.scale.x=2*a;mk.scale.y=2*b;mk.scale.z=.05;mk.color.r=is_dynamic?1.f:.6f;mk.color.g=is_dynamic?.15f:.6f;mk.color.b=is_dynamic?.05f:.6f;mk.color.a=.12f+.45f*step/kHorizon;markers.markers.push_back(mk);
+   int ti=track_.at(sv);double angle=track_.psi[ti]+e,px=track_.x[ti]-d*std::sin(track_.psi[ti]),py=track_.y[ti]+d*std::cos(track_.psi[ti]);double a=is_dynamic?std::min(max_radius_,physical_+long_gain_*std::sqrt(std::max(0.f,var_s))):static_car_radius_,b=is_dynamic?std::min(max_radius_,physical_+lat_gain_*std::sqrt(std::max(0.f,var_d))):static_car_radius_;msg.x.push_back(px);msg.y.push_back(py);msg.yaw.push_back(angle);msg.semi_major.push_back(a);msg.semi_minor.push_back(b);
+   if(visualize&&step%marker_stride_==0){visualization_msgs::msg::Marker mk;mk.header=msg.header;mk.ns="mdn_prediction_"+std::to_string(id);mk.id=obstacle*kHorizon+step;mk.type=mk.CYLINDER;mk.action=mk.ADD;mk.lifetime=marker_lifetime();mk.pose.position.x=px;mk.pose.position.y=py;mk.pose.position.z=.05;mk.pose.orientation.z=std::sin(angle/2);mk.pose.orientation.w=std::cos(angle/2);mk.scale.x=2*a;mk.scale.y=2*b;mk.scale.z=.05;mk.color.r=is_dynamic?1.f:.6f;mk.color.g=is_dynamic?.15f:.6f;mk.color.b=is_dynamic?.05f:.6f;mk.color.a=.12f+.45f*step/kHorizon;markers.markers.push_back(mk);}
   }
  }
- void tick(){using Clock=std::chrono::steady_clock;const auto begin=Clock::now();Msg msg;msg.header.stamp=now();msg.header.frame_id="map";msg.dt=kDt;msg.horizon=kHorizon;visualization_msgs::msg::MarkerArray markers;int n=0;double current=now().seconds();for(auto&[id,h]:histories_){if(n>=5||h.empty()||current-h.back().t>.5)continue;predict_one(id,h,msg,markers,n++);}const auto predicted=Clock::now();if(!msg.obstacle_ids.empty()){pub_->publish(msg);marker_pub_->publish(markers);const auto published=Clock::now();const double prediction_ms=std::chrono::duration<double,std::milli>(predicted-begin).count();const double publish_ms=std::chrono::duration<double,std::milli>(published-predicted).count();prediction_ms_sum_+=prediction_ms;publish_ms_sum_+=publish_ms;if(++timing_samples_%100==0){RCLCPP_INFO(get_logger(),"MDN timing (last 100): prediction/message %.3f ms, ROS publish %.3f ms, total %.3f ms, obstacles=%d",prediction_ms_sum_/100.0,publish_ms_sum_/100.0,(prediction_ms_sum_+publish_ms_sum_)/100.0,n);prediction_ms_sum_=0.0;publish_ms_sum_=0.0;}}}
+ void tick(){using Clock=std::chrono::steady_clock;const auto begin=Clock::now();const bool visualize=publish_markers_&&(last_marker_publish_.time_since_epoch().count()==0||std::chrono::duration<double>(begin-last_marker_publish_).count()>=marker_period_);Msg msg;msg.header.stamp=now();msg.header.frame_id="map";msg.dt=kDt;msg.horizon=kHorizon;visualization_msgs::msg::MarkerArray markers;if(visualize){markers.markers.reserve(1+5*((kHorizon+marker_stride_-1)/marker_stride_));visualization_msgs::msg::Marker clear;clear.header=msg.header;clear.action=clear.DELETEALL;markers.markers.push_back(clear);}int n=0;double current=now().seconds();for(auto&[id,h]:histories_){if(n>=5||h.empty()||current-h.back().t>.5)continue;predict_one(id,h,msg,markers,n++,visualize);}const auto predicted=Clock::now();if(visualize){marker_pub_->publish(markers);last_marker_publish_=begin;}if(!msg.obstacle_ids.empty()){pub_->publish(msg);const auto published=Clock::now();const double prediction_ms=std::chrono::duration<double,std::milli>(predicted-begin).count();const double publish_ms=std::chrono::duration<double,std::milli>(published-predicted).count();prediction_ms_sum_+=prediction_ms;publish_ms_sum_+=publish_ms;if(++timing_samples_%100==0){RCLCPP_INFO(get_logger(),"ONNX MDN timing (last 100): prediction/message %.3f ms, ROS publish %.3f ms, total %.3f ms, obstacles=%d",prediction_ms_sum_/100.0,publish_ms_sum_/100.0,(prediction_ms_sum_+publish_ms_sum_)/100.0,n);prediction_ms_sum_=0.0;publish_ms_sum_=0.0;}}}
 public:
  Predictor():Node("dynamic_obstacle_predictor"),track_(track_path(this)){
-  // This network is tiny and is invoked recursively. A single intra-op thread
-  // avoids paying a thread-pool synchronization cost at every horizon knot.
-  at::set_num_threads(1);at::set_num_interop_threads(1);
-  mode_=declare_parameter<std::string>("input_mode","simulation");include_speed_feature_=declare_parameter<bool>("include_speed_feature",true);auto model_path=package_relative_path(declare_parameter<std::string>("model_path","config/predictor/dynamic_obstacle_frenet_speed_mdn/frenet_mdn.ts"));physical_=declare_parameter<double>("opponent_radius",.24);static_car_radius_=declare_parameter<double>("static_car_radius",.24);max_radius_=declare_parameter<double>("maximum_radius",.75);long_gain_=declare_parameter<double>("longitudinal_ellipse_gain",3.1);lat_gain_=declare_parameter<double>("lateral_ellipse_gain",2.1);dynamic_speed_threshold_=declare_parameter<double>("dynamic_speed_threshold",1.0);if(!(static_car_radius_>0.0)||!(dynamic_speed_threshold_>=0.0))throw std::invalid_argument("static_car_radius must be positive and dynamic_speed_threshold non-negative");auto output=declare_parameter<std::string>("output_topic","/mppi/dynamic_obstacle_trajectory");auto marker_topic=declare_parameter<std::string>("marker_topic","/mppi/dynamic_obstacle_prediction_markers");model_=torch::jit::load(model_path);model_.eval();auto expected=include_speed_feature_?kSpeedInput:kLegacyInput;for(const auto&buffer:model_.named_buffers())if(buffer.name=="input_mean"&&buffer.value.numel()!=expected)throw std::runtime_error("predictor model/YAML input mismatch: expected "+std::to_string(expected)+" features");pub_=create_publisher<Msg>(output,10);marker_pub_=create_publisher<visualization_msgs::msg::MarkerArray>(marker_topic,10);
+  mode_=declare_parameter<std::string>("input_mode","simulation");include_speed_feature_=declare_parameter<bool>("include_speed_feature",true);auto model_path=package_relative_path(declare_parameter<std::string>("model_path","config/predictor/dynamic_obstacle_frenet_speed_mdn/frenet_mdn.onnx"));physical_=declare_parameter<double>("opponent_radius",.24);static_car_radius_=declare_parameter<double>("static_car_radius",.24);max_radius_=declare_parameter<double>("maximum_radius",.75);long_gain_=declare_parameter<double>("longitudinal_ellipse_gain",3.1);lat_gain_=declare_parameter<double>("lateral_ellipse_gain",2.1);dynamic_speed_threshold_=declare_parameter<double>("dynamic_speed_threshold",1.0);publish_markers_=declare_parameter<bool>("publish_markers",true);const double marker_hz=declare_parameter<double>("marker_publish_rate_hz",5.0);marker_stride_=std::max(1,static_cast<int>(declare_parameter<int64_t>("marker_horizon_stride",4)));marker_period_=1.0/std::max(.1,marker_hz);if(!(static_car_radius_>0.0)||!(dynamic_speed_threshold_>=0.0))throw std::invalid_argument("static_car_radius must be positive and dynamic_speed_threshold non-negative");auto output=declare_parameter<std::string>("output_topic","/mppi/dynamic_obstacle_trajectory");auto marker_topic=declare_parameter<std::string>("marker_topic","/mppi/dynamic_obstacle_prediction_markers");
+  const int expected=include_speed_feature_?kSpeedInput:kLegacyInput;ort_options_.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);ort_options_.SetExecutionMode(ExecutionMode::ORT_SEQUENTIAL);ort_options_.SetIntraOpNumThreads(1);ort_options_.SetInterOpNumThreads(1);ort_session_=std::make_unique<Ort::Session>(ort_env_,model_path.c_str(),ort_options_);const std::array<int64_t,2>input_shape{1,expected};const std::array<int64_t,2>logits_shape{1,kMixtures};const std::array<int64_t,3>output_shape{1,kMixtures,kOutputDim};input_tensor_=Ort::Value::CreateTensor<float>(ort_memory_,input_buffer_.data(),expected,input_shape.data(),input_shape.size());output_tensors_[0]=Ort::Value::CreateTensor<float>(ort_memory_,logits_buffer_.data(),logits_buffer_.size(),logits_shape.data(),logits_shape.size());output_tensors_[1]=Ort::Value::CreateTensor<float>(ort_memory_,mu_buffer_.data(),mu_buffer_.size(),output_shape.data(),output_shape.size());output_tensors_[2]=Ort::Value::CreateTensor<float>(ort_memory_,sigma_buffer_.data(),sigma_buffer_.size(),output_shape.data(),output_shape.size());pub_=create_publisher<Msg>(output,10);marker_pub_=create_publisher<visualization_msgs::msg::MarkerArray>(marker_topic,10);
   if(mode_=="simulation"||mode_=="both"){auto topic=declare_parameter<std::string>("simulation_odom_topic","/opp_racecar/odom");odom_sub_=create_subscription<nav_msgs::msg::Odometry>(topic,20,[this](nav_msgs::msg::Odometry::SharedPtr m){double t=rclcpp::Time(m->header.stamp).seconds();histories_[1].push_back({t,m->pose.pose.position.x,m->pose.pose.position.y,yaw(m->pose.pose.orientation),std::hypot(m->twist.twist.linear.x,m->twist.twist.linear.y)});while(histories_[1].size()>100)histories_[1].pop_front();});}
 #ifdef SMPPI_HAS_F1_MSGS
   if(mode_=="perception"||mode_=="both"){auto topic=declare_parameter<std::string>("perception_topic","/f1/perception/object/obstacles/arr");perception_sub_=create_subscription<f1_msgs::msg::F1stateArr>(topic,20,[this](f1_msgs::msg::F1stateArr::SharedPtr m){double t=rclcpp::Time(m->header.stamp).seconds();for(auto&o:m->f1_state_arr){if(!std::isfinite(o.x+o.y+o.yaw+o.v))continue;auto&h=histories_[static_cast<long>(o.id)];h.push_back({t,o.x,o.y,o.yaw,o.v});while(h.size()>100)h.pop_front();}});}
 #else
   if(mode_!="simulation")throw std::runtime_error("perception mode requires f1_msgs");
 #endif
-  double hz=declare_parameter<double>("publish_rate_hz",50);timer_=create_wall_timer(std::chrono::duration<double>(1/hz),[this]{tick();});RCLCPP_INFO(get_logger(),"C++ Frenet recursive MDN loaded: %s; speed_feature=%s input=%d dt=%.2f horizon=%d, publish=%.1f Hz",model_path.c_str(),include_speed_feature_?"true":"false",include_speed_feature_?kSpeedInput:kLegacyInput,kDt,kHorizon,hz);
+  double hz=declare_parameter<double>("publish_rate_hz",50);timer_=create_wall_timer(std::chrono::duration<double>(1/hz),[this]{tick();});RCLCPP_INFO(get_logger(),"C++ ONNX Frenet recursive MDN loaded: %s; speed_feature=%s input=%d dt=%.2f horizon=%d, trajectory=%.1f Hz, markers=%.1f Hz stride=%d",model_path.c_str(),include_speed_feature_?"true":"false",expected,kDt,kHorizon,hz,publish_markers_?marker_hz:0.0,marker_stride_);
  }
 };
 int main(int argc,char**argv){rclcpp::init(argc,argv);try{rclcpp::spin(std::make_shared<Predictor>());}catch(const std::exception&e){fprintf(stderr,"predictor fatal: %s\n",e.what());rclcpp::shutdown();return 1;}rclcpp::shutdown();return 0;}

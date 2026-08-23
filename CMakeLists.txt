@@ -59,9 +59,22 @@ find_package(f1_msgs QUIET)
 
 # CUDA 라이브러리 찾기
 find_package(CUDAToolkit REQUIRED)
-# C++ predictor uses CPU TorchScript. Link CPU LibTorch explicitly so
-# TorchConfig cannot overwrite the MPPI target's CUDA architecture flags.
-set(SMPPI_TORCH_ROOT "/home/a/.local/lib/python3.10/site-packages/torch")
+# The predictor uses the same lightweight ONNX Runtime C++ path as the
+# real-time MDN_SLCMPC implementation.  Override this cache entry on Orin with
+# the root of an ONNX Runtime build that includes CUDA/TensorRT providers.
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
+  set(SMPPI_ONNXRUNTIME_DEFAULT "/opt/onnxruntime/onnxruntime-linux-aarch64-1.20.1")
+else()
+  set(SMPPI_ONNXRUNTIME_DEFAULT "/opt/onnxruntime/onnxruntime-linux-x64-1.20.1")
+endif()
+set(SMPPI_ONNXRUNTIME_ROOT "${SMPPI_ONNXRUNTIME_DEFAULT}"
+    CACHE PATH "ONNX Runtime installation root (set this on Orin)")
+if(NOT EXISTS "${SMPPI_ONNXRUNTIME_ROOT}/include/onnxruntime_cxx_api.h" OR
+   NOT EXISTS "${SMPPI_ONNXRUNTIME_ROOT}/lib/libonnxruntime.so")
+  message(FATAL_ERROR
+    "ONNX Runtime not found under ${SMPPI_ONNXRUNTIME_ROOT}; set "
+    "-DSMPPI_ONNXRUNTIME_ROOT=<onnxruntime-install-root>")
+endif()
 
 # 라이브러리 생성 (.cpp 대신 .cu 포함)
 add_library(smppi_lib STATIC
@@ -90,8 +103,7 @@ add_executable(dynamic_obstacle_predictor_node
 set_property(TARGET dynamic_obstacle_predictor_node PROPERTY CXX_STANDARD 17)
 target_include_directories(dynamic_obstacle_predictor_node PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-  ${SMPPI_TORCH_ROOT}/include
-  ${SMPPI_TORCH_ROOT}/include/torch/csrc/api/include)
+  ${SMPPI_ONNXRUNTIME_ROOT}/include)
 
 add_executable(mppi_step_parity model_tuning/real_car_v2/mppi_step_parity.cu)
 target_include_directories(mppi_step_parity PUBLIC
@@ -127,12 +139,10 @@ rosidl_get_typesupport_target(cpp_typesupport_target ${PROJECT_NAME} "rosidl_typ
 target_link_libraries(smppi_node "${cpp_typesupport_target}")
 target_link_libraries(dynamic_obstacle_predictor_node
   "${cpp_typesupport_target}"
-  ${SMPPI_TORCH_ROOT}/lib/libtorch.so
-  ${SMPPI_TORCH_ROOT}/lib/libtorch_cpu.so
-  ${SMPPI_TORCH_ROOT}/lib/libc10.so)
+  ${SMPPI_ONNXRUNTIME_ROOT}/lib/libonnxruntime.so)
 set_target_properties(dynamic_obstacle_predictor_node PROPERTIES
-  BUILD_RPATH "${SMPPI_TORCH_ROOT}/lib"
-  INSTALL_RPATH "${SMPPI_TORCH_ROOT}/lib")
+  BUILD_RPATH "${SMPPI_ONNXRUNTIME_ROOT}/lib"
+  INSTALL_RPATH "${SMPPI_ONNXRUNTIME_ROOT}/lib")
 
 set(SMPPI_NODE_DEPENDENCIES
   ament_index_cpp

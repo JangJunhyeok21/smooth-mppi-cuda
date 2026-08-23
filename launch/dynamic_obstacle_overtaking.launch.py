@@ -12,16 +12,21 @@ def generate_launch_description():
     params = LaunchConfiguration("param_file")
     opponent_params = LaunchConfiguration("opponent_param_file")
     predictor_params = LaunchConfiguration("predictor_param_file")
+    predictor_input_mode = LaunchConfiguration("predictor_input_mode")
     return LaunchDescription([
         DeclareLaunchArgument("param_file", default_value=os.path.join(share, "config", "params.yaml")),
         DeclareLaunchArgument("opponent_param_file", default_value=os.path.join(
             share, "config", "opponent_params.yaml")),
         DeclareLaunchArgument("predictor_param_file", default_value=os.path.join(
             share, "config", "dynamic_obstacle_predictor.yaml")),
+        DeclareLaunchArgument(
+            "predictor_input_mode", default_value="simulation",
+            description="Predictor input source: simulation, perception, or both"),
         IncludeLaunchDescription(PythonLaunchDescriptionSource(
             os.path.join(get_package_share_directory("f1tenth_gym_ros"), "launch", "gym_bridge_launch.py"))),
         Node(package="smppi_cuda_controller", executable="dynamic_obstacle_predictor_node",
-             name="dynamic_obstacle_predictor", output="screen", parameters=[predictor_params]),
+             name="dynamic_obstacle_predictor", output="screen",
+             parameters=[predictor_params, {"input_mode": predictor_input_mode}]),
         # Opponent is controlled by its own MPPI node, exactly like the
         # standalone ``mppi2`` alias, instead of the simple waypoint driver.
         IncludeLaunchDescription(PythonLaunchDescriptionSource(

@@ -8,13 +8,18 @@ dynamic_obstacle_predictor:
     output_topic: /mppi/dynamic_obstacle_trajectory
     marker_topic: /mppi/dynamic_obstacle_prediction_markers
     publish_rate_hz: 50.0
+    # MPPI consumes the 50 Hz trajectory, not the RViz markers.  Publish and
+    # sample visualization separately to avoid serialization dominating time.
+    publish_markers: true
+    marker_publish_rate_hz: 5.0
+    marker_horizon_stride: 4
 
     # 72-D speed-aware contract:
     # history 6 * [delta_s, d, v, kappa, left, right, delta_t]
     # + lookahead 10 * [kappa, left, right].
     include_speed_feature: true
     # Relative paths are resolved from the smppi_cuda_controller package share.
-    model_path: config/predictor/dynamic_obstacle_frenet_speed_mdn/frenet_mdn.ts
+    model_path: config/predictor/dynamic_obstacle_frenet_speed_mdn/frenet_mdn.onnx
     track_csv: data/map2/map2_mppi_track_optimal.csv
 
     # |v| <= threshold: fixed-pose circular ellipse. |v| > threshold: MDN.

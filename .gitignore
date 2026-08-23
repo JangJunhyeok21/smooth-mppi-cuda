@@ -35,3 +35,4 @@ model_tuning/real_car_v2/__pycache__/**.cpython-310.pyc
 # model_tuning/real_car_v2/__pycache__/train_dynamic_40ms.cpython-310.pyc
 scripts/__pycache__/**.pyc
 
+vesc/

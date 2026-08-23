@@ -2,6 +2,8 @@
 #include <ament_index_cpp/get_package_share_directory.hpp>
 #include <nav_msgs/msg/path.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
+#include <geometry_msgs/msg/point.hpp>
+#include <visualization_msgs/msg/marker_array.hpp>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -20,10 +22,16 @@ public:
         declare_parameter<std::string>("csv_file_path", "data/map1/map1_centerline.csv");
         declare_parameter<std::string>("frame_id", "map");
         declare_parameter<double>("publish_rate", 10.0);
+        declare_parameter<std::string>("boundary_visualization_topic", "/mppi_boundary_viz");
+        declare_parameter<double>("boundary_publish_period_s", 5.0);
+        declare_parameter<double>("collision_radius", 0.2);
         
         get_parameter("csv_file_path", csv_path_);
         get_parameter("frame_id", frame_id_);
         get_parameter("publish_rate", publish_rate_);
+        get_parameter("boundary_visualization_topic", boundary_topic_);
+        get_parameter("boundary_publish_period_s", boundary_publish_period_s_);
+        get_parameter("collision_radius", collision_radius_);
 
         if (csv_path_.empty()) {
             throw std::invalid_argument("csv_file_path must not be empty");
@@ -36,8 +44,8 @@ public:
         auto qos = rclcpp::QoS(rclcpp::KeepLast(1)).reliable().transient_local();
         // 🚨 토픽 이름 분리 (시뮬레이터 충돌 방지)
         path_center_pub_ = create_publisher<nav_msgs::msg::Path>("/mppi_target_path", qos);
-        path_left_pub_ = create_publisher<nav_msgs::msg::Path>("/mppi_left_boundary", qos);
-        path_right_pub_ = create_publisher<nav_msgs::msg::Path>("/mppi_right_boundary", qos);
+        boundary_pub_ = create_publisher<visualization_msgs::msg::MarkerArray>(
+            boundary_topic_, qos);
 
         timer_ = create_wall_timer(
             std::chrono::milliseconds((int)(1000.0 / publish_rate_)),
@@ -79,6 +87,8 @@ private:
         int ily = findColumn(headers, {"left_y_m", "left_y"});
         int irx = findColumn(headers, {"right_x_m", "right_x"});
         int iry = findColumn(headers, {"right_y_m", "right_y"});
+        int ibrx = findColumn(headers, {"boundary_ref_x_m", "boundary_ref_x"});
+        int ibry = findColumn(headers, {"boundary_ref_y_m", "boundary_ref_y"});
 
         if (ix < 0 || iy < 0) {
             RCLCPP_FATAL(get_logger(), "CSV must have X and Y columns");
@@ -125,6 +135,16 @@ private:
                 left_xs.push_back(lx); left_ys.push_back(ly);
                 right_xs.push_back(rx); right_ys.push_back(ry);
             }
+            double brx = x, bry = y;
+            if (ibrx >= 0 && ibry >= 0) {
+                if (!tryParse(cols, ibrx, brx) || !tryParse(cols, ibry, bry)) {
+                    RCLCPP_FATAL(get_logger(), "Invalid boundary reference coordinate in %s", csv_path_.c_str());
+                    rclcpp::shutdown();
+                    return;
+                }
+            }
+            boundary_ref_xs_.push_back(brx);
+            boundary_ref_ys_.push_back(bry);
         }
 
         if (xs.size() < 2) {
@@ -234,8 +254,66 @@ private:
         path_right_.header.stamp = now;
 
         path_center_pub_->publish(path_center_);
-        path_left_pub_->publish(path_left_);
-        path_right_pub_->publish(path_right_);
+        const auto steady_now = std::chrono::steady_clock::now();
+        if (last_boundary_publish_.time_since_epoch().count() == 0 ||
+            boundary_publish_period_s_ <= 0.0 ||
+            std::chrono::duration<double>(steady_now-last_boundary_publish_).count() >=
+                boundary_publish_period_s_) {
+            const double elapsed_ms = publishBoundaryMarkers(now);
+            last_boundary_publish_ = steady_now;
+            ++boundary_publish_count_;
+            boundary_publish_total_ms_ += elapsed_ms;
+            if (boundary_publish_count_ == 1 || boundary_publish_count_ % 12 == 0) {
+                RCLCPP_INFO(get_logger(),
+                    "Boundary MarkerArray: latest %.3f ms, average %.3f ms, period %.1f s",
+                    elapsed_ms, boundary_publish_total_ms_/boundary_publish_count_,
+                    boundary_publish_period_s_);
+            }
+        }
+    }
+
+    double publishBoundaryMarkers(const rclcpp::Time &stamp)
+    {
+        const auto begin = std::chrono::steady_clock::now();
+        visualization_msgs::msg::MarkerArray output;
+        visualization_msgs::msg::Marker left, right;
+        left.header.frame_id = right.header.frame_id = frame_id_;
+        left.header.stamp = right.header.stamp = stamp;
+        left.ns = right.ns = "boundary_slack_zero";
+        left.id = 200; right.id = 201;
+        left.type = right.type = visualization_msgs::msg::Marker::LINE_STRIP;
+        left.action = right.action = visualization_msgs::msg::Marker::ADD;
+        left.pose.orientation.w = right.pose.orientation.w = 1.0;
+        left.scale.x = right.scale.x = 0.045;
+        left.color.r = 1.0f; left.color.g = 0.35f; left.color.a = 1.0f;
+        right.color.r = 0.85f; right.color.b = 1.0f; right.color.a = 1.0f;
+
+        const std::size_t count = std::min({path_left_.poses.size(),
+            path_right_.poses.size(), boundary_ref_xs_.size(), boundary_ref_ys_.size()});
+        left.points.reserve(count+1); right.points.reserve(count+1);
+        for (std::size_t i=0; i<count; ++i) {
+            const double lx=path_left_.poses[i].pose.position.x;
+            const double ly=path_left_.poses[i].pose.position.y;
+            const double rx=path_right_.poses[i].pose.position.x;
+            const double ry=path_right_.poses[i].pose.position.y;
+            const double cx=boundary_ref_xs_[i], cy=boundary_ref_ys_[i];
+            const double lw=std::hypot(lx-cx,ly-cy), rw=std::hypot(rx-cx,ry-cy);
+            geometry_msgs::msg::Point lp,rp;
+            const double ls=std::max(0.0,lw-collision_radius_)/std::max(lw,1e-9);
+            const double rs=std::max(0.0,rw-collision_radius_)/std::max(rw,1e-9);
+            lp.x=cx+(lx-cx)*ls; lp.y=cy+(ly-cy)*ls; lp.z=0.04;
+            rp.x=cx+(rx-cx)*rs; rp.y=cy+(ry-cy)*rs; rp.z=0.04;
+            left.points.push_back(lp); right.points.push_back(rp);
+        }
+        if (!left.points.empty()) {
+            left.points.push_back(left.points.front());
+            right.points.push_back(right.points.front());
+        }
+        output.markers.push_back(std::move(left));
+        output.markers.push_back(std::move(right));
+        boundary_pub_->publish(output);
+        return std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now()-begin).count();
     }
 
     std::string trim(const std::string &s)
@@ -283,12 +361,15 @@ private:
     }
 
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_center_pub_;
-    rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_left_pub_;
-    rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_right_pub_;
+    rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr boundary_pub_;
     rclcpp::TimerBase::SharedPtr timer_;
 
-    std::string csv_path_, frame_id_;
-    double publish_rate_;
+    std::string csv_path_, frame_id_, boundary_topic_;
+    double publish_rate_, boundary_publish_period_s_, collision_radius_;
+    std::chrono::steady_clock::time_point last_boundary_publish_{};
+    std::size_t boundary_publish_count_{0};
+    double boundary_publish_total_ms_{0.0};
+    std::vector<double> boundary_ref_xs_, boundary_ref_ys_;
 
     nav_msgs::msg::Path path_center_, path_left_, path_right_;
 };

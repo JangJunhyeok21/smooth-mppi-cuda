@@ -96,6 +96,18 @@ def main() -> None:
     yaw, curvature = tph.calc_head_curv_an.calc_head_curv_an(
         coeffs_x=coeff_x, coeffs_y=coeff_y, ind_spls=spline_idx,
         t_spls=t_vals)
+    # trajectory_planning_helpers returns the normal-direction convention for
+    # this create_raceline output. MPPI requires the geometric path tangent.
+    # Convert explicitly and verify below rather than publishing a 90-degree
+    # heading error in the track contract.
+    yaw = (yaw + 0.5 * np.pi + np.pi) % (2.0 * np.pi) - np.pi
+    geometric_yaw = np.arctan2(np.roll(race[:, 1], -1) - race[:, 1],
+                               np.roll(race[:, 0], -1) - race[:, 0])
+    heading_error = np.arctan2(np.sin(yaw - geometric_yaw),
+                               np.cos(yaw - geometric_yaw))
+    if np.percentile(np.abs(heading_error), 95) > 0.15:
+        raise RuntimeError("optimized psi_rad is inconsistent with raceline tangent: "
+                           f"p95={np.percentile(np.abs(heading_error), 95):.3f} rad")
 
     # IQP changes its working reference line and widths. Never reconstruct the
     # physical boundaries from that result. Project every raceline point onto

@@ -721,6 +721,15 @@ namespace mppi
         float min_bnd_dist,
         float applied_steering_angle,
         bool terminal_step,
+        int horizon_step,
+        const float* dynamic_obs_x,
+        const float* dynamic_obs_y,
+        const float* dynamic_obs_yaw,
+        const float* dynamic_obs_semi_major,
+        const float* dynamic_obs_semi_minor,
+        const std::uint8_t* dynamic_obs_is_dynamic,
+        int dynamic_obstacle_count,
+        int dynamic_obstacle_horizon,
         int* last_idx)
     {
         float min_dist_sq = 1e9f;
@@ -864,6 +873,39 @@ namespace mppi
             float dist = sqrtf(dx * dx + dy * dy);
             const float obstacle_slack=fmaxf(0.0f,obstacle_soft_radius-dist);
             obs_cost += p.q_obs*obstacle_slack*obstacle_slack;
+        }
+        if (dynamic_obstacle_count > 0 && dynamic_obstacle_horizon > 0) {
+            const int step = min(horizon_step, dynamic_obstacle_horizon - 1);
+            for (int i = 0; i < dynamic_obstacle_count; ++i) {
+                const int index = i * dynamic_obstacle_horizon + step;
+                const float dx = s.x - dynamic_obs_x[index];
+                const float dy = s.y - dynamic_obs_y[index];
+                const float distance = sqrtf(dx * dx + dy * dy);
+                float boundary_radius = p.car_radius + p.obstacle_soft_margin;
+                if (dynamic_obs_is_dynamic[i]) {
+                    const float c = fast_cos(dynamic_obs_yaw[index]);
+                    const float sn = fast_sin(dynamic_obs_yaw[index]);
+                    const float local_x = c * dx + sn * dy;
+                    const float local_y = -sn * dx + c * dy;
+                    // The predictor axes already include the complete vehicle
+                    // collision radius. Only the configurable soft margin is
+                    // added here; adding car_radius again double-inflates it.
+                    const float major = fmaxf(1.0e-3f,
+                        dynamic_obs_semi_major[index] + p.obstacle_soft_margin);
+                    const float minor = fmaxf(1.0e-3f,
+                        dynamic_obs_semi_minor[index] + p.obstacle_soft_margin);
+                    if (distance > 1.0e-6f) {
+                        const float ux = local_x / distance;
+                        const float uy = local_y / distance;
+                        boundary_radius = rsqrtf(
+                            ux * ux / (major * major) + uy * uy / (minor * minor));
+                    } else {
+                        boundary_radius = fmaxf(major, minor);
+                    }
+                }
+                const float slack = fmaxf(0.0f, boundary_radius - distance);
+                obs_cost += p.q_obs * slack * slack;
+            }
         }
 
         const float tracking_cost=p.objective_mode==LMPC_OBJECTIVE
@@ -1045,7 +1087,12 @@ namespace mppi
         const float *ref_xs, const float *ref_ys, const float *ref_yaws, int path_len,
         const float *left_bnd_xs, const float *left_bnd_ys,
         const float *right_bnd_xs, const float *right_bnd_ys,
-        const float *,
+        const float *, const float* dynamic_obs_x,
+        const float* dynamic_obs_y, const float* dynamic_obs_yaw,
+        const float* dynamic_obs_semi_major,
+        const float* dynamic_obs_semi_minor,
+        const std::uint8_t* dynamic_obs_is_dynamic,
+        int dynamic_obstacle_count, int dynamic_obstacle_horizon,
         int bnd_len,
         int K, int T, int start_path_idx)
     {
@@ -1155,6 +1202,40 @@ namespace mppi
                 min_obstacle_clearance = fminf(
                     min_obstacle_clearance, sqrtf(dx * dx + dy * dy));
             }
+            if (dynamic_obstacle_count > 0 && dynamic_obstacle_horizon > 0) {
+                const int dynamic_step = min(t, dynamic_obstacle_horizon - 1);
+                for (int obstacle_index = 0;
+                     obstacle_index < dynamic_obstacle_count; ++obstacle_index) {
+                    const int index = obstacle_index * dynamic_obstacle_horizon + dynamic_step;
+                    const float dx = x.x - dynamic_obs_x[index];
+                    const float dy = x.y - dynamic_obs_y[index];
+                    const float distance = sqrtf(dx * dx + dy * dy);
+                    float obstacle_radius = 0.0f;
+                    if (dynamic_obs_is_dynamic[obstacle_index] && distance > 1.0e-6f) {
+                        const float c = fast_cos(dynamic_obs_yaw[index]);
+                        const float sn = fast_sin(dynamic_obs_yaw[index]);
+                        const float local_x = c * dx + sn * dy;
+                        const float local_y = -sn * dx + c * dy;
+                        const float major = fmaxf(1.0e-3f, dynamic_obs_semi_major[index]);
+                        const float minor = fmaxf(1.0e-3f, dynamic_obs_semi_minor[index]);
+                        const float ux = local_x / distance;
+                        const float uy = local_y / distance;
+                        obstacle_radius = rsqrtf(
+                            ux * ux / (major * major) + uy * uy / (minor * minor));
+                    } else if (dynamic_obs_is_dynamic[obstacle_index]) {
+                        obstacle_radius = fmaxf(dynamic_obs_semi_major[index],
+                                                dynamic_obs_semi_minor[index]);
+                    }
+                    // Clearance summaries share one scalar with legacy static
+                    // circles, whose safety threshold is car_radius. Offset an
+                    // already-inflated dynamic ellipse so that the common
+                    // comparison remains equivalent to distance >= ellipse.
+                    const float effective_clearance = distance - obstacle_radius +
+                        (dynamic_obs_is_dynamic[obstacle_index] ? p.car_radius : 0.0f);
+                    min_obstacle_clearance = fminf(
+                        min_obstacle_clearance, effective_clearance);
+                }
+            }
 
             if (path_len > 0)
             {
@@ -1163,6 +1244,10 @@ namespace mppi
                     ref_xs, ref_ys, ref_yaws, path_len,
                     u_clamped, last_u, p, min_dist, mlp_command_history[10],
                     t == T - 1,
+                    t, dynamic_obs_x, dynamic_obs_y, dynamic_obs_yaw,
+                    dynamic_obs_semi_major, dynamic_obs_semi_minor,
+                    dynamic_obs_is_dynamic,
+                    dynamic_obstacle_count, dynamic_obstacle_horizon,
                     &local_path_idx);
             }
 
@@ -1318,6 +1403,13 @@ namespace mppi
         CUDA_CHECK(cudaMalloc(&d_rng_states_, K_ * T_ * sizeof(curandState)));
         CUDA_CHECK(cudaMalloc(&d_residual_history_, RESIDUAL_HISTORY*RESIDUAL_FEATURES*sizeof(float)));
         CUDA_CHECK(cudaMalloc(&d_residual_hidden_, RESIDUAL_HIDDEN*sizeof(float)));
+        constexpr int max_dynamic_points = MAX_OBS * MAX_DYNAMIC_OBSTACLE_HORIZON;
+        CUDA_CHECK(cudaMalloc(&d_dynamic_obs_x_, max_dynamic_points * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&d_dynamic_obs_y_, max_dynamic_points * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&d_dynamic_obs_yaw_, max_dynamic_points * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&d_dynamic_obs_semi_major_, max_dynamic_points * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&d_dynamic_obs_semi_minor_, max_dynamic_points * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&d_dynamic_obs_is_dynamic_, MAX_OBS * sizeof(std::uint8_t)));
         CUDA_CHECK(cudaMemset(d_residual_history_,0,RESIDUAL_HISTORY*RESIDUAL_FEATURES*sizeof(float)));
         CUDA_CHECK(cudaMemcpyToSymbol(rw_feature_mean,residual_weights::feature_mean,sizeof(residual_weights::feature_mean)));
         CUDA_CHECK(cudaMemcpyToSymbol(rw_feature_std,residual_weights::feature_std,sizeof(residual_weights::feature_std)));
@@ -1354,6 +1446,9 @@ namespace mppi
         cudaFree(d_min_obstacle_clearances_);
         cudaFree(d_rng_states_);
         cudaFree(d_residual_history_); cudaFree(d_residual_hidden_);
+        cudaFree(d_dynamic_obs_x_); cudaFree(d_dynamic_obs_y_);
+        cudaFree(d_dynamic_obs_yaw_); cudaFree(d_dynamic_obs_semi_major_);
+        cudaFree(d_dynamic_obs_semi_minor_); cudaFree(d_dynamic_obs_is_dynamic_);
         cudaFree(d_ref_xs_); cudaFree(d_ref_ys_); cudaFree(d_ref_yaws_);
         cudaFree(d_left_bnd_xs_); cudaFree(d_left_bnd_ys_);
         cudaFree(d_right_bnd_xs_); cudaFree(d_right_bnd_ys_);
@@ -1560,6 +1655,52 @@ namespace mppi
         }
     }
 
+    void MPPISolver::set_dynamic_obstacles(
+        const std::vector<float>& xs, const std::vector<float>& ys,
+        const std::vector<float>& yaws,
+        const std::vector<float>& semi_major,
+        const std::vector<float>& semi_minor,
+        const std::vector<bool>& is_dynamic,
+        int obstacle_count, int horizon) {
+        dynamic_obstacle_count_ = std::max(0, std::min(obstacle_count, MAX_OBS));
+        dynamic_obstacle_horizon_ = std::max(0,
+            std::min(horizon, MAX_DYNAMIC_OBSTACLE_HORIZON));
+        const std::size_t count = static_cast<std::size_t>(
+            dynamic_obstacle_count_ * dynamic_obstacle_horizon_);
+        if (count == 0 || xs.size() < count || ys.size() < count ||
+            yaws.size() < count || semi_major.size() < count ||
+            semi_minor.size() < count || is_dynamic.size() < static_cast<std::size_t>(dynamic_obstacle_count_)) {
+            dynamic_obstacle_count_ = 0;
+            dynamic_obstacle_horizon_ = 0;
+            h_dynamic_obs_x_.clear(); h_dynamic_obs_y_.clear();
+            h_dynamic_obs_yaw_.clear(); h_dynamic_obs_semi_major_.clear();
+            h_dynamic_obs_semi_minor_.clear(); h_dynamic_obs_is_dynamic_.clear();
+            return;
+        }
+        h_dynamic_obs_x_.assign(xs.begin(), xs.begin() + count);
+        h_dynamic_obs_y_.assign(ys.begin(), ys.begin() + count);
+        h_dynamic_obs_yaw_.assign(yaws.begin(), yaws.begin() + count);
+        h_dynamic_obs_semi_major_.assign(semi_major.begin(), semi_major.begin() + count);
+        h_dynamic_obs_semi_minor_.assign(semi_minor.begin(), semi_minor.begin() + count);
+        h_dynamic_obs_is_dynamic_.assign(is_dynamic.begin(),
+            is_dynamic.begin() + dynamic_obstacle_count_);
+        std::vector<std::uint8_t> dynamic_flags(dynamic_obstacle_count_);
+        for (int i = 0; i < dynamic_obstacle_count_; ++i)
+            dynamic_flags[i] = h_dynamic_obs_is_dynamic_[i] ? 1u : 0u;
+        CUDA_CHECK(cudaMemcpy(d_dynamic_obs_x_, h_dynamic_obs_x_.data(),
+                              count * sizeof(float), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(d_dynamic_obs_y_, h_dynamic_obs_y_.data(),
+                              count * sizeof(float), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(d_dynamic_obs_yaw_, h_dynamic_obs_yaw_.data(),
+                              count * sizeof(float), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(d_dynamic_obs_semi_major_, h_dynamic_obs_semi_major_.data(),
+                              count * sizeof(float), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(d_dynamic_obs_semi_minor_, h_dynamic_obs_semi_minor_.data(),
+                              count * sizeof(float), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(d_dynamic_obs_is_dynamic_, dynamic_flags.data(),
+                              dynamic_flags.size() * sizeof(std::uint8_t), cudaMemcpyHostToDevice));
+    }
+
     Control MPPISolver::solve(const State &current_state) {
         const bool first_direct_speed_solve=!direct_speed_warm_start_initialized_;
         params_.rollout_obstacle_ahead=false;
@@ -1571,6 +1712,19 @@ namespace mppi
             if(dx*start_cos+dy*start_sin>-0.25f && dx*dx+dy*dy<36.0f) {
                 params_.rollout_obstacle_ahead=true;
                 break;
+            }
+        }
+        if (!params_.rollout_obstacle_ahead && dynamic_obstacle_count_ > 0 &&
+            dynamic_obstacle_horizon_ > 0) {
+            for (int i = 0; i < dynamic_obstacle_count_; ++i) {
+                const int index = i * dynamic_obstacle_horizon_;
+                const float dx = h_dynamic_obs_x_[index] - current_state.x;
+                const float dy = h_dynamic_obs_y_[index] - current_state.y;
+                if (dx * start_cos + dy * start_sin > -0.25f &&
+                    dx * dx + dy * dy < 36.0f) {
+                    params_.rollout_obstacle_ahead = true;
+                    break;
+                }
             }
         }
         int start_path_idx = 0;
@@ -1652,7 +1806,11 @@ namespace mppi
                 current_state, d_prev_controls_, params_,
                 d_ref_xs_, d_ref_ys_, d_ref_yaws_, ref_path_len_,
                 d_left_bnd_xs_, d_left_bnd_ys_, d_right_bnd_xs_, d_right_bnd_ys_,
-                d_residual_hidden_, bnd_len_, K_, T_, start_path_idx);
+                d_residual_hidden_, d_dynamic_obs_x_, d_dynamic_obs_y_,
+                d_dynamic_obs_yaw_, d_dynamic_obs_semi_major_,
+                d_dynamic_obs_semi_minor_, d_dynamic_obs_is_dynamic_,
+                dynamic_obstacle_count_,
+                dynamic_obstacle_horizon_, bnd_len_, K_, T_, start_path_idx);
         } else {
             rollout_kernel<false><<<blocksPerGrid, threadsPerBlock>>>(
                 d_states_, d_controls_, d_costs_, d_min_boundary_clearances_,
@@ -1660,7 +1818,11 @@ namespace mppi
                 current_state, d_prev_controls_, params_,
                 d_ref_xs_, d_ref_ys_, d_ref_yaws_, ref_path_len_,
                 d_left_bnd_xs_, d_left_bnd_ys_, d_right_bnd_xs_, d_right_bnd_ys_,
-                d_residual_hidden_, bnd_len_, K_, T_, start_path_idx);
+                d_residual_hidden_, d_dynamic_obs_x_, d_dynamic_obs_y_,
+                d_dynamic_obs_yaw_, d_dynamic_obs_semi_major_,
+                d_dynamic_obs_semi_minor_, d_dynamic_obs_is_dynamic_,
+                dynamic_obstacle_count_,
+                dynamic_obstacle_horizon_, bnd_len_, K_, T_, start_path_idx);
         }
         
         CUDA_CHECK(cudaGetLastError());
@@ -1714,14 +1876,43 @@ namespace mppi
 
     float MPPISolver::trajectory_min_obstacle_clearance(
         const std::vector<State>& trajectory) const {
-        if(params_.num_obstacles<=0 || trajectory.empty())
+        if((params_.num_obstacles<=0 || trajectory.empty()) &&
+           (dynamic_obstacle_count_ <= 0 || dynamic_obstacle_horizon_ <= 0))
             return std::numeric_limits<float>::infinity();
         float minimum=std::numeric_limits<float>::infinity();
-        for(const State& state:trajectory) {
+        for(size_t step=0; step<trajectory.size(); ++step) {
+            const State& state=trajectory[step];
             for(int i=0;i<params_.num_obstacles;++i) {
                 const float dx=state.x-params_.obs_x[i];
                 const float dy=state.y-params_.obs_y[i];
                 minimum=std::min(minimum,std::sqrt(dx*dx+dy*dy));
+            }
+            if(dynamic_obstacle_count_ > 0 && dynamic_obstacle_horizon_ > 0) {
+                const int dynamic_step=std::min(static_cast<int>(step),
+                                                dynamic_obstacle_horizon_-1);
+                for(int i=0;i<dynamic_obstacle_count_;++i) {
+                    const int index=i*dynamic_obstacle_horizon_+dynamic_step;
+                    const float dx=state.x-h_dynamic_obs_x_[index];
+                    const float dy=state.y-h_dynamic_obs_y_[index];
+                    const float distance=std::sqrt(dx*dx+dy*dy);
+                    float obstacle_radius=0.0f;
+                    if(h_dynamic_obs_is_dynamic_[i] && distance>1.0e-6f) {
+                        const float c=std::cos(h_dynamic_obs_yaw_[index]);
+                        const float sn=std::sin(h_dynamic_obs_yaw_[index]);
+                        const float local_x=c*dx+sn*dy;
+                        const float local_y=-sn*dx+c*dy;
+                        const float ux=local_x/distance,uy=local_y/distance;
+                        const float major=std::max(1.0e-3f,h_dynamic_obs_semi_major_[index]);
+                        const float minor=std::max(1.0e-3f,h_dynamic_obs_semi_minor_[index]);
+                        obstacle_radius=1.0f/std::sqrt(
+                            ux*ux/(major*major)+uy*uy/(minor*minor));
+                    } else if(h_dynamic_obs_is_dynamic_[i]) {
+                        obstacle_radius=std::max(h_dynamic_obs_semi_major_[index],
+                                                 h_dynamic_obs_semi_minor_[index]);
+                    }
+                    minimum=std::min(minimum,distance-obstacle_radius+
+                        (h_dynamic_obs_is_dynamic_[i] ? params_.car_radius : 0.0f));
+                }
             }
         }
         return minimum;

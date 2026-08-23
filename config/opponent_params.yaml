@@ -34,7 +34,7 @@
     min_accel: -9.0          # m/s^2
     max_accel: 9.0           # m/s^2
     min_speed: 0.5
-    max_speed: 10.0  # 허용하는 최고속도
+    max_speed: 2.0  # 허용하는 최고속도
 
     # --- Costs (최적화 결과 반영) ---
     q_v: 16.0 # vs 크기에 비례해서 
@@ -56,17 +56,13 @@
     # alpha_r = -atan2(vy-l_r*yaw_rate, |vx|). It complements the GG ellipse
     # by detecting rear-axle saturation while total ax/ay is still moderate.
     q_rear_slip: 800.0
-    rear_slip_soft_limit_deg: 8.0
+    rear_slip_soft_limit_deg: 5.0
     rear_slip_cost_min_speed: 1.5         # disable ill-conditioned low-vx slip cost
     # MPC-style lane-boundary slack:
     # s_k=max(0, collision_radius-min_boundary_clearance), cost=q_s*s_k^2.
     # Boundary violation remains finite/selectable; only physical obstacles
     # retain post-rollout hard candidate rejection.
-<<<<<<< HEAD
-    collision_radius: 0.15
-=======
     collision_radius: 0.4
->>>>>>> 554591c (Add dynamic-obstacle prediction and opponent MPPI)
     q_boundary_slack: 5000.0
     q_boundary_terminal_slack: 20000.0
     # true: reject an off-track weighted-control rollout and use the
@@ -98,22 +94,18 @@
     real_perception_obstacles_topic: /f1/perception/object/obstacles/arr
     real_perception_obstacles_frame: map
     obstacle_timeout: 0.5
-<<<<<<< HEAD
-    car_radius: 0.4         # 실제 충돌 판정에 쓰는 combined footprint 반경
-=======
     car_radius: 0.24           # ego footprint radius; predictor supplies opponent radius
->>>>>>> 554591c (Add dynamic-obstacle prediction and opponent MPPI)
     # car_radius 진입 전부터 회피를 준비해 속도/조향의 급격한 변화를 막는다.
     obstacle_soft_margin: 0.0  # soft cost 시작 반경 = car_radius + 1.0 m
     # s=max(0, car_radius+margin-distance), cost=q_obs*s^2
     q_obs: 5000.0
     
     # --- Noise & Tuning ---
-    noise_steer_std: 0.5    # rad/s
+    noise_steer_std: 0.35    # rad/s
     noise_accel_std: 2.0     # m/s^3
     max_steer_rate: 50.0    # rad/s
     # Input slew rate: m/s^2 for direct-speed models, m/s^3 for acceleration-command models.
-    max_accel_rate: 10.0
+    max_accel_rate: 4.0
     lambda: 20.0
     num_samples: 1600        # desktop simulation: ~4 ms measured
     visualize_candidates: false # K*T 후보 복사 비활성화
@@ -209,3 +201,18 @@ map2_opponent_driver:
     track_csv: data/map2/map2_mppi_track_optimal.csv
     target_speed: 1.8
     lookahead_points: 12
+
+# Opponent-only runtime overrides. Model/cost parameters above are now an
+# independent copy and can be tuned without changing ego config/params.yaml.
+smppi_opponent_controller:
+  ros__parameters:
+    is_simulation: true
+    simulation_odom_topic: /opp_racecar/odom
+    simulation_drive_topic: /opp_drive
+    imu_topic: /opp_imu/data
+    obstacle_avoidance_enabled: false
+    dynamic_obstacle_prediction_enabled: false
+    visualization_topic: /mppi2/viz
+    optimal_trajectory_topic: /mppi2/optimal_trajectory
+    kf_state_topic: /mppi2/kf_state
+    mlp_input_topic: /mppi2/mlp_input

@@ -166,6 +166,285 @@ ros2 launch ekf_pose smppi_with_ekf.launch.py
 
 ---
 
+## 동적 장애물 Frenet MDN 학습부터 MPPI 실행까지
+
+현재 실시간 predictor는 Python ROS 노드가 아니라
+`src/dynamic_obstacle_predictor_node.cpp`의 C++/LibTorch 노드다. 학습과
+오프라인 평가는 Python으로 수행하고, 최종 `frenet_mdn.ts` TorchScript 파일만
+C++ 노드에서 읽는다.
+
+전체 흐름은 다음과 같다.
+
+```text
+충돌 없는 simulator MPPI episode 수집
+  -> 40 ms Frenet one-step dataset 생성
+  -> one-step MDN 학습 및 TorchScript export
+  -> 60-step recursive test 평가
+  -> C++ predictor가 50 Hz로 obstacle trajectory 발행
+  -> MPPI가 horizon별 회전 타원 obstacle cost 적용
+```
+
+### 0. 요구 환경과 빌드
+
+- ROS 2 Humble
+- CUDA가 사용 가능한 NVIDIA GPU: 데이터 수집 중 MPPI 실행에 필요
+- `/home/a/anaconda3/envs/RL`: `numpy`, `torch`, `matplotlib`
+- Python PyTorch 설치에 포함된 LibTorch 헤더와 라이브러리
+- `f1tenth_gym_ros` 빌드 완료
+
+```bash
+cd /home/a/smooth-mppi-cuda
+source /opt/ros/humble/setup.bash
+source /home/a/smooth-mppi-cuda/f1tenth_gym_ros/install/setup.bash
+
+colcon build --packages-select smppi_cuda_controller --symlink-install \
+  --cmake-args -DCMAKE_BUILD_TYPE=Release
+source install/setup.bash
+```
+
+실차 `F1stateArr`를 사용하려면 빌드할 때 `f1_msgs`가 검색되어야 한다. 빌드
+로그에 `f1_msgs not found`가 나오면 C++ predictor는 `simulation` 모드만
+지원하며 `perception` 모드로 실행하면 즉시 오류를 낸다.
+
+### 1. 학습 데이터 자동 수집
+
+아래 명령은 map2 centerline의 임의 위치에서 차량을 spawn하고 `max_speed`,
+`q_v`, `lambda`, 조향/가속 sampling noise 및 초기 속도를 무작위로 바꾸면서
+MPPI 주행 episode를 수집한다.
+
+```bash
+cd /home/a/smooth-mppi-cuda
+source /opt/ros/humble/setup.bash
+source f1tenth_gym_ros/install/setup.bash
+source install/setup.bash
+
+/home/a/anaconda3/envs/RL/bin/python \
+  model_tuning/dynamic_obstacle_prediction/collect_and_train_simulator_mdn.py \
+  --episodes 30 \
+  --duration-s 25 \
+  --maximum-attempts 90 \
+  --track data/map2/map2_mppi_track_optimal.csv \
+  --data-out model_tuning/data/simulator_mppi_mdn \
+  --collect-only
+```
+
+한 episode는 다음 조건에서 파일 전체가 폐기된다.
+
+- simulator `/collision0`이 true
+- 비정상적인 pose jump
+- NaN/Inf state 또는 command
+- sample 수 부족
+- MPPI CUDA 실행 실패
+
+정상 episode는 다음 파일로 저장된다.
+
+```text
+model_tuning/data/simulator_mppi_mdn/episode_000.npz
+model_tuning/data/simulator_mppi_mdn/episode_001.npz
+...
+```
+
+각 NPZ의 `trajectory` column은 다음과 같다.
+
+```text
+t, x, y, yaw, vx, vy, yaw_rate, speed_cmd, steer_cmd
+```
+
+현재 Frenet MDN은 이 중 `t,x,y,yaw,vx,vy`를 dataset 생성에 사용한다.
+`speed_cmd`, `steer_cmd`, `yaw_rate`는 수집되지만 현재 네트워크 입력에는
+포함되지 않는다.
+
+수집과 학습을 한 명령으로 수행하려면 `--collect-only`를 빼고 `--epochs`를
+지정한다. 이 통합 명령은 현재 C++ predictor와 호환되는
+`train_frenet_recursive_mdn.py`를 호출한다.
+
+```bash
+/home/a/anaconda3/envs/RL/bin/python \
+  model_tuning/dynamic_obstacle_prediction/collect_and_train_simulator_mdn.py \
+  --episodes 30 --duration-s 25 --maximum-attempts 90 --epochs 120
+```
+
+### 2. 기존 수집 데이터로 MDN만 다시 학습
+
+```bash
+/home/a/anaconda3/envs/RL/bin/python \
+  model_tuning/dynamic_obstacle_prediction/train_frenet_recursive_mdn.py \
+  --data model_tuning/data/simulator_mppi_mdn \
+  --track data/map2/map2_mppi_track_optimal.csv \
+  --out model_tuning/results/dynamic_obstacle_frenet_mdn \
+  --epochs 120 \
+  --seed 20260823
+```
+
+episode 단위로 train/validation/test를 분리하므로 최소 3개 episode가 필요하다.
+긴 episode부터 정렬한 뒤 두 번째가 test, 세 번째가 validation, 나머지가
+train에 들어간다. 더 안정적인 일반화 평가를 위해서는 20~30개 이상의 서로
+다른 spawn/속도 episode를 권장한다.
+
+학습 출력은 다음과 같다.
+
+```text
+model_tuning/results/dynamic_obstacle_frenet_mdn/
+  frenet_mdn.pt       # 재학습/checkpoint용 PyTorch 파일
+  frenet_mdn.ts       # C++ 실시간 predictor가 읽는 TorchScript
+  metadata.json       # dt, horizon, history, one-step test metric
+```
+
+> 파일명은 실제로 `frenet_mdn.pt`이다. 위 출력 디렉터리에서 파일 존재 여부를
+> 반드시 확인한다.
+
+```bash
+ls -lh model_tuning/results/dynamic_obstacle_frenet_mdn/frenet_mdn.{pt,ts}
+cat model_tuning/results/dynamic_obstacle_frenet_mdn/metadata.json
+```
+
+### 3. 현재 네트워크 입출력 계약
+
+모든 raw episode를 `40 ms` 등간격으로 보간한 뒤 최근 6개 state, 즉
+`0.20 s` history를 사용한다. MDN 입력은 66차원이다.
+
+```text
+history: 6 × [delta_s, d, curvature, left_width, right_width, delta_t] = 36
+lookahead: 10 × [curvature, left_width, right_width]                  = 30
+total                                                               = 66
+```
+
+lookahead는 현재 Frenet `s`부터 `0.5 m` 간격으로 `0.0~4.5 m`를 읽는다.
+one-step MDN의 각 mixture 출력은 다음 4차원이다.
+
+```text
+[delta_s, delta_d, delta_heading_error, next_speed]
+```
+
+실시간 노드는 가장 확률이 높은 mixture의 mean을 다음 상태로 사용하고 이를
+60회 재귀 적용한다. 따라서 예측 knot는 `60 × 0.04 = 2.4 s`이다. mixture
+분산은 누적하여 horizon별 `semi_major`, `semi_minor`를 만든다.
+
+### 4. 60-step recursive 성능 평가
+
+```bash
+MPLBACKEND=Agg /home/a/anaconda3/envs/RL/bin/python \
+  model_tuning/dynamic_obstacle_prediction/evaluate_frenet_recursive_mdn.py
+```
+
+평가는 `metadata.json`에 기록된 test episode에서 60-step rollout을 반복하며
+ADE, FDE, P95 ADE와 worst ADE를 출력한다. 결과 그림은 다음에 저장된다.
+
+```text
+model_tuning/results/dynamic_obstacle_frenet_mdn/recursive_test_performance.png
+```
+
+그림에는 best/median/P95/worst의 global `x-y` GT, recursive prediction과
+불확실성 타원이 함께 표시된다. 모델을 배포하기 전에 one-step RMSE뿐 아니라
+반드시 이 recursive 결과를 확인한다.
+
+### 5. C++ predictor 설정
+
+`config/params.yaml`의 `dynamic_obstacle_predictor`를 확인한다.
+
+```yaml
+dynamic_obstacle_predictor:
+  ros__parameters:
+    input_mode: simulation       # simulation | perception | both
+    simulation_odom_topic: /opp_racecar/odom
+    perception_topic: /f1/perception/object/obstacles/arr
+    output_topic: /mppi/dynamic_obstacle_trajectory
+    model_path: /home/a/smooth-mppi-cuda/model_tuning/results/dynamic_obstacle_frenet_mdn/frenet_mdn.ts
+    track_csv: /home/a/smooth-mppi-cuda/data/map2/map2_mppi_track_optimal.csv
+    opponent_radius: 0.24
+    maximum_radius: 0.75
+    longitudinal_ellipse_gain: 3.1
+    lateral_ellipse_gain: 2.1
+    publish_rate_hz: 50.0
+    dynamic_speed_threshold: 1.0
+```
+
+`track_csv`는 학습에 사용한 track과 같아야 한다. `model_path`의 TorchScript는
+실행 시 읽으므로 동일한 66D 모델로 재학습한 경우 C++ 재빌드는 필요 없고
+노드 재시작만 필요하다.
+
+속력 `|v| >= dynamic_speed_threshold`인 객체에는 recursive MDN과 회전 타원
+cost를 적용한다. `|v| < 1 m/s`인 객체는 정적으로 취급하고 현재 pose를
+유지하며 기존 원형 `car_radius + obstacle_soft_margin` cost를 사용한다.
+
+동적 객체의 `semi_major`, `semi_minor`는 predictor에서 이미 차량 충돌 반경을
+포함한다. MPPI는 중복으로 `car_radius`를 더하지 않고 다음 경계만 사용한다.
+
+```text
+major = semi_major + obstacle_soft_margin
+minor = semi_minor + obstacle_soft_margin
+```
+
+### 6. 시뮬레이터에서 predictor와 MPPI 실행
+
+전체 시스템을 한 번에 실행한다.
+
+```bash
+cd /home/a/smooth-mppi-cuda
+source /opt/ros/humble/setup.bash
+source f1tenth_gym_ros/install/setup.bash
+source install/setup.bash
+ros2 launch smppi_cuda_controller dynamic_obstacle_overtaking.launch.py
+```
+
+사용자 `.bashrc`에 현재 alias가 등록되어 있다면 새 터미널에서 다음만 실행해도
+된다.
+
+```bash
+mppi_all
+```
+
+이 launch는 simulator, ego MPPI, opponent MPPI 및 별도 C++ predictor node를
+실행한다. predictor가 Python으로 실행되는지 확인할 필요는 없으며 launch의
+executable은 `dynamic_obstacle_predictor_node` C++ binary로 고정되어 있다.
+
+### 7. 작동 확인
+
+```bash
+# C++ predictor node 확인
+ros2 node info /dynamic_obstacle_predictor
+
+# 50 Hz에 가까운지 확인
+ros2 topic hz /mppi/dynamic_obstacle_trajectory
+
+# 동적/정적 판정
+ros2 topic echo /mppi/dynamic_obstacle_trajectory --field is_dynamic
+
+# horizon별 타원 반장축
+ros2 topic echo /mppi/dynamic_obstacle_trajectory --field semi_major
+ros2 topic echo /mppi/dynamic_obstacle_trajectory --field semi_minor
+```
+
+정상적으로 history가 쌓이면 predictor 로그에 다음처럼 100회 평균 시간이
+출력된다.
+
+```text
+MDN timing (last 100): prediction/message ... ms, ROS publish ... ms, total ... ms
+```
+
+MPPI는 `/mppi/dynamic_obstacle_trajectory`를 구독하고 obstacle-major layout
+`index = obstacle_index × horizon + step`으로 각 CUDA rollout horizon에 같은
+시점의 예측 타원을 적용한다. `dt`가 MPPI `model_dt`와 다르거나 배열 크기가
+계약과 다르면 메시지를 거부하고 오류를 출력한다.
+
+### 8. 실차 perception으로 전환
+
+`f1_msgs`가 검색되는 overlay를 source한 뒤 다시 빌드하고 다음을 변경한다.
+
+```yaml
+dynamic_obstacle_predictor:
+  ros__parameters:
+    input_mode: perception
+    perception_topic: /f1/perception/object/obstacles/arr
+```
+
+현재 `F1stateArr`에서는 각 object의 `id,x,y,yaw,v`만 사용한다. 좌표는 map
+frame이어야 하며 object `id`는 history가 유지되는 동안 안정적이어야 한다.
+입력이 `0.5 s` 이상 오래되면 해당 object의 prediction을 발행하지 않고,
+MPPI도 `obstacle_timeout` 이후 stale trajectory cost를 비활성화한다.
+
+---
+
 ## 과거 Kinematic + MLP residual 모델 학습 및 배포 (legacy reference)
 
 이 절은 과거 실험 재현용이며 현재 recommended 모델의 학습 방법이 아니다.

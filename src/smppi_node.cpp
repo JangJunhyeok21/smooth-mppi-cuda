@@ -15,6 +15,7 @@
 #include "smppi_cuda_controller/msg/mppi_trajectory.hpp"
 #include "smppi_cuda_controller/msg/mlp_model_input.hpp"
 #include "smppi_cuda_controller/msg/kf_state.hpp"
+#include "smppi_cuda_controller/msg/dynamic_obstacle_trajectory.hpp"
 #include <ament_index_cpp/get_package_share_directory.hpp>
 #include <algorithm>
 #include <cmath>
@@ -53,13 +54,11 @@ public:
 
         drive_pub_ = this->create_publisher<ackermann_msgs::msg::AckermannDriveStamped>(
             selected_drive_topic_, 10);
-        vis_pub_   = this->create_publisher<visualization_msgs::msg::MarkerArray>("/mppi_viz", 50);
-        boundary_vis_pub_ = this->create_publisher<visualization_msgs::msg::MarkerArray>(
-            boundary_visualization_topic_,
-            rclcpp::QoS(rclcpp::KeepLast(5)).reliable().transient_local());
+        vis_pub_ = this->create_publisher<visualization_msgs::msg::MarkerArray>(
+            visualization_topic_, 50);
         if (publish_optimal_trajectory_) {
             traj_pub_ = this->create_publisher<smppi_cuda_controller::msg::MppiTrajectory>(
-                "/mppi_optimal_trajectory", 10);
+                optimal_trajectory_topic_, 10);
         }
         mlp_input_pub_ = this->create_publisher<smppi_cuda_controller::msg::MlpModelInput>(
             mlp_input_topic_, 50);
@@ -70,7 +69,7 @@ public:
         // while depth 1 prevents old estimator telemetry from accumulating.
         const auto kf_state_qos = rclcpp::QoS(rclcpp::KeepLast(1)).reliable();
         kf_state_pub_ = this->create_publisher<smppi_cuda_controller::msg::KfState>(
-            "/kf_state", kf_state_qos);
+            kf_state_topic_, kf_state_qos);
 
         if (!is_simulation_) {
             // Real car: localization pose is in map frame, while wheel odom
@@ -88,14 +87,24 @@ public:
                 std::bind(&MPPINode::odom_callback, this, std::placeholders::_1));
         }
         if (obstacle_avoidance_enabled_) {
-            if (is_simulation_) {
+            if (dynamic_obstacle_prediction_enabled_) {
+                dynamic_obstacle_sub_ = this->create_subscription<
+                    smppi_cuda_controller::msg::DynamicObstacleTrajectory>(
+                    dynamic_obstacle_trajectory_topic_, 10,
+                    std::bind(&MPPINode::dynamic_obstacle_callback, this,
+                              std::placeholders::_1));
+                RCLCPP_INFO(this->get_logger(),
+                    "Dynamic obstacle trajectory input: %s",
+                    dynamic_obstacle_trajectory_topic_.c_str());
+            }
+            if (!dynamic_obstacle_prediction_enabled_ && is_simulation_) {
                 obstacle_odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
                     simulation_obstacle_odom_topic_, 10,
                     std::bind(&MPPINode::obstacle_odom_callback, this, std::placeholders::_1));
                 RCLCPP_INFO(this->get_logger(),
                     "Simulation obstacle input: %s [nav_msgs/Odometry]",
                     simulation_obstacle_odom_topic_.c_str());
-            } else {
+            } else if (!dynamic_obstacle_prediction_enabled_) {
 #ifdef SMPPI_HAS_F1_MSGS
                 perception_obstacles_sub_ =
                     this->create_subscription<f1_msgs::msg::F1stateArr>(
@@ -172,8 +181,10 @@ private:
         if (obstacle_avoidance_enabled_) {
             RCLCPP_INFO(
                 this->get_logger(), "Obstacle input: %s",
-                is_simulation_ ? simulation_obstacle_odom_topic_.c_str()
-                               : real_perception_obstacles_topic_.c_str());
+                dynamic_obstacle_prediction_enabled_
+                    ? dynamic_obstacle_trajectory_topic_.c_str()
+                    : (is_simulation_ ? simulation_obstacle_odom_topic_.c_str()
+                                      : real_perception_obstacles_topic_.c_str()));
         } else {
             RCLCPP_INFO(this->get_logger(), "Obstacle input: disabled");
         }
@@ -205,6 +216,51 @@ private:
         mppi_params_.obs_y[0] = obstacle_y;
         mppi_params_.num_obstacles = 1;
         obstacle_stamp_ = this->now();
+    }
+
+    void dynamic_obstacle_callback(const
+        smppi_cuda_controller::msg::DynamicObstacleTrajectory::SharedPtr msg) {
+        const int horizon = static_cast<int>(msg->horizon);
+        const int obstacle_count = static_cast<int>(msg->obstacle_ids.size());
+        const std::size_t expected = static_cast<std::size_t>(
+            std::max(0, horizon) * std::max(0, obstacle_count));
+        if (horizon <= 0 || horizon > MAX_DYNAMIC_OBSTACLE_HORIZON ||
+            obstacle_count <= 0 || obstacle_count > MAX_OBS ||
+            msg->x.size() != expected || msg->y.size() != expected ||
+            msg->yaw.size() != expected || msg->semi_major.size() != expected ||
+            msg->semi_minor.size() != expected ||
+            msg->is_dynamic.size() != static_cast<std::size_t>(obstacle_count)) {
+            RCLCPP_ERROR_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                "Invalid dynamic obstacle trajectory: obstacles=%d horizon=%d "
+                "x/y/yaw/major/minor/dynamic=%zu/%zu/%zu/%zu/%zu/%zu",
+                obstacle_count, horizon, msg->x.size(), msg->y.size(),
+                msg->yaw.size(), msg->semi_major.size(), msg->semi_minor.size(),
+                msg->is_dynamic.size());
+            return;
+        }
+        const float expected_dt = mppi_params_.model_dt;
+        if (std::abs(msg->dt - expected_dt) > 1.0e-4f) {
+            RCLCPP_ERROR_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                "Dynamic obstacle dt %.6f does not match MPPI model_dt %.6f",
+                msg->dt, expected_dt);
+            return;
+        }
+        dynamic_obs_x_ = msg->x;
+        dynamic_obs_y_ = msg->y;
+        dynamic_obs_yaw_ = msg->yaw;
+        dynamic_obs_semi_major_ = msg->semi_major;
+        dynamic_obs_semi_minor_ = msg->semi_minor;
+        dynamic_obs_is_dynamic_ = msg->is_dynamic;
+        dynamic_obstacle_count_ = obstacle_count;
+        dynamic_obstacle_horizon_ = horizon;
+        solver_->set_dynamic_obstacles(dynamic_obs_x_, dynamic_obs_y_,
+            dynamic_obs_yaw_, dynamic_obs_semi_major_, dynamic_obs_semi_minor_,
+            dynamic_obs_is_dynamic_, obstacle_count, horizon);
+        dynamic_obstacle_stamp_ = this->now();
+        dynamic_obstacle_active_ = true;
+        // Do not charge the current-pose fallback in addition to its predicted
+        // trajectory.
+        mppi_params_.num_obstacles = 0;
     }
 
 #ifdef SMPPI_HAS_F1_MSGS
@@ -662,8 +718,14 @@ private:
     void load_parameters() {
         this->declare_parameter("dynamics_model", "dynamic_mlp_residual_servo_lag");
         dynamics_model_name_ = this->get_parameter("dynamics_model").as_string();
-        this->declare_parameter("dynamic_mlp_servo_lag_weights_path", "/home/a/smooth-mppi-cuda/config/dynamic_40ms_residual_servo_lag.bin");
+        this->declare_parameter("dynamic_mlp_servo_lag_weights_path", "config/dynamic_40ms_residual_servo_lag.bin");
         dynamic_mlp_servo_lag_weights_path_=this->get_parameter("dynamic_mlp_servo_lag_weights_path").as_string();
+        if (!dynamic_mlp_servo_lag_weights_path_.empty() &&
+            dynamic_mlp_servo_lag_weights_path_.front() != '/') {
+            dynamic_mlp_servo_lag_weights_path_ =
+                ament_index_cpp::get_package_share_directory("smppi_cuda_controller") +
+                "/" + dynamic_mlp_servo_lag_weights_path_;
+        }
         if (dynamics_model_name_ == "dynamic_mlp_residual_servo_lag") {
             mppi_params_.dynamics_model = mppi::DYNAMIC_MLP_RESIDUAL_SERVO_LAG;
         } else if (dynamics_model_name_ == "DYNAMIC_SERVO_LAG") {
@@ -746,6 +808,13 @@ private:
             this->get_parameter("obstacle_soft_margin").as_double();
         this->declare_parameter("q_obs",             15000.0);  mppi_params_.q_obs         = this->get_parameter("q_obs").as_double();
         this->declare_parameter("obstacle_avoidance_enabled", false); obstacle_avoidance_enabled_=this->get_parameter("obstacle_avoidance_enabled").as_bool();
+        this->declare_parameter("dynamic_obstacle_prediction_enabled", false);
+        dynamic_obstacle_prediction_enabled_ = this->get_parameter(
+            "dynamic_obstacle_prediction_enabled").as_bool();
+        this->declare_parameter("dynamic_obstacle_trajectory_topic",
+                                "/mppi/dynamic_obstacle_trajectory");
+        dynamic_obstacle_trajectory_topic_ = this->get_parameter(
+            "dynamic_obstacle_trajectory_topic").as_string();
         this->declare_parameter("simulation_obstacle_odom_topic", "/opp_racecar/odom"); simulation_obstacle_odom_topic_=this->get_parameter("simulation_obstacle_odom_topic").as_string();
         this->declare_parameter("real_perception_obstacles_topic", "/f1/perception/object/obstacles/arr"); real_perception_obstacles_topic_=this->get_parameter("real_perception_obstacles_topic").as_string();
         this->declare_parameter("real_perception_obstacles_frame", "map"); real_perception_obstacles_frame_=this->get_parameter("real_perception_obstacles_frame").as_string();
@@ -759,9 +828,13 @@ private:
         this->declare_parameter("publish_visualization", false);
         publish_visualization_ =
             this->get_parameter("publish_visualization").as_bool();
-        this->declare_parameter("boundary_visualization_topic", "/mppi_boundary_viz");
-        boundary_visualization_topic_ =
-            this->get_parameter("boundary_visualization_topic").as_string();
+        this->declare_parameter("visualization_topic", "/mppi_viz");
+        visualization_topic_ = this->get_parameter("visualization_topic").as_string();
+        this->declare_parameter("optimal_trajectory_topic", "/mppi_optimal_trajectory");
+        optimal_trajectory_topic_ = this->get_parameter(
+            "optimal_trajectory_topic").as_string();
+        this->declare_parameter("kf_state_topic", "/kf_state");
+        kf_state_topic_ = this->get_parameter("kf_state_topic").as_string();
         this->declare_parameter("mlp_input_topic", "/mppi_mlp_input");
         mlp_input_topic_=this->get_parameter("mlp_input_topic").as_string();
         this->declare_parameter("publish_optimal_trajectory", true);
@@ -936,7 +1009,6 @@ private:
     }
 
     bool path_received_{false}, left_bnd_received_{false}, right_bnd_received_{false};
-    int slack_boundary_publish_remaining_{0};
 
     static std::string trim_csv_cell(const std::string &value) {
         const auto first = value.find_first_not_of(" \t\r\n");
@@ -1060,7 +1132,9 @@ private:
         solver_->set_reference_path(ref_path_xs_,ref_path_ys_,ref_path_yaws_);
         solver_->set_boundaries(left_xs_,left_ys_,right_xs_,right_ys_);
         path_received_=left_bnd_received_=right_bnd_received_=true;
-        slack_boundary_publish_remaining_=5;
+        // One initial publication is sufficient. A late RViz subscriber is
+        // handled event-wise in timer_callback(), without periodic boundary
+        // reconstruction or serialization.
         RCLCPP_INFO(this->get_logger(),"Loaded MPPI track CSV: %s (%zu -> %zu points)",
                     path.c_str(),source_count,output_count);
     }
@@ -1182,65 +1256,6 @@ private:
         mppi_params_.safe_set_count=output;
     }
 
-    void publish_slack_boundaries() {
-        const size_t count = std::min({
-            ref_path_xs_.size(), ref_path_ys_.size(), ref_path_yaws_.size(),
-            left_xs_.size(), left_ys_.size(), right_xs_.size(), right_ys_.size(),
-            boundary_ref_xs_.size(), boundary_ref_ys_.size(), boundary_ref_yaws_.size()});
-        if (count < 2) return;
-
-        visualization_msgs::msg::MarkerArray markers;
-        visualization_msgs::msg::Marker left_marker;
-        visualization_msgs::msg::Marker right_marker;
-        left_marker.header.frame_id = right_marker.header.frame_id = "map";
-        left_marker.header.stamp = right_marker.header.stamp = this->now();
-        left_marker.ns = right_marker.ns = "boundary_slack_zero";
-        left_marker.id = 200;
-        right_marker.id = 201;
-        left_marker.type = right_marker.type = visualization_msgs::msg::Marker::LINE_STRIP;
-        left_marker.action = right_marker.action = visualization_msgs::msg::Marker::ADD;
-        left_marker.pose.orientation.w = right_marker.pose.orientation.w = 1.0;
-        left_marker.scale.x = right_marker.scale.x = 0.045;
-        left_marker.color.r = 1.0f;
-        left_marker.color.g = 0.35f;
-        left_marker.color.a = 1.0f;
-        right_marker.color.r = 0.85f;
-        right_marker.color.b = 1.0f;
-        right_marker.color.a = 1.0f;
-        left_marker.points.reserve(count + 1);
-        right_marker.points.reserve(count + 1);
-
-        for (size_t index = 0; index < count; ++index) {
-            const float left_dx=left_xs_[index]-boundary_ref_xs_[index];
-            const float left_dy=left_ys_[index]-boundary_ref_ys_[index];
-            const float right_dx=right_xs_[index]-boundary_ref_xs_[index];
-            const float right_dy=right_ys_[index]-boundary_ref_ys_[index];
-            const float left_width=std::hypot(left_dx,left_dy);
-            const float right_width=std::hypot(right_dx,right_dy);
-            const float left_nx=left_dx/std::max(left_width,1.0e-6f);
-            const float left_ny=left_dy/std::max(left_width,1.0e-6f);
-            const float right_nx=right_dx/std::max(right_width,1.0e-6f);
-            const float right_ny=right_dy/std::max(right_width,1.0e-6f);
-            const float allowed_left = left_width - mppi_params_.collision_radius;
-            const float allowed_right = right_width - mppi_params_.collision_radius;
-
-            geometry_msgs::msg::Point left_point;
-            geometry_msgs::msg::Point right_point;
-            left_point.x = boundary_ref_xs_[index] + left_nx * allowed_left;
-            left_point.y = boundary_ref_ys_[index] + left_ny * allowed_left;
-            right_point.x = boundary_ref_xs_[index] + right_nx * allowed_right;
-            right_point.y = boundary_ref_ys_[index] + right_ny * allowed_right;
-            left_point.z = right_point.z = 0.04;
-            left_marker.points.push_back(left_point);
-            right_marker.points.push_back(right_point);
-        }
-        left_marker.points.push_back(left_marker.points.front());
-        right_marker.points.push_back(right_marker.points.front());
-        markers.markers.push_back(std::move(left_marker));
-        markers.markers.push_back(std::move(right_marker));
-        boundary_vis_pub_->publish(markers);
-    }
-
     void publish_mlp_model_input(const mppi::Control &optimal_control,
                                  float published_speed,
                                  const builtin_interfaces::msg::Time &stamp) {
@@ -1313,17 +1328,21 @@ private:
     }
 
     void timer_callback() {
-        if (slack_boundary_publish_remaining_ > 0 && path_received_ &&
-            left_bnd_received_ && right_bnd_received_) {
-            publish_slack_boundaries();
-            --slack_boundary_publish_remaining_;
-        }
         if (obstacle_avoidance_enabled_ && mppi_params_.num_obstacles > 0 &&
             obstacle_timeout_s_ > 0.0 &&
             (this->now() - obstacle_stamp_).seconds() > obstacle_timeout_s_) {
             mppi_params_.num_obstacles = 0;
             RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
                 "Obstacle input is stale; disabling obstacle cost until a new sample arrives");
+        }
+        if (dynamic_obstacle_active_ && obstacle_timeout_s_ > 0.0 &&
+            (this->now() - dynamic_obstacle_stamp_).seconds() > obstacle_timeout_s_) {
+            solver_->set_dynamic_obstacles({}, {}, {}, {}, {}, {}, 0, 0);
+            dynamic_obstacle_active_ = false;
+            dynamic_obstacle_count_ = 0;
+            dynamic_obstacle_horizon_ = 0;
+            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                "Dynamic obstacle prediction is stale; disabling its cost");
         }
         if (!is_simulation_) {
             if (!pose_received_ || !velocity_received_) {
@@ -1628,6 +1647,25 @@ private:
             obstacle.color.a = 0.35f;
             markers.markers.push_back(obstacle);
         }
+        if (dynamic_obstacle_active_) {
+            for (int obstacle_index = 0; obstacle_index < dynamic_obstacle_count_;
+                 ++obstacle_index) {
+                visualization_msgs::msg::Marker line;
+                line.header.frame_id = "map"; line.header.stamp = this->now();
+                line.ns = "mppi_dynamic_obstacles"; line.id = 500 + obstacle_index;
+                line.type = visualization_msgs::msg::Marker::LINE_STRIP;
+                line.action = visualization_msgs::msg::Marker::ADD;
+                line.pose.orientation.w = 1.0; line.scale.x = 0.035;
+                line.color.r = 1.0; line.color.g = 0.55; line.color.a = 0.9;
+                for (int step = 0; step < dynamic_obstacle_horizon_; ++step) {
+                    const int index = obstacle_index * dynamic_obstacle_horizon_ + step;
+                    geometry_msgs::msg::Point point;
+                    point.x = dynamic_obs_x_[index]; point.y = dynamic_obs_y_[index];
+                    point.z = 0.08; line.points.push_back(point);
+                }
+                markers.markers.push_back(std::move(line));
+            }
+        }
 
         // MarkerArray does not replace the previous marker set.  An ADD for
         // the current obstacles therefore leaves a marker behind whenever a
@@ -1662,6 +1700,8 @@ private:
 
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;  // 단일 구독
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr obstacle_odom_sub_;
+    rclcpp::Subscription<smppi_cuda_controller::msg::DynamicObstacleTrajectory>::SharedPtr
+        dynamic_obstacle_sub_;
 #ifdef SMPPI_HAS_F1_MSGS
     rclcpp::Subscription<f1_msgs::msg::F1stateArr>::SharedPtr perception_obstacles_sub_;
 #endif
@@ -1671,7 +1711,6 @@ private:
 
     rclcpp::Publisher<ackermann_msgs::msg::AckermannDriveStamped>::SharedPtr drive_pub_;
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr       vis_pub_;
-    rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr       boundary_vis_pub_;
     rclcpp::Publisher<smppi_cuda_controller::msg::MppiTrajectory>::SharedPtr traj_pub_;
     rclcpp::Publisher<smppi_cuda_controller::msg::MlpModelInput>::SharedPtr mlp_input_pub_;
     rclcpp::Publisher<smppi_cuda_controller::msg::KfState>::SharedPtr kf_state_pub_;
@@ -1681,8 +1720,10 @@ private:
     std::string simulation_odom_topic_, simulation_drive_topic_;
     std::string real_pose_topic_, real_odom_topic_, real_drive_topic_;
     std::string selected_drive_topic_, csv_file_path_, imu_topic_, dynamics_model_name_;
-    std::string boundary_visualization_topic_,mlp_input_topic_;
+    std::string visualization_topic_;
+    std::string optimal_trajectory_topic_, kf_state_topic_, mlp_input_topic_;
     std::string simulation_obstacle_odom_topic_;
+    std::string dynamic_obstacle_trajectory_topic_;
     std::string real_perception_obstacles_topic_, real_perception_obstacles_frame_;
     std::string dynamic_mlp_servo_lag_weights_path_;
     std::string safe_set_file_path_,objective_mode_name_;
@@ -1699,6 +1740,14 @@ private:
     bool publish_optimal_trajectory_{true};
     bool publish_visualization_{false};
     bool obstacle_avoidance_enabled_{false};
+    bool dynamic_obstacle_prediction_enabled_{false};
+    bool dynamic_obstacle_active_{false};
+    int dynamic_obstacle_count_{0};
+    int dynamic_obstacle_horizon_{0};
+    std::vector<float> dynamic_obs_x_, dynamic_obs_y_, dynamic_obs_yaw_;
+    std::vector<float> dynamic_obs_semi_major_, dynamic_obs_semi_minor_;
+    std::vector<bool> dynamic_obs_is_dynamic_;
+    rclcpp::Time dynamic_obstacle_stamp_{0, 0, RCL_ROS_TIME};
     double obstacle_timeout_s_{0.5};
     rclcpp::Time obstacle_stamp_{0, 0, RCL_ROS_TIME};
     int published_obstacle_marker_count_{0};

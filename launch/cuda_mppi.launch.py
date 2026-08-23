@@ -29,5 +29,14 @@ def generate_launch_description():
                 # params.yaml is the single source of all MPPI runtime values.
                 parameters=[param_file],
             ),
+            Node(
+                package="smppi_cuda_controller",
+                executable="path_publisher",
+                name="path_publisher",
+                output="screen",
+                # Publishes csv_file_path as /mppi_target_path and its
+                # left/right boundaries using the same portable YAML.
+                parameters=[param_file],
+            ),
         ]
     )

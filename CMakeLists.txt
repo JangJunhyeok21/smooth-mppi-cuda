@@ -29,7 +29,9 @@ if(CMAKE_HOST_SYSTEM_PROCESSOR MATCHES "aarch64")
     set(CMAKE_CUDA_ARCHITECTURES "87") # Jetson Orin Nano
 else()
     message(STATUS "Detected x86_64 architecture (Assuming ThinkPad).")
-    set(CMAKE_CUDA_ARCHITECTURES "86;89") # Ampere, Ada Lovelace
+    # Ampere/Ada cubins plus compute_89 PTX, which the installed driver can
+    # JIT for newer GPUs. CUDA 12.6 cannot compile sm_120 directly.
+    set(CMAKE_CUDA_ARCHITECTURES "86;89")
 endif()
 
 # CUDA 언어 활성화
@@ -58,6 +60,9 @@ find_package(f1_msgs QUIET)
 
 # CUDA 라이브러리 찾기
 find_package(CUDAToolkit REQUIRED)
+# C++ predictor uses CPU TorchScript. Link CPU LibTorch explicitly so
+# TorchConfig cannot overwrite the MPPI target's CUDA architecture flags.
+set(SMPPI_TORCH_ROOT "/home/a/.local/lib/python3.10/site-packages/torch")
 
 # 라이브러리 생성 (.cpp 대신 .cu 포함)
 add_library(smppi_lib STATIC
@@ -81,6 +86,13 @@ target_include_directories(smppi_lib PUBLIC
 add_executable(smppi_node
   src/smppi_node.cpp
 )
+add_executable(dynamic_obstacle_predictor_node
+  src/dynamic_obstacle_predictor_node.cpp)
+set_property(TARGET dynamic_obstacle_predictor_node PROPERTY CXX_STANDARD 17)
+target_include_directories(dynamic_obstacle_predictor_node PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  ${SMPPI_TORCH_ROOT}/include
+  ${SMPPI_TORCH_ROOT}/include/torch/csrc/api/include)
 
 add_executable(mppi_step_parity model_tuning/real_car_v2/mppi_step_parity.cu)
 target_include_directories(mppi_step_parity PUBLIC
@@ -107,12 +119,21 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/MppiTrajectory.msg"
   "msg/MlpModelInput.msg"
   "msg/KfState.msg"
+  "msg/DynamicObstacleTrajectory.msg"
   DEPENDENCIES std_msgs
 )
 
 # [수정 3 적용] 기본 C++ typesupport만 연결
 rosidl_get_typesupport_target(cpp_typesupport_target ${PROJECT_NAME} "rosidl_typesupport_cpp")
 target_link_libraries(smppi_node "${cpp_typesupport_target}")
+target_link_libraries(dynamic_obstacle_predictor_node
+  "${cpp_typesupport_target}"
+  ${SMPPI_TORCH_ROOT}/lib/libtorch.so
+  ${SMPPI_TORCH_ROOT}/lib/libtorch_cpu.so
+  ${SMPPI_TORCH_ROOT}/lib/libc10.so)
+set_target_properties(dynamic_obstacle_predictor_node PROPERTIES
+  BUILD_RPATH "${SMPPI_TORCH_ROOT}/lib"
+  INSTALL_RPATH "${SMPPI_TORCH_ROOT}/lib")
 
 set(SMPPI_NODE_DEPENDENCIES
   ament_index_cpp
@@ -131,6 +152,12 @@ else()
   message(WARNING "f1_msgs not found: real-car perception obstacle input disabled")
 endif()
 ament_target_dependencies(smppi_node ${SMPPI_NODE_DEPENDENCIES})
+ament_target_dependencies(dynamic_obstacle_predictor_node
+  rclcpp nav_msgs visualization_msgs geometry_msgs)
+if(f1_msgs_FOUND)
+  ament_target_dependencies(dynamic_obstacle_predictor_node f1_msgs)
+  target_compile_definitions(dynamic_obstacle_predictor_node PRIVATE SMPPI_HAS_F1_MSGS=1)
+endif()
 
 # 라이브러리 링크 (CUDA 링크)
 target_link_libraries(smppi_node
@@ -154,15 +181,23 @@ ament_target_dependencies(path_publisher
   rclcpp
   nav_msgs
   geometry_msgs
+  visualization_msgs
 )
 
-install(TARGETS smppi_node path_publisher mppi_step_parity
+install(TARGETS smppi_node dynamic_obstacle_predictor_node path_publisher mppi_step_parity
   mppi_horizon80_benchmark
   RUNTIME DESTINATION lib/${PROJECT_NAME})
 install(TARGETS smppi_lib
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION bin)
+
+# Runtime predictor is the C++ target above.  Keep only the Python data
+# collection/opponent-driving utilities in the installed runtime scripts.
+install(PROGRAMS
+  scripts/map2_opponent_driver.py
+  scripts/collect_mppi_mdn_episode.py
+  DESTINATION lib/${PROJECT_NAME})
 
 install(DIRECTORY launch config data msg
   DESTINATION share/${PROJECT_NAME})

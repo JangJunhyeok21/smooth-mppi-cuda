@@ -1,0 +1,25 @@
+dynamic_obstacle_predictor:
+  ros__parameters:
+    # Input selection: simulation | perception | both
+    input_mode: simulation
+    simulation_odom_topic: /opp_racecar/odom
+    perception_topic: /f1/perception/object/obstacles/arr
+
+    output_topic: /mppi/dynamic_obstacle_trajectory
+    marker_topic: /mppi/dynamic_obstacle_prediction_markers
+    publish_rate_hz: 50.0
+
+    # 72-D speed-aware contract:
+    # history 6 * [delta_s, d, v, kappa, left, right, delta_t]
+    # + lookahead 10 * [kappa, left, right].
+    include_speed_feature: true
+    # Relative paths are resolved from the smppi_cuda_controller package share.
+    model_path: config/predictor/dynamic_obstacle_frenet_speed_mdn/frenet_mdn.ts
+    track_csv: data/map2/map2_mppi_track_optimal.csv
+
+    # v below this threshold is treated as a static circular obstacle.
+    dynamic_speed_threshold: 1.0
+    opponent_radius: 0.12
+    maximum_radius: 0.75
+    longitudinal_ellipse_gain: 3.1
+    lateral_ellipse_gain: 1.1

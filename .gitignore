@@ -28,8 +28,10 @@ config/ifac2026_kinematic_mlp_residual.bin
 config/ifac2026_kinematic_noimu_direct_speed.bin
 model_tuning/real_car_v2/__pycache__/**.pyc
 model_tuning/real_car_v2/__pycache__/**.cpython-310.pyc
-model_tuning/real_car_v2/__pycache__/contract.cpython-310.pyc
-model_tuning/real_car_v2/__pycache__/contract.cpython-313.pyc
-model_tuning/real_car_v2/__pycache__/evaluate_dynamic_40ms.cpython-313.pyc
-model_tuning/real_car_v2/__pycache__/finetune_dynamic_40ms_recursive.cpython-310.pyc
-model_tuning/real_car_v2/__pycache__/train_dynamic_40ms.cpython-310.pyc
+# model_tuning/real_car_v2/__pycache__/contract.cpython-310.pyc
+# model_tuning/real_car_v2/__pycache__/contract.cpython-313.pyc
+# model_tuning/real_car_v2/__pycache__/evaluate_dynamic_40ms.cpython-313.pyc
+# model_tuning/real_car_v2/__pycache__/finetune_dynamic_40ms_recursive.cpython-310.pyc
+# model_tuning/real_car_v2/__pycache__/train_dynamic_40ms.cpython-310.pyc
+scripts/__pycache__/**.pyc
+

@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <string>
 #include <array>
+#include <cstdint>
 
 #ifdef __CUDACC__
 #define HOST_DEVICE __host__ __device__
@@ -24,6 +25,7 @@
     } while (0)
 
 #define MAX_OBS 5 // 처리 가능한 최대 장애물 개수
+#define MAX_DYNAMIC_OBSTACLE_HORIZON 120
 #define MAX_SAFE_SET_POINTS 40 // LMPC: recent 2 laps x K_NEAR(20)
 #define RESIDUAL_HISTORY 50
 #define RESIDUAL_FEATURES 11
@@ -228,6 +230,13 @@ public:
                             const std::vector<float>& yaws);
     void set_boundaries(const std::vector<float>& left_xs, const std::vector<float>& left_ys,
                         const std::vector<float>& right_xs, const std::vector<float>& right_ys);
+    void set_dynamic_obstacles(const std::vector<float>& xs,
+                               const std::vector<float>& ys,
+                               const std::vector<float>& yaws,
+                               const std::vector<float>& semi_major,
+                               const std::vector<float>& semi_minor,
+                               const std::vector<bool>& is_dynamic,
+                               int obstacle_count, int horizon);
     
     Control solve(const State& current_state);
     
@@ -277,6 +286,14 @@ private:
     std::vector<float> h_left_bnd_ys_;
     std::vector<float> h_right_bnd_xs_;
     std::vector<float> h_right_bnd_ys_;
+    std::vector<float> h_dynamic_obs_x_;
+    std::vector<float> h_dynamic_obs_y_;
+    std::vector<float> h_dynamic_obs_yaw_;
+    std::vector<float> h_dynamic_obs_semi_major_;
+    std::vector<float> h_dynamic_obs_semi_minor_;
+    std::vector<bool> h_dynamic_obs_is_dynamic_;
+    int dynamic_obstacle_count_ = 0;
+    int dynamic_obstacle_horizon_ = 0;
 
     // --- Device Memory ---
     void* d_rng_states_;     
@@ -302,6 +319,12 @@ private:
     float* d_left_bnd_ys_;
     float* d_right_bnd_xs_;
     float* d_right_bnd_ys_;
+    float* d_dynamic_obs_x_;
+    float* d_dynamic_obs_y_;
+    float* d_dynamic_obs_yaw_;
+    float* d_dynamic_obs_semi_major_;
+    float* d_dynamic_obs_semi_minor_;
+    std::uint8_t* d_dynamic_obs_is_dynamic_;
     int bnd_len_ = 0;
 };
 } // namespace mppi

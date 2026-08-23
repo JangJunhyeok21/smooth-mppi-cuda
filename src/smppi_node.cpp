@@ -10,7 +10,6 @@
 #include "cuda_mppi_controller/kinematic_residual_weights.hpp"
 #include "cuda_mppi_controller/lateral_velocity_kf.hpp"
 #include "smppi_cuda_controller/msg/mppi_trajectory.hpp"
-#include "smppi_cuda_controller/msg/mlp_model_input.hpp"
 #include "smppi_cuda_controller/msg/kf_state.hpp"
 #include "smppi_cuda_controller/msg/dynamic_obstacle_trajectory.hpp"
 #include <ament_index_cpp/get_package_share_directory.hpp>
@@ -57,8 +56,6 @@ public:
             traj_pub_ = this->create_publisher<smppi_cuda_controller::msg::MppiTrajectory>(
                 optimal_trajectory_topic_, 10);
         }
-        mlp_input_pub_ = this->create_publisher<smppi_cuda_controller::msg::MlpModelInput>(
-            mlp_input_topic_, 50);
         // Sensor inputs must prefer the newest sample instead of draining a
         // stale queue after a busy MPPI cycle.
         const auto live_state_qos = rclcpp::SensorDataQoS().keep_last(1);
@@ -573,11 +570,12 @@ private:
             const auto &u=optimal_controls[t];
             const float max_wheel_steer=mppi_params_.max_steer;
             const float target=std::max(-max_wheel_steer,std::min(
-                max_wheel_steer, u.steer));
-            const float raw_rate=(target-applied_steer)/std::max(
-                mppi_params_.steer_servo_time_constant,1.0e-3f);
-            const float applied_rate=std::max(-mppi_params_.actuator_max_steer_rate,
-                std::min(mppi_params_.actuator_max_steer_rate,raw_rate));
+                max_wheel_steer,mppi_params_.kinematic_steer_scale*u.steer+
+                mppi_params_.kinematic_steer_bias));
+            const float applied_rate=std::clamp((target-applied_steer)/std::max(
+                mppi_params_.steer_servo_time_constant,1.0e-3f),
+                -mppi_params_.actuator_max_steer_rate,
+                mppi_params_.actuator_max_steer_rate);
             applied_steer=std::max(-max_wheel_steer,std::min(
                 max_wheel_steer,
                 applied_steer+applied_rate*mppi_params_.model_dt));
@@ -809,8 +807,6 @@ private:
             "optimal_trajectory_topic").as_string();
         this->declare_parameter("kf_state_topic", "/kf_state");
         kf_state_topic_ = this->get_parameter("kf_state_topic").as_string();
-        this->declare_parameter("mlp_input_topic", "/mppi_mlp_input");
-        mlp_input_topic_=this->get_parameter("mlp_input_topic").as_string();
         this->declare_parameter("publish_optimal_trajectory", true);
         publish_optimal_trajectory_=
             this->get_parameter("publish_optimal_trajectory").as_bool();
@@ -818,11 +814,12 @@ private:
         this->declare_parameter("l_f",    0.163);  mppi_params_.l_f  = this->get_parameter("l_f").as_double();
         this->declare_parameter("l_r",    0.162);  mppi_params_.l_r  = this->get_parameter("l_r").as_double();
         this->declare_parameter("I_z",    0.04712);mppi_params_.I_z  = this->get_parameter("I_z").as_double();
-        // Ackermann steering_angle is a wheel-angle command. VESC performs
-        // the hardware servo conversion, so runtime dynamics use identity
-        // command mapping and model only the applied-wheel-angle lag.
-        mppi_params_.kinematic_steer_scale=1.0f;
-        mppi_params_.kinematic_steer_bias=0.0f;
+        this->declare_parameter("kinematic_steer_scale",1.0);
+        mppi_params_.kinematic_steer_scale=
+            this->get_parameter("kinematic_steer_scale").as_double();
+        this->declare_parameter("kinematic_steer_bias",0.0);
+        mppi_params_.kinematic_steer_bias=
+            this->get_parameter("kinematic_steer_bias").as_double();
         this->declare_parameter("kinematic_no_slip",true);
         mppi_params_.kinematic_no_slip=this->get_parameter("kinematic_no_slip").as_bool();
         this->declare_parameter("Cm0",    0.04);   mppi_params_.Cm0  = this->get_parameter("Cm0").as_double();
@@ -936,7 +933,8 @@ private:
         lateral_velocity_kf_params_.dr=mppi_params_.dynamic_mlp_D_r;lateral_velocity_kf_params_.er=mppi_params_.dynamic_mlp_E_r;
         lateral_velocity_kf_params_.speed_kp=mppi_params_.speed_servo_kp;
         lateral_velocity_kf_params_.min_accel=mppi_params_.min_accel;lateral_velocity_kf_params_.max_accel=mppi_params_.max_accel;
-        lateral_velocity_kf_params_.steer_scale=1.0f;lateral_velocity_kf_params_.steer_bias=0.0f;
+        lateral_velocity_kf_params_.steer_scale=mppi_params_.kinematic_steer_scale;
+        lateral_velocity_kf_params_.steer_bias=mppi_params_.kinematic_steer_bias;
         lateral_velocity_kf_params_.steer_tau=mppi_params_.steer_servo_time_constant;lateral_velocity_kf_params_.max_steer=mppi_params_.max_steer;lateral_velocity_kf_params_.max_steer_rate=mppi_params_.actuator_max_steer_rate;
         lateral_velocity_kf_params_.speed_accel_tau=mppi_params_.speed_reference_accel_time_constant;
         lateral_velocity_kf_params_.speed_brake_tau=mppi_params_.speed_reference_brake_time_constant;
@@ -1231,75 +1229,6 @@ private:
         mppi_params_.safe_set_count=output;
     }
 
-    void publish_mlp_model_input(const mppi::Control &optimal_control,
-                                 float published_speed,
-                                 const builtin_interfaces::msg::Time &stamp) {
-        if(mppi_params_.dynamics_model!=mppi::DYNAMIC_MLP_RESIDUAL_SERVO_LAG)
-            return;
-        const float max_steer_angle=mppi_params_.max_steer;
-        const float dt=mppi_params_.model_dt;
-        const float speed_command=std::clamp(optimal_control.accel,
-            mppi_params_.min_speed,mppi_params_.max_speed);
-        const float previous_command=mppi_params_.residual_command_history[8];
-        const float steer_target=std::clamp(
-            optimal_control.steer,-max_steer_angle,max_steer_angle);
-        const float steer_rate=std::clamp(
-            (steer_target-mppi_params_.actuator_steer_state)/
-                std::max(mppi_params_.steer_servo_time_constant,1.0e-3f),
-            -mppi_params_.actuator_max_steer_rate,
-            mppi_params_.actuator_max_steer_rate);
-        const float applied_steer=std::clamp(
-            mppi_params_.actuator_steer_state+steer_rate*dt,
-            -max_steer_angle,max_steer_angle);
-        float speed_reference=mppi_params_.actuator_speed_reference_state;
-        const float speed_tau=speed_command>=speed_reference
-            ?mppi_params_.speed_reference_accel_time_constant
-            :mppi_params_.speed_reference_brake_time_constant;
-        const float speed_rate=std::clamp(
-            (speed_command-speed_reference)/std::max(speed_tau,1.0e-3f),
-            -mppi_params_.actuator_max_speed_reference_rate,
-            mppi_params_.actuator_max_speed_reference_rate);
-        speed_reference+=speed_rate*dt;
-        const float base_ax=std::clamp(
-            mppi_params_.speed_servo_kp*(speed_reference-current_state_.v),
-            mppi_params_.min_accel,mppi_params_.max_accel);
-        const float safe_vx=std::max(std::abs(current_state_.v),.5f);
-        const float alpha_f=applied_steer-std::atan2(
-            current_state_.vy+mppi_params_.l_f*current_state_.omega,safe_vx);
-        const float alpha_r=-std::atan2(
-            current_state_.vy-mppi_params_.l_r*current_state_.omega,safe_vx);
-        const auto lateral_force=[](float fz,float B,float C,float D,float E,float alpha) {
-            const float ba=B*alpha;
-            return fz*D*std::sin(C*std::atan(ba-E*(ba-std::atan(ba))));
-        };
-        const float fyf=lateral_force(mppi_params_.F_zf,mppi_params_.dynamic_mlp_B_f,
-            mppi_params_.dynamic_mlp_C_f,mppi_params_.dynamic_mlp_D_f,
-            mppi_params_.dynamic_mlp_E_f,alpha_f);
-        const float fyr=lateral_force(mppi_params_.F_zr,mppi_params_.dynamic_mlp_B_r,
-            mppi_params_.dynamic_mlp_C_r,mppi_params_.dynamic_mlp_D_r,
-            mppi_params_.dynamic_mlp_E_r,alpha_r);
-        const float base_ay=(fyf*std::cos(applied_steer)+fyr)/mppi_params_.mass;
-        const float base_yaw_accel=(mppi_params_.l_f*fyf*std::cos(applied_steer)-
-            mppi_params_.l_r*fyr)/mppi_params_.dynamic_mlp_I_z;
-        std::array<float,22> feature{};
-        feature[0]=current_state_.v;feature[1]=current_state_.vy;
-        feature[2]=current_state_.omega;feature[3]=optimal_control.steer;
-        feature[4]=speed_command;feature[5]=applied_steer;
-        feature[6]=optimal_control.steer-previous_command;
-        feature[7]=current_state_.v+(base_ax+current_state_.vy*current_state_.omega)*dt;
-        feature[8]=current_state_.vy+(base_ay-current_state_.v*current_state_.omega)*dt;
-        feature[9]=current_state_.omega+base_yaw_accel*dt;
-        for(int i=0;i<8;++i)feature[10+i]=mppi_params_.residual_command_history[i+2];
-        feature[18]=optimal_control.steer;feature[19]=speed_command;
-        feature[20]=current_state_.ax;feature[21]=current_state_.ay;
-        smppi_cuda_controller::msg::MlpModelInput msg;
-        msg.header.stamp=stamp;msg.header.frame_id="base_link";
-        msg.contract_version=1;msg.dynamics_model=dynamics_model_name_;
-        msg.model_dt=dt;msg.imu_valid=aligned_imu_valid_;msg.features=feature;
-        msg.published_steer=optimal_control.steer;msg.published_speed=published_speed;
-        mlp_input_pub_->publish(msg);
-    }
-
     void timer_callback() {
         if (obstacle_avoidance_enabled_ && mppi_params_.num_obstacles > 0 &&
             obstacle_timeout_s_ > 0.0 &&
@@ -1352,13 +1281,17 @@ private:
                 current_state_.ay=aligned_imu_valid_?aligned_imu_[2]
                     :current_state_.v*current_state_.omega;
             }
-            const float target=std::clamp(last_steer_cmd_,
+            const float target=std::clamp(
+                mppi_params_.kinematic_steer_scale*last_steer_cmd_+
+                mppi_params_.kinematic_steer_bias,
                 -mppi_params_.max_steer,mppi_params_.max_steer);
-            const float rate=std::clamp((target-mppi_params_.actuator_steer_state)/
-                std::max(1e-3f,mppi_params_.steer_servo_time_constant),
-                -mppi_params_.actuator_max_steer_rate,mppi_params_.actuator_max_steer_rate);
+            const float steer_rate=std::clamp(
+                (target-mppi_params_.actuator_steer_state)/
+                    std::max(1e-3f,mppi_params_.steer_servo_time_constant),
+                -mppi_params_.actuator_max_steer_rate,
+                mppi_params_.actuator_max_steer_rate);
             mppi_params_.actuator_steer_state=std::clamp(
-                mppi_params_.actuator_steer_state+rate*mppi_params_.dt,
+                mppi_params_.actuator_steer_state+steer_rate*mppi_params_.dt,
                 -mppi_params_.max_steer,mppi_params_.max_steer);
             const float speed_tau=last_speed_cmd_>=mppi_params_.actuator_speed_reference_state
                 ? mppi_params_.speed_reference_accel_time_constant
@@ -1440,7 +1373,6 @@ private:
         drive_msg.drive.speed                   = next_v;
         drive_msg.drive.acceleration            = published_accel;
         drive_pub_->publish(drive_msg);
-        publish_mlp_model_input(u,next_v,drive_msg.header.stamp);
         has_published_command_=true;
         last_steer_cmd_=u.steer; last_speed_cmd_=next_v;
         command_history_.push_back({last_steer_cmd_,last_speed_cmd_});
@@ -1683,7 +1615,6 @@ private:
     rclcpp::Publisher<ackermann_msgs::msg::AckermannDriveStamped>::SharedPtr drive_pub_;
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr       vis_pub_;
     rclcpp::Publisher<smppi_cuda_controller::msg::MppiTrajectory>::SharedPtr traj_pub_;
-    rclcpp::Publisher<smppi_cuda_controller::msg::MlpModelInput>::SharedPtr mlp_input_pub_;
     rclcpp::Publisher<smppi_cuda_controller::msg::KfState>::SharedPtr kf_state_pub_;
 
     rclcpp::TimerBase::SharedPtr timer_;
@@ -1692,7 +1623,7 @@ private:
     std::string real_pose_topic_, real_odom_topic_, real_drive_topic_;
     std::string selected_drive_topic_, csv_file_path_, imu_topic_, dynamics_model_name_;
     std::string visualization_topic_;
-    std::string optimal_trajectory_topic_, kf_state_topic_, mlp_input_topic_;
+    std::string optimal_trajectory_topic_, kf_state_topic_;
     std::string simulation_obstacle_odom_topic_;
     std::string dynamic_obstacle_trajectory_topic_;
     std::string dynamic_mlp_servo_lag_weights_path_;

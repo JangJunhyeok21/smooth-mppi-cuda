@@ -279,14 +279,19 @@ def load_regression_data(path,config):
     # reconstruct actuator state candidate-by-candidate from the warm-up
     # commands, so feature[:,5] is diagnostic rather than an optimizer input.
     max_steer=float(config["max_steer"])
-    feature[0,5]=np.clip(feature[0,3],-max_steer,max_steer)
+    steer_scale=float(config["kinematic_steer_scale"])
+    steer_bias=float(config["kinematic_steer_bias"])
+    feature[0,5]=np.clip(steer_scale*feature[0,3]+steer_bias,
+                         -max_steer,max_steer)
     times=samples[:,names["t"]]
     steer_tau=max(float(config["steer_servo_time_constant"]),1e-3)
     steer_rate=float(config["actuator_max_steer_rate"])
     for index in range(1,count):
         dt=max(0.,times[index]-times[index-1])
-        target=np.clip(feature[index-1,3],-max_steer,max_steer)
-        rate=np.clip((target-feature[index-1,5])/steer_tau,-steer_rate,steer_rate)
+        target=np.clip(steer_scale*feature[index-1,3]+steer_bias,
+                       -max_steer,max_steer)
+        rate=np.clip((target-feature[index-1,5])/steer_tau,
+                     -steer_rate,steer_rate)
         feature[index,5]=np.clip(
             feature[index-1,5]+rate*dt,-max_steer,max_steer)
     feature[:,6]=feature[:,3]-np.r_[feature[0,3],feature[:-1,3]]
@@ -404,10 +409,13 @@ def rollout_numpy(parameters, data, window_starts, config, return_residual=False
     # because that field was generated with the previous steering parameters.
     for offset in range(-WARMUP_SAMPLES, 0):
         warm_command = feature[window_starts+offset, 3:5]
-        warm_target = np.clip(warm_command[:,0], -max_steer, max_steer)
-        warm_rate = np.clip((warm_target-applied_steer)/float(config["steer_servo_time_constant"]),
-                            -float(config["actuator_max_steer_rate"]),
-                            float(config["actuator_max_steer_rate"]))
+        warm_target = np.clip(float(config["kinematic_steer_scale"])*
+            warm_command[:,0]+float(config["kinematic_steer_bias"]),
+            -max_steer, max_steer)
+        warm_rate = np.clip((warm_target-applied_steer)/max(
+            float(config["steer_servo_time_constant"]),1e-3),
+            -float(config["actuator_max_steer_rate"]),
+            float(config["actuator_max_steer_rate"]))
         applied_steer = np.clip(
             applied_steer+warm_rate*.02, -max_steer, max_steer)
         warm_tau = np.where(warm_command[:,1] >= speed_reference,
@@ -434,9 +442,11 @@ def rollout_numpy(parameters, data, window_starts, config, return_residual=False
         if step:history=np.concatenate((history[:,1:],command[:,None]),axis=1)
         previous_command=history[:,-2,0]
         current_state=state.copy()
-        steer_target = np.clip(command[:, 0], -max_steer, max_steer)
-        steer_rate = np.clip(
-            (steer_target-applied_steer)/float(config["steer_servo_time_constant"]),
+        steer_target = np.clip(float(config["kinematic_steer_scale"])*
+            command[:,0]+float(config["kinematic_steer_bias"]),
+            -max_steer, max_steer)
+        steer_rate = np.clip((steer_target-applied_steer)/max(
+            float(config["steer_servo_time_constant"]),1e-3),
             -float(config["actuator_max_steer_rate"]),
             float(config["actuator_max_steer_rate"]))
         applied_steer = np.clip(
@@ -845,9 +855,12 @@ def torch_rollout_loss(raw_parameters, data, window_starts, config, device):
     predictions=[]; truths=[]
     for offset in range(-WARMUP_SAMPLES,0):
         warm=feature[starts_tensor+offset,3:5]
-        target=torch.clamp(warm[:,0],-max_steer,max_steer)
-        rate=torch.clamp((target-applied)/float(config["steer_servo_time_constant"]),
-                         -float(config["actuator_max_steer_rate"]),float(config["actuator_max_steer_rate"]))
+        target=torch.clamp(float(config["kinematic_steer_scale"])*warm[:,0]+
+            float(config["kinematic_steer_bias"]),-max_steer,max_steer)
+        rate=torch.clamp((target-applied)/max(
+            float(config["steer_servo_time_constant"]),1e-3),
+            -float(config["actuator_max_steer_rate"]),
+            float(config["actuator_max_steer_rate"]))
         applied=torch.clamp(applied+rate*.02,-max_steer,max_steer)
         tau=torch.where(warm[:,1]>=speed_reference,
             torch.full_like(speed_reference,float(config["speed_reference_accel_time_constant"])),
@@ -862,10 +875,12 @@ def torch_rollout_loss(raw_parameters, data, window_starts, config, device):
     h_cg=float(config.get("load_transfer_h_cg_m",LOAD_TRANSFER_H_CG_M));dt=.04
     for step in range(HORIZON):
         row=starts_tensor+2*step; command=feature[row,3:5]
-        target=torch.clamp(command[:,0],-max_steer,max_steer)
-        rate=torch.clamp((target-applied)/float(config["steer_servo_time_constant"]),
-                         -float(config["actuator_max_steer_rate"]),
-                         float(config["actuator_max_steer_rate"]))
+        target=torch.clamp(float(config["kinematic_steer_scale"])*command[:,0]+
+            float(config["kinematic_steer_bias"]),-max_steer,max_steer)
+        rate=torch.clamp((target-applied)/max(
+            float(config["steer_servo_time_constant"]),1e-3),
+            -float(config["actuator_max_steer_rate"]),
+            float(config["actuator_max_steer_rate"]))
         applied=torch.clamp(applied+rate*dt,-max_steer,max_steer)
         speed=torch.clamp(command[:,1],float(config["min_speed"]),4.)
         tau=torch.where(speed>=speed_reference,
@@ -1053,6 +1068,32 @@ def plot_tire_force_curves(data, previous, fitted, config):
     output=OUT/"pacejka_fy_vs_alpha.png";fig.savefig(output,dpi=180)
     if SHOW_PLOTS:plt.show()
     plt.close(fig)
+
+    # E is poorly identifiable when B/C/D are optimized simultaneously.  Show
+    # its effect with B/C/D frozen at the fitted values so a boundary solution
+    # (for example E=-100) cannot be mistaken for an ordinary tire curve.
+    e_values=(1.0,0.0,-1.0,-2.0,-10.0,-100.0)
+    e_fig,e_axes=plt.subplots(1,2,figsize=(14,5.5),sharey=True)
+    for axis,title,offset,observed_values in zip(
+            e_axes,("Front tire","Rear tire"),(0,4),observed):
+        b,c,d,_=np.asarray(fitted[offset:offset+4],float)
+        z=b*alpha
+        for e in e_values:
+            force=d*np.sin(c*np.arctan(z-e*(z-np.arctan(z))))
+            axis.plot(np.rad2deg(alpha),force,lw=1.8,label=f"E={e:g}")
+        q01,q99=np.quantile(observed_values,(.01,.99))
+        axis.axvspan(np.rad2deg(q01),np.rad2deg(q99),color="tab:green",alpha=.12,
+                    label="observed slip 1–99%")
+        axis.axhline(0.,color="black",lw=.7);axis.axvline(0.,color="black",lw=.7)
+        axis.set(title=f"{title}: fixed fitted B/C/D",xlabel="slip angle α [deg]")
+        axis.grid(alpha=.25);axis.legend(fontsize=8,ncol=2)
+    e_axes[0].set_ylabel("Fy / Fz")
+    e_fig.suptitle("Pacejka curvature-factor sensitivity: only E changes")
+    e_fig.tight_layout()
+    e_output=OUT/"pacejka_E_sensitivity.png";e_fig.savefig(e_output,dpi=180)
+    if SHOW_PLOTS:plt.show()
+    plt.close(e_fig)
+    print(f"Pacejka E-sensitivity plot: {e_output}")
     return output
 
 
@@ -1485,10 +1526,6 @@ def main():
         for index in (3,7):BOUNDS[index]=(center[index]-.2,center[index]+.2)
         BOUNDS[:,0]=np.maximum(BOUNDS[:,0],original[:,0]);BOUNDS[:,1]=np.minimum(BOUNDS[:,1],original[:,1])
         REFERENCE=center
-    # Ackermann steering is already wheel angle. These compatibility fields
-    # must remain identity and are not regression variables.
-    config["kinematic_steer_scale"]=1.0
-    config["kinematic_steer_bias"]=0.0
     split_starts = tuple(starts(data, index) for index in range(3))
     if USE_VALIDATION_TEST_SPLIT:
         train, validation, test = split_starts
@@ -1599,6 +1636,16 @@ def main():
     tolerance=.01*(BOUNDS[:,1]-BOUNDS[:,0])
     boundary={name:bool(abs(value-low)<=tol or abs(high-value)<=tol)
               for name,value,(low,high),tol in zip(NAMES,selected,BOUNDS,tolerance)}
+    previous_validation=comparison["current"]["validation"]
+    fitted_validation=selected_metrics["validation"]
+    previous_p95_score=(POSITION_LOSS_WEIGHT*previous_validation["trajectory_p95_m"]
+        +YAW_TRAJECTORY_LOSS_WEIGHT*previous_validation["trajectory_yaw_p95_rad"])
+    fitted_p95_score=(POSITION_LOSS_WEIGHT*fitted_validation["trajectory_p95_m"]
+        +YAW_TRAJECTORY_LOSS_WEIGHT*fitted_validation["trajectory_yaw_p95_rad"])
+    score_improved=(validation_score(fitted_validation)
+                    < validation_score(previous_validation))
+    p95_improved=fitted_p95_score < previous_p95_score
+    deployment_gate_passed=bool(score_improved and p95_improved)
     report={"model_dt":.04,"integration":"semi-implicit Euler: next body state advances pose at 0.04 s",
         "input_path":str(DATA.resolve()),"input_contract":data_contract,
         "evaluation_contract":evaluation_contract,
@@ -1625,9 +1672,16 @@ def main():
             "I_z":selected_iz,
             "kinematic_position_speed_scale":fitted_position_scale},
         "boundary_solution":boundary,
-        "deployment_gate_passed":bool(not any(boundary.values()) and
-            validation_score(selected_metrics["validation"])<
-            validation_score(comparison["current"]["validation"])),
+        "boundary_solution_is_diagnostic_only":True,
+        "deployment_gate":{
+            "policy":"overall validation and weighted pose/yaw P95 must improve; bounds are diagnostic",
+            "previous_validation_score":validation_score(previous_validation),
+            "fitted_validation_score":validation_score(fitted_validation),
+            "previous_weighted_p95_score":previous_p95_score,
+            "fitted_weighted_p95_score":fitted_p95_score,
+            "overall_score_improved":bool(score_improved),
+            "weighted_p95_improved":bool(p95_improved)},
+        "deployment_gate_passed":deployment_gate_passed,
         "fitted_I_z":selected_iz,
         "alternating_candidate_accepted":bool(alternating_accepted),
         "alternating_candidate_validation":alternating_validation,

@@ -279,12 +279,16 @@ namespace mppi
                                                             const Params &p,float *history)
     {
         const float speed_cmd=fminf(p.max_speed,fmaxf(p.min_speed,u.accel));
-        const float steer_target=fminf(p.max_steer,fmaxf(-p.max_steer,u.steer));
+        const float steer_target=fminf(p.max_steer,fmaxf(-p.max_steer,
+            p.kinematic_steer_scale*u.steer+p.kinematic_steer_bias));
         const float previous_command=history[8];
         const float previous_delta=history[10];
-        const float steer_rate=fminf(p.actuator_max_steer_rate,fmaxf(-p.actuator_max_steer_rate,
-            (steer_target-previous_delta)/fmaxf(p.steer_servo_time_constant,1e-3f)));
-        const float steer=fminf(p.max_steer,fmaxf(-p.max_steer,previous_delta+steer_rate*p.dt));
+        const float steer_rate=fminf(p.actuator_max_steer_rate,
+            fmaxf(-p.actuator_max_steer_rate,
+                  (steer_target-previous_delta)/fmaxf(
+                      p.steer_servo_time_constant,1e-3f)));
+        const float steer=fminf(p.max_steer,fmaxf(
+            -p.max_steer,previous_delta+steer_rate*p.dt));
         const float beta=atan2f(s.vy,s.v);
         const float base_ax=fminf(p.max_accel,fmaxf(p.min_accel,p.speed_servo_kp*(speed_cmd-s.v)));
         const float base_vx=s.v+base_ax*p.dt,base_vy=s.vy;
@@ -359,16 +363,19 @@ namespace mppi
         if (use_servo_lag) {
             const float target_steering_angle = fminf(
                 max_steering_angle,
-                fmaxf(-max_steering_angle, control.steer));
+                fmaxf(-max_steering_angle,
+                      params.kinematic_steer_scale*control.steer+
+                      params.kinematic_steer_bias));
             const float steering_rate = fminf(
                 params.actuator_max_steer_rate,
                 fmaxf(-params.actuator_max_steer_rate,
-                      (target_steering_angle - previous_actuator_steering_angle)
-                          / fmaxf(params.steer_servo_time_constant, 1.0e-3f)));
+                      (target_steering_angle - previous_actuator_steering_angle) /
+                          fmaxf(params.steer_servo_time_constant, 1.0e-3f)));
             steering_angle = fminf(
                 max_steering_angle,
                 fmaxf(-max_steering_angle,
-                      previous_actuator_steering_angle + steering_rate * dynamics_dt));
+                      previous_actuator_steering_angle +
+                          steering_rate * dynamics_dt));
         } else {
             // Causal no-lag contract: the command available at prediction
             // time t is the previous Ackermann steering command. Do not apply

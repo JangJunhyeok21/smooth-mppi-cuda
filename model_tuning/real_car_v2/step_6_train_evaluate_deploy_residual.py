@@ -26,7 +26,7 @@ EVALUATE_ONLY=False  # F5: one-step -> recursive -> evaluation 순서로 실행
 EVALUATION_MODEL_PATH=OUTPUT/"recursive"
 DEPLOY_AFTER_TRAINING=True
 ROLLOUT_DT_S=0.04
-HORIZON_STEPS=60  # Step 1 currently stores 1.2 s = HORIZON_STEPS * 40 ms
+HORIZON_STEPS=60  # Step 1 stores 2.4 s = HORIZON_STEPS * 40 ms
 INSPECT_BAG_ID=None  # None: INSPECT_RANDOM_SEED로 가능한 bag 하나를 선택
 INSPECT_RANDOM_SEED=31
 
@@ -41,16 +41,26 @@ def print_evaluation_change(residual_path,classic_path,horizon_steps):
     residual=json.loads(Path(residual_path).read_text())
     classic=json.loads(Path(classic_path).read_text())
     horizon_s=horizon_steps*ROLLOUT_DT_S
-    print(f"\nStep 6 classic-only -> residual {horizon_s:g} s "
-          "open-loop RMSE:")
+    print(f"\nStep 6 quantitative summary: classic-only -> residual "
+          f"({horizon_s:g} s rollout)")
     for split in sorted(set(residual)&set(classic)):
         if split=="evaluation_contract":continue
         print(f"  [{split}]")
-        for metric in ("trajectory_m","yaw_rad","vx_mps","vy_mps","yaw_rate_rps"):
-            before=float(classic[split]["final_horizon"][metric]["rmse"])
-            after=float(residual[split]["final_horizon"][metric]["rmse"])
-            reduction=100.0*(before-after)/max(abs(before),1e-12)
-            print(f"    {metric}: {before:.6g} -> {after:.6g} ({reduction:+.2f}%)")
+        for scope,label in (("all_horizons","all-step RMSE"),
+                            ("final_horizon","final-step RMSE/P95/max")):
+            print(f"    {label}:")
+            for metric in ("trajectory_m","yaw_rad","vx_mps","vy_mps","yaw_rate_rps"):
+                before_values=classic[split][scope][metric]
+                after_values=residual[split][scope][metric]
+                before=float(before_values["rmse"]);after=float(after_values["rmse"])
+                reduction=100.0*(before-after)/max(abs(before),1e-12)
+                text=f"      {metric}: {before:.6g} -> {after:.6g} ({reduction:+.2f}%)"
+                if scope=="final_horizon":
+                    p95_reduction=100.0*(float(before_values["p95"])-float(after_values["p95"]))/max(abs(float(before_values["p95"])),1e-12)
+                    text+=(f"; P95 {before_values['p95']:.6g} -> {after_values['p95']:.6g} "
+                           f"({p95_reduction:+.2f}%); max {before_values['max']:.6g} -> "
+                           f"{after_values['max']:.6g}")
+                print(text)
 
 
 def main():
@@ -100,7 +110,6 @@ def main():
     run("residual_rollout_evaluation.py",recursive,"--out",classic_report,
         "--classic-params",args.classic_params,"--data",args.data,"--disable-mlp",
         "--horizon-steps",args.horizon_steps,env=env)
-    print_evaluation_change(residual_report,classic_report,args.horizon_steps)
     if not args.no_plot:
         from callback_training_data import load_callback_archives
         inspection_data=load_callback_archives(
@@ -145,6 +154,9 @@ def main():
         if args.update_simulator:deploy.append("--update-simulator")
         run("deploy_residual_model.py",*deploy,env=env)
     mode="evaluation only" if args.evaluate_only else "training/evaluation"
+    # Repeat the quantitative summary at the very end so interactive plotting
+    # and deployment logs cannot bury the result in a long Step-6 console log.
+    print_evaluation_change(residual_report,classic_report,args.horizon_steps)
     print(f"\nStep 6 {mode} complete: {args.out}")
 
 

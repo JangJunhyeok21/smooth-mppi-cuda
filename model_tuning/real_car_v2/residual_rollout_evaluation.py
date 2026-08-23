@@ -177,18 +177,25 @@ def main():
     gt_future_accel = np.stack((dv[:, :, 0] - future[:, :, 1] * future[:, :, 2],
                                 dv[:, :, 1] + future[:, :, 0] * future[:, :, 2]), axis=2)
     gt_accel = np.concatenate((data["imu"][selected, None], gt_future_accel), axis=1)
-    xy = np.linalg.norm(predicted_pose[:, -1, :2] - gt_pose[:, -1, :2], axis=1)
-    yaw = np.abs(np.arctan2(np.sin(predicted_pose[:, -1, 2] - gt_pose[:, -1, 2]),
-                            np.cos(predicted_pose[:, -1, 2] - gt_pose[:, -1, 2])))
-    state_error = np.abs(predicted_state[:, -1] - gt_state[:, -1])
-    final = {"trajectory_m": statistics(xy), "yaw_rad": statistics(yaw),
-             "vx_mps": statistics(state_error[:, 0]),
-             "vy_mps": statistics(state_error[:, 1]),
-             "yaw_rate_rps": statistics(state_error[:, 2])}
+    def error_metrics(pose_prediction, pose_target, state_prediction, state_target):
+        xy = np.linalg.norm(pose_prediction[..., :2] - pose_target[..., :2], axis=-1)
+        yaw_delta = pose_prediction[..., 2] - pose_target[..., 2]
+        yaw = np.abs(np.arctan2(np.sin(yaw_delta), np.cos(yaw_delta)))
+        state_error = np.abs(state_prediction - state_target)
+        return {"trajectory_m": statistics(xy.ravel()),
+                "yaw_rad": statistics(yaw.ravel()),
+                "vx_mps": statistics(state_error[..., 0].ravel()),
+                "vy_mps": statistics(state_error[..., 1].ravel()),
+                "yaw_rate_rps": statistics(state_error[..., 2].ravel())}
+    final = error_metrics(predicted_pose[:, -1], gt_pose[:, -1],
+                          predicted_state[:, -1], gt_state[:, -1])
+    all_horizons = error_metrics(predicted_pose[:, 1:], gt_pose[:, 1:],
+                                 predicted_state[:, 1:], gt_state[:, 1:])
     report = {"evaluation_contract": {"source": "direct Step-1 callback archives",
         "horizon_steps": args.horizon_steps, "horizon_s": args.horizon_steps * DT,
         "state_target": "future actual MPPI-model KF", "pose_target": "future MCL pose"},
-        "selected": {"windows": len(selected), "final_horizon": final}}
+        "selected": {"windows": len(selected), "all_horizons": all_horizons,
+                     "final_horizon": final}}
     output = Path(args.out); output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(report, indent=2) + "\n")
     start_time = data["anchor_time"][selected] - np.asarray([

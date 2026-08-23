@@ -12,7 +12,7 @@ import os
 
 import matplotlib.pyplot as plt
 import numpy as np
-from scipy.optimize import minimize_scalar
+from scipy.optimize import differential_evolution
 import yaml
 
 import classic_model_regression as classic
@@ -22,9 +22,13 @@ from classic_model_regression import (
 
 ROOT = Path(__file__).resolve().parents[2]
 CONFIG = ROOT / "config/params.yaml"
+OPPONENT_CONFIG = ROOT / "config/opponent_params.yaml"
 OUT = Path(os.environ.get("STEERING_ID_OUT",
     ROOT / "model_tuning/results/steering_actuator_regression"))
-TAU_BOUNDS = (0.01, 0.6)
+FIX_STEER_TIME_CONSTANT = False
+SCALE_BOUNDS = (0.5, 1.5)
+BIAS_BOUNDS = (-0.15, 0.15)
+TAU_BOUNDS = (0.04, 0.50)
 SEED = 31
 SHOW_PLOTS = True
 
@@ -50,10 +54,8 @@ def excitation_subsets(data, indices):
 
 def with_steering(config, scale, bias, tau):
     result = deepcopy(config)
-    # Ackermann steering_angle is already the target wheel angle. Scale and
-    # bias remain compatibility metadata only and must be identity.
-    result["kinematic_steer_scale"] = 1.0
-    result["kinematic_steer_bias"] = 0.0
+    result["kinematic_steer_scale"] = float(scale)
+    result["kinematic_steer_bias"] = float(bias)
     result["steer_servo_time_constant"] = float(tau)
     return result
 
@@ -68,16 +70,19 @@ def steering_state_rollout(data, window_starts, config):
     applied=np.clip(feature[starts_array-classic.WARMUP_SAMPLES,3],
                     -max_steer,max_steer)
     for offset in range(-classic.WARMUP_SAMPLES+1,0):
-        target=np.clip(feature[starts_array+offset,3],-max_steer,max_steer)
-        rate=np.clip((target-applied)/tau,-rate_limit,rate_limit)
-        applied=np.clip(applied+rate*.02,-max_steer,max_steer)
+        target=np.clip(float(config["kinematic_steer_scale"])*
+                       feature[starts_array+offset,3]+
+                       float(config["kinematic_steer_bias"]),-max_steer,max_steer)
+        steer_rate=np.clip((target-applied)/tau,-rate_limit,rate_limit)
+        applied=np.clip(applied+steer_rate*.02,-max_steer,max_steer)
     applied_trace=[applied.copy()]
     raw_command=[];target_trace=[]
     for step in range(HORIZON):
         command=feature[starts_array+2*step,3]
-        target=np.clip(command,-max_steer,max_steer)
-        rate=np.clip((target-applied)/tau,-rate_limit,rate_limit)
-        applied=np.clip(applied+rate*.04,-max_steer,max_steer)
+        target=np.clip(float(config["kinematic_steer_scale"])*command+
+                       float(config["kinematic_steer_bias"]),-max_steer,max_steer)
+        steer_rate=np.clip((target-applied)/tau,-rate_limit,rate_limit)
+        applied=np.clip(applied+steer_rate*.04,-max_steer,max_steer)
         raw_command.append(command.copy());target_trace.append(target.copy())
         applied_trace.append(applied.copy())
     # Commands are held over each interval; prepend the first command so every
@@ -90,19 +95,20 @@ def steering_state_rollout(data, window_starts, config):
 
 
 def update_yaml(scale, bias, tau):
-    values = {"kinematic_steer_scale": 1.0, "kinematic_steer_bias": 0.0,
+    values = {"kinematic_steer_scale": scale, "kinematic_steer_bias": bias,
               "steer_servo_time_constant": tau}
-    lines = CONFIG.read_text().splitlines()
-    found = set()
-    for line_number, line in enumerate(lines):
-        for key, value in values.items():
-            if line.strip().startswith(key + ":"):
-                indent = line[:len(line)-len(line.lstrip())]
-                lines[line_number] = f"{indent}{key}: {value:.9g}  # Step 4 vehicle-response identification"
-                found.add(key)
-    if found != set(values):
-        raise RuntimeError(f"missing runtime YAML keys: {set(values)-found}")
-    CONFIG.write_text("\n".join(lines) + "\n")
+    for path in (CONFIG,OPPONENT_CONFIG):
+        lines = path.read_text().splitlines()
+        found = set()
+        for line_number, line in enumerate(lines):
+            for key, value in values.items():
+                if line.strip().startswith(key + ":"):
+                    indent = line[:len(line)-len(line.lstrip())]
+                    lines[line_number] = f"{indent}{key}: {value:.9g}  # Step 4 vehicle-response identification"
+                    found.add(key)
+        if found != set(values):
+            raise RuntimeError(f"{path}: missing runtime YAML keys: {set(values)-found}")
+        path.write_text("\n".join(lines) + "\n")
 
 
 def plot_open_loop_evaluation(data, tire, config, old, fitted, validation, test):
@@ -218,26 +224,25 @@ def plot_open_loop_evaluation(data, tire, config, old, fitted, validation, test)
 
 
 def main():
-    global TAU_BOUNDS
     OUT.mkdir(parents=True, exist_ok=True)
     config = yaml.safe_load(CONFIG.read_text())["/**"]["ros__parameters"]
     data, data_contract = classic.load_regression_data(DATA, config)
     tire = selected_tire_parameters(config)
     train, validation, test = (starts(data, split) for split in range(3))
     steady, transient = excitation_subsets(data, train)
-    old = np.asarray((1.0, 0.0,
+    old = np.asarray((config["kinematic_steer_scale"],
+                      config["kinematic_steer_bias"],
                       config["steer_servo_time_constant"]), float)
-    local=float(os.environ.get("IDENTIFICATION_LOCAL_FRACTION","0"))
-    if local>0:
-        TAU_BOUNDS=(max(.01,old[2]*(1-local)),min(.6,old[2]*(1+local)))
-
-    # Only the applied-wheel-angle lag remains identifiable. VESC's hardware
-    # conversion is downstream of the wheel-angle command interface.
-    lag_fit = minimize_scalar(
-        lambda tau: objective(tire, data, transient,
-            with_steering(config, 1.0, 0.0, tau)),
-        bounds=TAU_BOUNDS, method="bounded", options={"xatol": 1e-5})
-    fitted = np.asarray((1.0, 0.0, lag_fit.x))
+    fixed_tau=float(old[2])
+    fit_bounds=(SCALE_BOUNDS,BIAS_BOUNDS) if FIX_STEER_TIME_CONSTANT else (
+        SCALE_BOUNDS,BIAS_BOUNDS,TAU_BOUNDS)
+    mapping_fit=differential_evolution(
+        lambda values: objective(tire,data,train,with_steering(
+            config,values[0],values[1],fixed_tau if FIX_STEER_TIME_CONSTANT
+            else values[2])),bounds=fit_bounds,seed=SEED,popsize=18,
+        maxiter=60,tol=1e-7,polish=True,workers=1,updating="immediate")
+    fitted=np.asarray((mapping_fit.x[0],mapping_fit.x[1],fixed_tau
+                       if FIX_STEER_TIME_CONSTANT else mapping_fit.x[2]))
 
     def evaluate(values, indices):
         return metrics(tire, data, indices,
@@ -260,10 +265,15 @@ def main():
         "target": ("configured teacher_state/target_pose from classic_model_regression; "
                    "no direct steering-angle GT"),
         "hidden_state_initialization": "candidate-dependent 0.8 s steering-command warm-up",
-        "fixed_wheel_angle_command_mapping": {"scale": 1.0, "bias_rad": 0.0},
-        "stage_3a": {"optimized": [], "reason": "wheel-angle command identity"},
-        "stage_3b": {"optimized": ["tau_delta"],
-                     "transient_windows": int(len(transient))},
+        "fixed_steer_servo_time_constant_s":(fixed_tau
+                                               if FIX_STEER_TIME_CONSTANT else None),
+        "steer_time_constant_bounds_s":list(TAU_BOUNDS),
+        "stage_4": {"optimized": ["kinematic_steer_scale","kinematic_steer_bias"]+
+                                  ([] if FIX_STEER_TIME_CONSTANT else
+                                   ["steer_servo_time_constant"]),
+                     "fixed": (["steer_servo_time_constant"]
+                               if FIX_STEER_TIME_CONSTANT else []),
+                     "train_windows":int(len(train))},
         "previous": old.tolist(), "fitted": fitted.tolist(),
         "metrics_previous": {"validation": evaluate(old, validation),
                              "test": evaluate(old, test)},

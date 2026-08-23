@@ -2,7 +2,7 @@
   ros__parameters:
     # 사용 모델: dynamic_mlp_residual_servo_lag 또는 DYNAMIC_SERVO_LAG
     # MLP 모델만 아래 학습 가중치를 읽고, Classic 모델은 이 파일을 읽지 않는다.
-    dynamics_model: DYNAMIC_SERVO_LAG
+    dynamics_model: dynamic_mlp_residual_servo_lag
     dynamic_mlp_servo_lag_weights_path: config/dynamic_40ms_residual_servo_lag.bin
     # MLP 보정 출력만 제한한다. 센서값과 최종 state에는 적용하지 않는다.
     mlp_max_residual_ax: 0.0          # [m/s^2]
@@ -17,7 +17,7 @@
     imu_ax_sign: 1.0
     imu_ay_sign: 1.0
     # 0817~0820 정지구간 robust median; FLU 변환 후 제거한다.
-    imu_wz_bias: 0.00073408385
+    imu_wz_bias: 0.0004
     imu_ax_bias: -0.17
     imu_ay_bias: 0.12
     # 6-state MPPI-model EKF. Order:
@@ -115,7 +115,6 @@
     boundary_visualization_topic: /mppi_boundary_viz
     # path_publisher low-rate refresh; transient-local also serves late RViz.
     boundary_publish_period_s: 5.0
-    mlp_input_topic: /mppi_mlp_input  # 실제 CUDA 첫 knot의 22D MLP 입력 기록용
     control_rate_hz: 50.0    # 20 ms timer; MPPI 계산도 이 주기보다 짧아야 함
     model_dt: 0.04  # dynamic servo-lag rollout knot; ROS solve/publish remains 50 Hz
     
@@ -124,21 +123,21 @@
     l_f: 0.1833
     l_r: 0.1407
     # tiv_imu_bagdisjoint_kinematic_classic 식별 결과. l_f/l_r/mass는 학습 시 고정값.
-    kinematic_steer_scale: 1.0  # fixed identity: command is wheel angle
-    kinematic_steer_bias: 0.0   # fixed identity: VESC handles servo conversion
+    kinematic_steer_scale: 1.19958229  # restored effective steering-response baseline
+    kinematic_steer_bias: 0.00227245701  # restored effective steering-response baseline
     kinematic_position_speed_scale: 1.0  # offline state is physical ground-relative body velocity
     kinematic_no_slip: true               # residual checkpoint 학습 조건(beta=0)
     # vx_cmd 추종 회귀값: 종방향 residual 없이 실제 바퀴속도 응답을 재현
-    speed_servo_kp: 31.0919997  # bag/session-disjoint vx rollout regression
+    speed_servo_kp: 10.3739069  # bag/session-disjoint vx rollout regression
     # r_kin=vx*tan(delta)/L is a target, not an instantaneous yaw-rate assignment.
     kinematic_yaw_rate_time_constant: 0.1
     kinematic_max_yaw_accel: 15.0
-    steer_servo_time_constant: 0.19640877  # Step 4 vehicle-response identification
+    steer_servo_time_constant: 0.19640877  # restored effective command-to-yaw response lag
     # Servo specification: 60 deg / 0.16 s = 6.5449847 rad/s.
     actuator_max_steer_rate: 6.544984694978735 # 제조사 spec: 60 deg / 0.16 s = 6.5449847 rad/s
     # all6_seed31 검증 조합: 1.2 s yaw-rate MAE/p95가 회귀 후보보다 우수함.
-    speed_reference_accel_time_constant: 0.106283219  # bag/session-disjoint vx rollout regression
-    speed_reference_brake_time_constant: 0.117442196  # bag/session-disjoint vx rollout regression
+    speed_reference_accel_time_constant: 0.0358766486  # bag/session-disjoint vx rollout regression
+    speed_reference_brake_time_constant: 0.112208409  # bag/session-disjoint vx rollout regression
     actuator_max_speed_reference_rate: 5.89577526
     I_z: 0.04712
     Cm0: 0.04                # 고속 감쇠용 모터 역기전력 계수
@@ -166,15 +165,15 @@
     E_r: 0.0597
 
     # 0807 dynamic regression; used only by dynamic_mlp_residual.
-    dynamic_mlp_B_f: 4.16766713
-    dynamic_mlp_C_f: 0.0965687874
-    dynamic_mlp_D_f: 3.49991551
-    dynamic_mlp_E_f: -10.0
-    dynamic_mlp_B_r: 6.18341084
-    dynamic_mlp_C_r: 0.184955889
-    dynamic_mlp_D_r: 1.76127063
-    dynamic_mlp_E_r: -3.23353467
-    dynamic_mlp_I_z: 0.06362626658698842
+    dynamic_mlp_B_f: 5.450463587491685
+    dynamic_mlp_C_f: 0.4099617740329914
+    dynamic_mlp_D_f: 1.0703038784166876
+    dynamic_mlp_E_f: -9.998463776287327
+    dynamic_mlp_B_r: 6.295877387002132
+    dynamic_mlp_C_r: 0.5295450977214247
+    dynamic_mlp_D_r: 1.2310982590564592
+    dynamic_mlp_E_r: 0.1797613053409212
+    dynamic_mlp_I_z: 0.10507396329623564
 
     # --- Runtime environment and topics ---
     # Required CSV columns: x_m, y_m, w_tr_left_m, w_tr_right_m.

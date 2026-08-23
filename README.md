@@ -74,18 +74,6 @@ F_y = D · sin(C · atan(B · α))
 | `/drive` (`drive_topic`) | `ackermann_msgs/AckermannDriveStamped` | 조향 + direct speed 명령 |
 | `/mppi_viz` | `visualization_msgs/MarkerArray` | 샘플 궤적 시각화 |
 | `/mppi_optimal_trajectory` | `smppi_cuda_controller/MppiTrajectory` | 최적 궤적 + 비용 분해 |
-| `/mppi_mlp_input` | `smppi_cuda_controller/MlpModelInput` | 선택된 첫 knot의 실제 22D residual MLP 입력 |
-
-학습용 bag에는 다음처럼 입력 토픽을 함께 기록한다.
-
-```bash
-ros2 bag record /mppi_mlp_input /newmcl_pose /odom /imu/data /drive /mppi_optimal_trajectory
-```
-
-`features[0:22]` 순서는 `MlpModelInput.msg`에 고정되어 있으며,
-`features[4]`는 MPPI rollout command, `published_speed`는 safety/rate limit 이후
-차량에 실제 발행된 command다.
-
 **제어 주기:** 20 ms (50 Hz, `control_rate_hz`로 설정)
 
 ---
@@ -386,7 +374,8 @@ cp model_tuning/results/dynamic_obstacle_frenet_speed_mdn_new_map/metadata.json 
 
 ```yaml
 include_speed_feature: true
-model_path: config/predictor/dynamic_obstacle_frenet_speed_mdn_new_map/frenet_mdn.onnx
+use_speed_model_path: config/predictor/dynamic_obstacle_frenet_speed_mdn_new_map/frenet_mdn.onnx
+no_speed_model_path: config/predictor/dynamic_obstacle_frenet_mdn_new_map_no_speed/frenet_mdn.onnx
 track_csv: data/new_map/new_map_mppi_track_optimal.csv
 ```
 
@@ -599,7 +588,8 @@ dynamic_obstacle_predictor:
     perception_topic: /f1/perception/object/obstacles/arr
     output_topic: /mppi/dynamic_obstacle_trajectory
     include_speed_feature: true
-    model_path: config/predictor/dynamic_obstacle_frenet_speed_mdn/frenet_mdn.onnx
+    use_speed_model_path: config/predictor/dynamic_obstacle_frenet_speed_mdn/frenet_mdn.onnx
+    no_speed_model_path: config/predictor/dynamic_obstacle_frenet_mdn_pose_noise/frenet_mdn.onnx
     track_csv: data/map2/map2_mppi_track_optimal.csv
     opponent_radius: 0.12
     static_car_radius: 0.24
@@ -613,8 +603,9 @@ dynamic_obstacle_predictor:
     dynamic_speed_threshold: 1.0
 ```
 
-`track_csv`는 학습에 사용한 track과 같아야 한다. `model_path`는 package share
-기준 상대경로다. 현재 노드는 `[1,72]` fixed-shape ONNX를 요구한다. ONNX 또는
+`track_csv`는 학습에 사용한 track과 같아야 한다. 두 model path는 package share
+기준 상대경로다. `include_speed_feature=true`이면 72-D
+`use_speed_model_path`, false이면 66-D `no_speed_model_path`가 자동 선택된다. ONNX 또는
 YAML asset을 바꾸면 install space 반영을 위해 패키지를 다시 빌드한 뒤 노드를
 재시작한다.
 

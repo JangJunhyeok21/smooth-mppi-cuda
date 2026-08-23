@@ -8,6 +8,7 @@ causal hold; no future sample is used.
 import argparse
 import datetime as dtlib
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -43,7 +44,7 @@ BAG_PATH = sorted({metadata.parent for root in NEW_DATA_ROOTS
 OUTPUT_PATH = PROJECT_ROOT / "model_tuning/data/ifac0810_0819_autonomous_physics_clean"
 # F5/direct execution is an interactive inspection workflow.  Set this to
 # False only for unattended batch extraction.
-USE_PLOT = True
+USE_PLOT = os.environ.get("STEP1_USE_PLOT", "1") != "0"
 # Set True for F5 to skip rosbag extraction and re-open the saved NPZ files.
 REVIEW_SAVED_COLLISIONS = True
 # Bag-to-pose verification shows that the sensor/body convention changed by
@@ -247,7 +248,10 @@ def build_callback_prediction_samples(pose,velocity,drive,imu,signs,cfg,accepted
         steer_cmd=command[:,1];speed_cmd=command[:,3]
         applied_steer=np.empty(len(anchors));speed_reference=np.empty(len(anchors))
         max_steer=float(cfg.get("max_steer",.4788))
-        applied_steer[0]=np.clip(steer_cmd[0],-max_steer,max_steer)
+        steer_scale=float(cfg.get("kinematic_steer_scale",1.0))
+        steer_bias=float(cfg.get("kinematic_steer_bias",0.0))
+        applied_steer[0]=np.clip(steer_scale*steer_cmd[0]+steer_bias,
+                                 -max_steer,max_steer)
         speed_reference[0]=anchors[0,1]
         steer_tau=max(float(cfg.get("steer_servo_time_constant",.08)),1e-3)
         max_steer_rate=float(cfg.get("actuator_max_steer_rate",np.inf))
@@ -256,9 +260,11 @@ def build_callback_prediction_samples(pose,velocity,drive,imu,signs,cfg,accepted
         max_speed_rate=float(cfg.get("actuator_max_speed_reference_rate",np.inf))
         for k in range(1,len(anchors)):
             callback_dt=max(0.,anchor_t[k]-anchor_t[k-1])
-            steer_target=np.clip(steer_cmd[k-1],-max_steer,max_steer)
-            steer_rate=np.clip((steer_target-applied_steer[k-1])/steer_tau,
-                               -max_steer_rate,max_steer_rate)
+            steer_target=np.clip(steer_scale*steer_cmd[k-1]+steer_bias,
+                                 -max_steer,max_steer)
+            steer_rate=np.clip(
+                (steer_target-applied_steer[k-1])/steer_tau,
+                -max_steer_rate,max_steer_rate)
             applied_steer[k]=np.clip(
                 applied_steer[k-1]+steer_rate*callback_dt,
                 -max_steer,max_steer)

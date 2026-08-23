@@ -27,6 +27,8 @@ OUTPUT_DIR = ROOT / "model_tuning/results/longitudinal_actuator_regression"
 CONFIG_PATH = ROOT / "config/params.yaml"
 SOURCE_DT_S = 0.02
 ROLLOUT_STEPS = 50                 # 1.0 s at 50 Hz
+MODEL_DT_S = 0.04
+HORIZON_STEPS = 25
 START_STRIDE = 5                   # overlapping causal rollouts
 MAX_ROLLOUTS_PER_SESSION = 800
 RANDOM_SEED = 31
@@ -604,7 +606,11 @@ def main():
         "parameter_order": ["speed_servo_kp", "speed_reference_accel_time_constant", "speed_reference_brake_time_constant"],
         "previous": old.tolist(), "fitted": fitted.tolist(),
         "fixed_v_ref_slew_rate_max": float(cfg["actuator_max_speed_reference_rate"]),
-        "objective": "1.0 s recursive KF-vx rollout with candidate-dependent 0.8 s v_ref warm-up, straight-window train Huber",
+        "objective": (f"{ROLLOUT_STEPS * SOURCE_DT_S:g} s recursive KF-vx rollout "
+            "with candidate-dependent 0.8 s v_ref warm-up, straight-window train Huber"),
+        "model_dt_s": MODEL_DT_S,
+        "horizon_steps": HORIZON_STEPS,
+        "source_dt_s": SOURCE_DT_S,
         "target_source": "causal classic-model KF vx (sensor-fused estimate, not physical GT)",
         "evaluation_contract": evaluation_contract,
         "use_validation_test_split": USE_VALIDATION_TEST_SPLIT,

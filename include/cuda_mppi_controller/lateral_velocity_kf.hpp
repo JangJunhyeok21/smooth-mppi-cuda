@@ -294,7 +294,8 @@ private:
 
     void updateActuators(float steer_command, float speed_command) {
         const float target_steer = std::clamp(
-            steer_command, -params_.max_steer, params_.max_steer);
+            params_.steer_scale*steer_command+params_.steer_bias,
+            -params_.max_steer, params_.max_steer);
         const float steer_rate = std::clamp(
             (target_steer - applied_steer_)
                 / std::max(params_.steer_tau, 1e-3f),

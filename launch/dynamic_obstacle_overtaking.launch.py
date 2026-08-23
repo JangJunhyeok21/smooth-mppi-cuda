@@ -14,6 +14,9 @@ def generate_launch_description():
     opponent_params = LaunchConfiguration("opponent_param_file")
     predictor_params = LaunchConfiguration("predictor_param_file")
     predictor_input_mode = LaunchConfiguration("predictor_input_mode")
+    input_pose_noise_std_m = LaunchConfiguration("input_pose_noise_std_m")
+    input_pose_noise_max_m = LaunchConfiguration("input_pose_noise_max_m")
+    input_pose_noise_seed = LaunchConfiguration("input_pose_noise_seed")
     track_csv = LaunchConfiguration("track_csv")
     return LaunchDescription([
         DeclareLaunchArgument("param_file", default_value=os.path.join(share, "config", "params.yaml")),
@@ -24,6 +27,9 @@ def generate_launch_description():
         DeclareLaunchArgument(
             "predictor_input_mode", default_value="simulation",
             description="Predictor input source: simulation, perception, or both"),
+        DeclareLaunchArgument("input_pose_noise_std_m", default_value="0.0"),
+        DeclareLaunchArgument("input_pose_noise_max_m", default_value="0.10"),
+        DeclareLaunchArgument("input_pose_noise_seed", default_value="20260824"),
         DeclareLaunchArgument(
             "track_csv",
             default_value="data/map2/map2_mppi_track_optimal.csv",
@@ -34,6 +40,12 @@ def generate_launch_description():
              name="dynamic_obstacle_predictor", output="screen",
              parameters=[predictor_params, {
                  "input_mode": predictor_input_mode,
+                 "input_pose_noise_std_m": ParameterValue(
+                     input_pose_noise_std_m, value_type=float),
+                 "input_pose_noise_max_m": ParameterValue(
+                     input_pose_noise_max_m, value_type=float),
+                 "input_pose_noise_seed": ParameterValue(
+                     input_pose_noise_seed, value_type=int),
                  "track_csv": ParameterValue(track_csv, value_type=str),
              }]),
         # Opponent is controlled by its own MPPI node, exactly like the

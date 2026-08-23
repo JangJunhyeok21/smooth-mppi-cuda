@@ -24,7 +24,10 @@ ACCEL_TIME_CONSTANT_MAX = 0.8
 BRAKE_TIME_CONSTANT_MIN = 0.002
 BRAKE_TIME_CONSTANT_MAX = 0.8
 
-ROLLOUT_DURATION_S = 1.0 # 몇 초 open loop test 할것인지
+# Match the MPPI/Step-3/Step-6 horizon while retaining the 20 ms source grid.
+# 60 model knots * 40 ms = 2.4 s = 120 source samples * 20 ms.
+MODEL_DT_S = 0.04
+HORIZON_STEPS = 60
 WARMUP_DURATION_S = 0.8
 START_STRIDE_SAMPLES = 5
 MAX_ROLLOUTS_PER_SESSION = 800
@@ -55,8 +58,11 @@ def main():
     regression.BOUNDS = (regression.SPEED_SERVO_KP_BOUNDS,
                          regression.ACCEL_TIME_CONSTANT_BOUNDS,
                          regression.BRAKE_TIME_CONSTANT_BOUNDS)
+    rollout_duration_s = HORIZON_STEPS * MODEL_DT_S
     regression.ROLLOUT_STEPS = max(
-        1, int(round(ROLLOUT_DURATION_S / regression.SOURCE_DT_S)))
+        1, int(round(rollout_duration_s / regression.SOURCE_DT_S)))
+    regression.MODEL_DT_S = MODEL_DT_S
+    regression.HORIZON_STEPS = HORIZON_STEPS
     regression.WARMUP_S = WARMUP_DURATION_S
     regression.START_STRIDE = START_STRIDE_SAMPLES
     regression.MAX_ROLLOUTS_PER_SESSION = MAX_ROLLOUTS_PER_SESSION

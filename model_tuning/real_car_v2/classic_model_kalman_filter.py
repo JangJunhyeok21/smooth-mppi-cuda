@@ -65,8 +65,10 @@ def _actuator_sequences(odom_vx,steer_cmd,speed_cmd,dt,cfg):
     reference[0]=odom_vx[0]
     for k in range(1,n):
         target=np.clip(steer_cmd[k-1],-max_steer,max_steer)
-        rate=np.clip((target-applied[k-1])/max(float(cfg["steer_servo_time_constant"]),1e-3),
-            -float(cfg["actuator_max_steer_rate"]),float(cfg["actuator_max_steer_rate"]))
+        rate=np.clip((target-applied[k-1])/max(
+            float(cfg["steer_servo_time_constant"]),1e-3),
+            -float(cfg["actuator_max_steer_rate"]),
+            float(cfg["actuator_max_steer_rate"]))
         applied[k]=np.clip(applied[k-1]+rate*dt,-max_steer,max_steer)
         tau=float(cfg["speed_reference_accel_time_constant"]
                   if speed_cmd[k-1]>=reference[k-1]

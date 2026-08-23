@@ -27,13 +27,18 @@ OUTPUT_PATH = ROOT / "model_tuning/results/step_6_residual/recursive"
 EPOCHS = 100
 SEED = 31
 DT = 0.04
-STATE_WEIGHTS = (2.0, 5.0, 6.0)
-POSITION_WEIGHT = 5.0
-YAW_WEIGHT = 3.0
-TAIL_POSITION_WEIGHT = 10.0
-TAIL_YAW_WEIGHT = 6.0
-RESIDUAL_WEIGHT = 1e-4
-TAIL_FRACTION = .10
+STATE_WEIGHTS = tuple(float(value) for value in
+    os.environ.get("RECURSIVE_STATE_WEIGHTS", "2,5,6").split(","))
+if len(STATE_WEIGHTS) != 3:
+    raise ValueError("RECURSIVE_STATE_WEIGHTS must contain vx,vy,yaw_rate")
+POSITION_WEIGHT = float(os.environ.get("RECURSIVE_POSITION_WEIGHT", "5"))
+YAW_WEIGHT = float(os.environ.get("RECURSIVE_YAW_WEIGHT", "3"))
+TAIL_POSITION_WEIGHT = float(os.environ.get("RECURSIVE_TAIL_POSITION_WEIGHT", "10"))
+TAIL_YAW_WEIGHT = float(os.environ.get("RECURSIVE_TAIL_YAW_WEIGHT", "6"))
+RESIDUAL_WEIGHT = float(os.environ.get("RECURSIVE_RESIDUAL_WEIGHT", "1e-4"))
+TAIL_FRACTION = float(os.environ.get("RECURSIVE_TAIL_FRACTION", ".10"))
+CHECKPOINT_P95_WEIGHT = float(os.environ.get(
+    "RECURSIVE_CHECKPOINT_P95_WEIGHT", "2"))
 LEARNING_RATE = float(os.environ.get("RECURSIVE_LEARNING_RATE", "2e-5"))
 BATCHES_PER_EPOCH = max(1, int(os.environ.get("RECURSIVE_BATCHES_PER_EPOCH", "32")))
 
@@ -67,6 +72,8 @@ def main():
     args = parser.parse_args()
     if args.horizon_steps < 1:
         parser.error("--horizon-steps must be positive")
+    if not 0.0 < TAIL_FRACTION <= 1.0:
+        parser.error("RECURSIVE_TAIL_FRACTION must lie in (0, 1]")
     torch.manual_seed(args.seed)
     rng = np.random.default_rng(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -132,10 +139,13 @@ def main():
                 history = torch.cat((history[:, 1:], command[:, None]), 1)
             previous_steer = history[:, -2, 0]
             current_state = state
-            steer_target = torch.clamp(command[:, 0],
+            steer_target = torch.clamp(
+                                       parameters.steer_scale * command[:, 0]
+                                       + parameters.steer_bias,
                                        -parameters.max_steer,
                                        parameters.max_steer)
-            steer_rate = torch.clamp((steer_target - applied) / parameters.steer_tau,
+            steer_rate = torch.clamp((steer_target - applied) /
+                                     max(parameters.steer_tau, 1e-3),
                                      -parameters.max_steer_rate,
                                      parameters.max_steer_rate)
             applied = torch.clamp(applied + steer_rate * DT,
@@ -231,7 +241,8 @@ def main():
             for batch in np.array_split(validation, max(1, len(validation) // 64)):
                 _, score = loss(batch, True); validation_scores.extend(score.cpu().numpy())
         validation_scores = np.asarray(validation_scores)
-        score = float(validation_scores.mean() + 2 * np.quantile(validation_scores, .95))
+        score = float(validation_scores.mean()
+                      + CHECKPOINT_P95_WEIGHT * np.quantile(validation_scores, .95))
         if not np.isfinite(score):
             raise RuntimeError(
                 f"non-finite recursive validation score at epoch {epoch + 1}")
@@ -261,7 +272,15 @@ def main():
         "pose_target": "future MCL pose", "best_epoch": best[2],
         "best_validation_score": best[0], "train_windows": len(train),
         "validation_windows": len(validation),
-        "validation_source": validation_source}
+        "validation_source": validation_source,
+        "loss_configuration": {
+            "state_weights": STATE_WEIGHTS,
+            "position_weight": POSITION_WEIGHT,
+            "yaw_weight": YAW_WEIGHT,
+            "tail_position_weight": TAIL_POSITION_WEIGHT,
+            "tail_yaw_weight": TAIL_YAW_WEIGHT,
+            "tail_fraction": TAIL_FRACTION,
+            "checkpoint_p95_weight": CHECKPOINT_P95_WEIGHT}}
     (output / "metrics.json").write_text(json.dumps(metrics, indent=2) + "\n")
 
 

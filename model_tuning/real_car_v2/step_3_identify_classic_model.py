@@ -21,8 +21,10 @@ ACTUATOR_WARMUP_SAMPLES = 40     # 40 * 20 ms = 0.8 s
 RANDOM_SEED = 31
 USE_PLOT = os.environ.get("STEP3_USE_PLOT","1")!="0"
 INTERACTIVE_BAG_INSPECTOR = os.environ.get("STEP3_INTERACTIVE_PLOT","1")!="0"  # p + time click opens detailed open-loop plots
-TRAJECTORY_TIME_LABEL_INTERVAL_S = 1.0
-EVALUATE_ONLY = False  # True: load saved params and only regenerate diagnostics
+TRAJECTORY_TIME_LABEL_INTERVAL_S = 1.0 # Traj 라벨 몇초간격으로 표시할지. 0이면 라벨 없음.
+EVALUATE_ONLY = False # os.environ.get("STEP3_EVALUATE_ONLY", "0") != "0"
+# STEP3_EVALUATE_ONLY=1: load saved params and only regenerate diagnostics.
+# The default performs regression, matching this script's identify step name.
 EVALUATION_PARAMS_PATH = OUTPUT_DIR / "params.json"
 # Apply a gate-passing candidate to config/params.yaml for the next numbered
 # stage. A rejected/boundary candidate remains isolated in params.json.

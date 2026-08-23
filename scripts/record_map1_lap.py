@@ -15,7 +15,7 @@ from ackermann_msgs.msg import AckermannDriveStamped
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from std_msgs.msg import Bool
-from smppi_cuda_controller.msg import MlpModelInput, MppiTrajectory
+from smppi_cuda_controller.msg import MppiTrajectory
 
 # User-editable test settings. No command-line arguments are required.
 TARGET_LAPS = 10.0
@@ -44,12 +44,11 @@ class Recorder(Node):
         self.track_length = float(segment_length.sum())
         self.last_progress = None
         self.accumulated_progress = 0.0
-        self.odom=[]; self.drive=[]; self.pred=[]; self.mlp_input=[]; self.obstacle=[]; self.status="timeout"
+        self.odom=[]; self.drive=[]; self.pred=[]; self.obstacle=[]; self.status="timeout"
         self.create_subscription(Odometry,"/ego_racecar/odom",self.odom_cb,50)
         self.create_subscription(Odometry,"/opp_racecar/odom",self.obstacle_cb,20)
         self.create_subscription(AckermannDriveStamped,"/drive",self.drive_cb,50)
         self.create_subscription(MppiTrajectory,"/mppi_optimal_trajectory",self.pred_cb,20)
-        self.create_subscription(MlpModelInput,"/mppi_mlp_input",self.mlp_input_cb,50)
         self.create_subscription(Bool,"/collision0",self.collision_cb,10)
         self.create_timer(.1,self.check)
 
@@ -93,9 +92,6 @@ class Recorder(Node):
         self.pred.append((self.rel(),m.tracking_cost,m.friction_ellipse_cost,
                           m.front_slip_cost,m.rear_slip_cost,m.steer_cost,
                           m.rate_cost,m.boundary_cost,m.obs_cost,m.progress_cost))
-    def mlp_input_cb(self,m):
-        self.mlp_input.append((self.rel(),*m.features,m.published_steer,
-                               m.published_speed,float(m.imu_valid)))
     def collision_cb(self,m):
         if m.data and self.t0 is not None: self.finish("collision")
     def check(self):
@@ -112,7 +108,6 @@ class Recorder(Node):
         od=np.asarray(self.odom); dr=np.asarray(self.drive)
         obstacle=np.asarray(self.obstacle)
         np.savez_compressed(self.out/"map1_lap_data.npz",odom=od,drive=dr,obstacle=obstacle,
-            mlp_input=np.asarray(self.mlp_input,dtype=np.float32),
             mppi_cost=np.asarray(self.pred,dtype=np.float32),
             status=self.status)
         minimum_obstacle_distance=float("nan")

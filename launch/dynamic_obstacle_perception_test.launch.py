@@ -77,6 +77,9 @@ def generate_launch_description():
         DeclareLaunchArgument(
             "track_csv",
             default_value="data/map2/map2_mppi_track_optimal.csv"),
+        DeclareLaunchArgument("input_pose_noise_std_m", default_value="0.0"),
+        DeclareLaunchArgument("input_pose_noise_max_m", default_value="0.10"),
+        DeclareLaunchArgument("input_pose_noise_seed", default_value="20260824"),
         DeclareLaunchArgument("static_x", default_value="1.2929498265693544"),
         DeclareLaunchArgument("static_y", default_value="-2.148326999195452"),
         DeclareLaunchArgument("static_yaw", default_value="2.140535854443902"),
@@ -91,6 +94,9 @@ def generate_launch_description():
                 "opponent_param_file": LaunchConfiguration("opponent_param_file"),
                 "predictor_param_file": LaunchConfiguration("predictor_param_file"),
                 "predictor_input_mode": "perception",
+                "input_pose_noise_std_m": LaunchConfiguration("input_pose_noise_std_m"),
+                "input_pose_noise_max_m": LaunchConfiguration("input_pose_noise_max_m"),
+                "input_pose_noise_seed": LaunchConfiguration("input_pose_noise_seed"),
                 "track_csv": LaunchConfiguration("track_csv"),
             }.items()),
         Node(

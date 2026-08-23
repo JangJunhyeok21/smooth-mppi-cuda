@@ -59,8 +59,8 @@ class ClassicModelParameters:
             v_ref_slew_rate_max=get("v_ref_slew_rate_max", "actuator_max_speed_reference_rate", default=cls.v_ref_slew_rate_max),
             ax_min=get("ax_min", "min_accel", default=cls.ax_min),
             ax_max=get("ax_max", "max_accel", default=cls.ax_max),
-            steer_scale=1.0,
-            steer_bias=0.0,
+            steer_scale=get("kinematic_steer_scale", "steer_scale", default=cls.steer_scale),
+            steer_bias=get("kinematic_steer_bias", "steer_bias", default=cls.steer_bias),
             steer_tau=get("steer_servo_time_constant", "steer_tau", default=cls.steer_tau),
             max_steer=get("max_steer", default=cls.max_steer),
             max_steer_rate=get("actuator_max_steer_rate", "max_steer_rate", default=cls.max_steer_rate),
@@ -144,9 +144,11 @@ def artifact_metadata(iteration_id, parameters, kf_version, config_paths=()):
 
 
 def actuator_step(steer, steer_cmd, speed_cmd, vx, c=Contract()):
-    target = np.clip(steer_cmd, -c.max_steer, c.max_steer)
-    rate = np.clip((target-steer)/max(c.steer_tau, 1e-3), -c.max_steer_rate, c.max_steer_rate)
-    steer2 = np.clip(steer+rate*c.dt, -c.max_steer, c.max_steer)
+    target = np.clip(c.steer_scale*steer_cmd+c.steer_bias,
+                     -c.max_steer, c.max_steer)
+    steer_rate = np.clip((target-steer)/max(c.steer_tau, 1e-3),
+                         -c.max_steer_rate, c.max_steer_rate)
+    steer2 = np.clip(steer+steer_rate*c.dt, -c.max_steer, c.max_steer)
     ax = np.clip(c.speed_kp*(speed_cmd-vx)-c.drag*vx, c.min_accel, c.max_accel)
     return steer2, ax
 

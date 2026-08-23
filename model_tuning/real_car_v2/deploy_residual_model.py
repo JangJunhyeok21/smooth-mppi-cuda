@@ -19,6 +19,7 @@ ALTERNATING_SUMMARY = ROOT / "model_tuning/results/alternating/summary.json"
 REGRESSION_PATH = ROOT / "model_tuning/results/dynamic_40ms_regression/params.json"
 YAML_PATH = ROOT / "config/params.yaml"
 RUNTIME_BINARY_PATH = ROOT / "config/dynamic_40ms_residual_servo_lag.bin"
+RUNTIME_BINARY_CONFIG_PATH = "config/dynamic_40ms_residual_servo_lag.bin"
 SIMULATOR_YAML_PATHS = (
     ROOT / "f1tenth_gym_ros/src/f1tenth_gym_ros/config/sim.yaml",
     Path("/home/a/f1tenth_gym_ros/src/f1tenth_gym_ros/config/sim.yaml"),
@@ -79,7 +80,7 @@ def main():
     text = YAML_PATH.read_text()
     updates = {
         "dynamic_mlp_servo_lag_weights_path":
-            str(RUNTIME_BINARY_PATH),
+            RUNTIME_BINARY_CONFIG_PATH,
         "dynamic_mlp_B_f": regression["B_f"],
         "dynamic_mlp_C_f": regression["C_f"],
         "dynamic_mlp_D_f": regression["D_f"],
@@ -102,7 +103,7 @@ def main():
 
     simulator_updates = {
         "dynamics_model": "dynamic_mlp_residual_servo_lag",
-        "dynamic_mlp_weights_path": str(RUNTIME_BINARY_PATH),
+        "dynamic_mlp_weights_path": RUNTIME_BINARY_CONFIG_PATH,
         "dynamic_mlp_model_dt": 0.04,
         "dynamic_mlp_B_f": regression["B_f"],
         "dynamic_mlp_C_f": regression["C_f"],

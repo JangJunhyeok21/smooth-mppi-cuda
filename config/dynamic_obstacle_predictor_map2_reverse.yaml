@@ -12,7 +12,9 @@ dynamic_obstacle_predictor:
     marker_horizon_stride: 4
 
     include_speed_feature: true
-    model_path: config/predictor/dynamic_obstacle_frenet_speed_mdn_map2_reverse/frenet_mdn.onnx
+    use_speed_model_path: config/predictor/dynamic_obstacle_frenet_speed_mdn_map2_reverse/frenet_mdn.onnx
+    # Train a map2_reverse 66-D model before selecting false.
+    no_speed_model_path: ""
     track_csv: data/map2_reverse/map2_reverse_mppi_track_optimal.csv
 
     dynamic_speed_threshold: 1.0

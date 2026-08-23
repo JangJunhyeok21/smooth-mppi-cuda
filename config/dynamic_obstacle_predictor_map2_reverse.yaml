@@ -1,0 +1,23 @@
+dynamic_obstacle_predictor:
+  ros__parameters:
+    input_mode: simulation
+    simulation_odom_topic: /opp_racecar/odom
+    perception_topic: /f1/perception/object/obstacles/arr
+
+    output_topic: /mppi/dynamic_obstacle_trajectory
+    marker_topic: /mppi/dynamic_obstacle_prediction_markers
+    publish_rate_hz: 50.0
+    publish_markers: true
+    marker_publish_rate_hz: 5.0
+    marker_horizon_stride: 4
+
+    include_speed_feature: true
+    model_path: config/predictor/dynamic_obstacle_frenet_speed_mdn_map2_reverse/frenet_mdn.onnx
+    track_csv: data/map2_reverse/map2_reverse_mppi_track_optimal.csv
+
+    dynamic_speed_threshold: 1.0
+    static_car_radius: 0.24
+    opponent_radius: 0.12
+    maximum_radius: 0.75
+    longitudinal_ellipse_gain: 3.1
+    lateral_ellipse_gain: 1.1

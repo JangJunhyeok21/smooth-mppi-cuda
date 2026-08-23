@@ -26,9 +26,12 @@ def generate_launch_description():
     accel_noise = LaunchConfiguration('noise_accel_std')
     metadata = LaunchConfiguration('episode_metadata_json')
     params = LaunchConfiguration('param_file')
+    track_csv = LaunchConfiguration('track_csv')
     declarations = [
         DeclareLaunchArgument('param_file', default_value=os.path.join(
             share, 'config', 'params.yaml')),
+        DeclareLaunchArgument(
+            'track_csv', default_value='data/map2/map2_mppi_track_optimal.csv'),
         DeclareLaunchArgument('output'),
         DeclareLaunchArgument('duration_s', default_value='25.0'),
         DeclareLaunchArgument('max_speed', default_value='2.0'),
@@ -57,6 +60,7 @@ def generate_launch_description():
             'publish_visualization': False,
             'publish_optimal_trajectory': False,
             'boundary_publish_period_s': 0.0,
+            'csv_file_path': ParameterValue(track_csv, value_type=str),
         }])
     collector = Node(
         package='smppi_cuda_controller', executable='collect_mppi_mdn_episode.py',

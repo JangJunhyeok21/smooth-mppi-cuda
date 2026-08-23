@@ -73,6 +73,9 @@ def generate_launch_description():
             "predictor_param_file",
             default_value=os.path.join(
                 share, "config", "dynamic_obstacle_predictor.yaml")),
+        DeclareLaunchArgument(
+            "track_csv",
+            default_value="data/map2/map2_mppi_track_optimal.csv"),
         # Use the exact same simulator + ego/opponent MPPI composition as the
         # normal overtaking launch.  Only replace predictor input with the
         # synthetic F1stateArr perception bridge below.
@@ -84,6 +87,7 @@ def generate_launch_description():
                 "opponent_param_file": LaunchConfiguration("opponent_param_file"),
                 "predictor_param_file": LaunchConfiguration("predictor_param_file"),
                 "predictor_input_mode": "perception",
+                "track_csv": LaunchConfiguration("track_csv"),
             }.items()),
         Node(
             package="smppi_cuda_controller",

@@ -1,0 +1,15 @@
+{
+  "contract": "MDN_SLCMPC_Frenet_recursive_speed",
+  "include_speed_feature": true,
+  "input_dim": 72,
+  "dt": 0.04,
+  "horizon": 60,
+  "history": 6,
+  "test_bag": "episode_000.npz",
+  "metrics": {
+    "ds_rmse": 0.01642158068716526,
+    "d_rmse": 0.0038184309378266335,
+    "yaw_rmse": 0.012884967029094696,
+    "speed_rmse": 0.013438478112220764
+  }
+}

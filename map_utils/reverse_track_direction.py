@@ -3,6 +3,7 @@
 
 import argparse
 import csv
+import math
 import shutil
 from pathlib import Path
 
@@ -40,6 +41,15 @@ def reverse_dict_csv(source: Path, target: Path) -> None:
             if left in row and right in row:
                 row[left], row[right] = row[right], row[left]
 
+        # Reversing traversal changes the tangent by pi and changes signed
+        # curvature.  Keeping the forward values creates a geometrically
+        # reversed CSV whose vehicle heading/dynamics still point clockwise.
+        if "psi_rad" in row and row["psi_rad"]:
+            yaw = float(row["psi_rad"]) + math.pi
+            row["psi_rad"] = f"{math.atan2(math.sin(yaw), math.cos(yaw)):.12g}"
+        if "kappa_radpm" in row and row["kappa_radpm"]:
+            row["kappa_radpm"] = f"{-float(row['kappa_radpm']):.12g}"
+
     if "s" in fields and rows:
         if "x_m" in fields and "y_m" in fields:
             points = np.asarray([[float(row["x_m"]), float(row["y_m"])] for row in rows])
@@ -56,7 +66,7 @@ def reverse_dict_csv(source: Path, target: Path) -> None:
             row["s"] = f"{distance:.8f}"
 
     with target.open("w", newline="") as stream:
-        writer = csv.DictWriter(stream, fieldnames=fields)
+        writer = csv.DictWriter(stream, fieldnames=fields, lineterminator="\n")
         writer.writeheader()
         writer.writerows(rows)
 

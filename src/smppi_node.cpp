@@ -753,9 +753,6 @@ private:
         this->declare_parameter("q_boundary_terminal_slack", 15000.0);
         mppi_params_.q_boundary_terminal_slack =
             this->get_parameter("q_boundary_terminal_slack").as_double();
-        this->declare_parameter("weighted_trajectory_safety_enabled", true);
-        mppi_params_.weighted_trajectory_safety_enabled =
-            this->get_parameter("weighted_trajectory_safety_enabled").as_bool();
         this->declare_parameter("objective_mode","mpcc");
         objective_mode_name_=this->get_parameter("objective_mode").as_string();
         if(objective_mode_name_=="mpcc")mppi_params_.objective_mode=mppi::MPCC_OBJECTIVE;

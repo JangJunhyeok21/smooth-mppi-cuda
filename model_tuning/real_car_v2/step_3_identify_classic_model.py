@@ -12,11 +12,11 @@ import classic_model_regression as regression
 # User-configurable Step 3 settings
 # ---------------------------------------------------------------------------
 ROOT = Path(__file__).resolve().parents[2]
-DATA_PATH = ROOT / "model_tuning/data/0821"
+DATA_PATH = ROOT / "model_tuning/data/ifac2026"
 OUTPUT_DIR = Path(os.environ.get("DYNAMIC_REGRESSION_OUT",
     ROOT / "model_tuning/results/dynamic_40ms_regression"))
-ROLLOUT_HORIZON_STEPS = 60       # 60 * 40 ms = 2.4 s
-MAX_WINDOWS_PER_BAG = 80
+ROLLOUT_HORIZON_STEPS = 40       # 60 * 40 ms = 2.4 s
+MAX_WINDOWS_PER_BAG = 2000
 ACTUATOR_WARMUP_SAMPLES = 40     # 40 * 20 ms = 0.8 s
 RANDOM_SEED = 31
 USE_PLOT = os.environ.get("STEP3_USE_PLOT","1")!="0"
@@ -26,6 +26,11 @@ EVALUATE_ONLY = False # os.environ.get("STEP3_EVALUATE_ONLY", "0") != "0"
 # STEP3_EVALUATE_ONLY=1: load saved params and only regenerate diagnostics.
 # The default performs regression, matching this script's identify step name.
 EVALUATION_PARAMS_PATH = OUTPUT_DIR / "params.json"
+# True: do not regress or write YAML. Load every Step-1 NPZ in DATA_PATH and
+# evaluate the parameters currently stored in config/params.yaml interactively.
+# Use Left/Right to change bag, or type a bag number and Enter to jump;
+# press p and click a time-series panel to start an open-loop prediction.
+YAML_EVALUATION_MODE = True #os.environ.get("STEP3_YAML_EVALUATION_MODE", "0") != "0"
 # Apply a gate-passing candidate to config/params.yaml for the next numbered
 # stage. A rejected/boundary candidate remains isolated in params.json.
 APPLY_ACCEPTED_PARAMS_TO_YAML = os.environ.get("STEP3_APPLY_TO_YAML","1")!="0"
@@ -92,6 +97,7 @@ def main():
     regression.INTERACTIVE_BAG_INSPECTOR = INTERACTIVE_BAG_INSPECTOR
     regression.TRAJECTORY_TIME_LABEL_INTERVAL_S = TRAJECTORY_TIME_LABEL_INTERVAL_S
     regression.EVALUATE_ONLY = EVALUATE_ONLY
+    regression.YAML_EVALUATION_MODE = YAML_EVALUATION_MODE
     regression.EVALUATION_PARAMS_PATH = Path(EVALUATION_PARAMS_PATH).expanduser().resolve()
     regression.APPLY_ACCEPTED_PARAMS_TO_YAML = APPLY_ACCEPTED_PARAMS_TO_YAML
     regression.USE_VALIDATION_TEST_SPLIT = USE_VALIDATION_TEST_SPLIT

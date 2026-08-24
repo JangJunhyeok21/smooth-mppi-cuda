@@ -1763,14 +1763,6 @@ namespace mppi
         
         CUDA_CHECK(cudaGetLastError());
         CUDA_CHECK(cudaMemcpy(h_costs_.data(), d_costs_, K_ * sizeof(float), cudaMemcpyDeviceToHost));
-        if (params_.weighted_trajectory_safety_enabled) {
-            CUDA_CHECK(cudaMemcpy(h_min_boundary_clearances_.data(),
-                                  d_min_boundary_clearances_,
-                                  K_ * sizeof(float), cudaMemcpyDeviceToHost));
-            CUDA_CHECK(cudaMemcpy(h_min_obstacle_clearances_.data(),
-                                  d_min_obstacle_clearances_,
-                                  K_ * sizeof(float), cudaMemcpyDeviceToHost));
-        }
         
         if (params_.visualize_candidates) {
             CUDA_CHECK(cudaMemcpy(h_states_.data(), d_states_, K_ * T_ * sizeof(State), cudaMemcpyDeviceToHost));
@@ -1925,97 +1917,6 @@ namespace mppi
         CUDA_CHECK(cudaGetLastError());
         CUDA_CHECK(cudaMemcpy(weighted_control_trajectory_.data(), d_weighted_states_,
                               T_ * sizeof(State), cudaMemcpyDeviceToHost));
-
-        // Safe samples from opposite modes can average into an unsafe path.
-        // Check the rollout of the controls that will actually be published.
-        if(params_.weighted_trajectory_safety_enabled) {
-            const bool weighted_obstacle_unsafe =
-                trajectory_min_obstacle_clearance(weighted_control_trajectory_)
-                    < 0.0f;
-            const bool weighted_boundary_unsafe =
-                trajectory_min_boundary_clearance(weighted_control_trajectory_)
-                    < 0.0f;
-            if (weighted_obstacle_unsafe || weighted_boundary_unsafe) {
-                // The rollout kernel already computed the minimum clearance
-                // for every candidate. Use those K summaries instead of
-                // copying and rescanning K*T states on the CPU (which was the
-                // source of the 100--300 ms safety spikes on the vehicle
-                // computer).
-                std::vector<int> candidates(K_);
-                for(int k=0;k<K_;++k)candidates[k]=k;
-                std::sort(candidates.begin(),candidates.end(),[this](int lhs,int rhs) {
-                    return h_costs_[lhs]<h_costs_[rhs];
-                });
-                int safe_candidate=-1;
-                for(int k:candidates) {
-                    if(h_min_obstacle_clearances_[k] >= 0.0f &&
-                       h_min_boundary_clearances_[k] >= 0.0f) {
-                        safe_candidate=k;
-                        break;
-                    }
-                }
-                if(safe_candidate>=0) {
-                best_k_=safe_candidate;
-                CUDA_CHECK(cudaMemcpy(
-                    weighted_controls.data(),
-                    d_controls_ + static_cast<size_t>(safe_candidate) * T_,
-                    T_ * sizeof(Control), cudaMemcpyDeviceToHost));
-                optimal_controls_=weighted_controls;
-                output=weighted_controls[0];
-                CUDA_CHECK(cudaMemcpy(d_weighted_controls_,weighted_controls.data(),
-                                      T_*sizeof(Control),cudaMemcpyHostToDevice));
-                weighted_control_rollout_kernel<<<1,1>>>(
-                    d_weighted_states_,d_weighted_controls_,current_state,params_,
-                    d_residual_hidden_,T_);
-                CUDA_CHECK(cudaGetLastError());
-                CUDA_CHECK(cudaMemcpy(weighted_control_trajectory_.data(),d_weighted_states_,
-                                      T_*sizeof(State),cudaMemcpyDeviceToHost));
-                } else {
-                // Replaying the previous steering when every candidate is
-                // unsafe can lock the vehicle into an off-track circle. Build
-                // a low-speed geometric recovery sequence toward a centerline
-                // look-ahead point so the next solve starts from a recoverable
-                // state instead.
-                size_t nearest_index=0;
-                float nearest_distance_sq=std::numeric_limits<float>::infinity();
-                for(size_t index=0;index<h_ref_xs_.size();++index) {
-                    const float dx=current_state.x-h_ref_xs_[index];
-                    const float dy=current_state.y-h_ref_ys_[index];
-                    const float distance_sq=dx*dx+dy*dy;
-                    if(distance_sq<nearest_distance_sq) {
-                        nearest_distance_sq=distance_sq;
-                        nearest_index=index;
-                    }
-                }
-                const size_t lookahead_index=h_ref_xs_.empty()?0:
-                    (nearest_index+8)%h_ref_xs_.size();
-                const float desired_heading=h_ref_xs_.empty()?current_state.yaw:
-                    std::atan2(h_ref_ys_[lookahead_index]-current_state.y,
-                               h_ref_xs_[lookahead_index]-current_state.x);
-                const float heading_error=std::atan2(
-                    std::sin(desired_heading-current_state.yaw),
-                    std::cos(desired_heading-current_state.yaw));
-                const float max_wheel_steer=params_.max_steer;
-                float desired_applied_steer=std::min(max_wheel_steer,
-                    std::max(-max_wheel_steer,0.8f*heading_error));
-                const float recovery_steer=std::min(params_.max_steer,
-                    std::max(-params_.max_steer, desired_applied_steer));
-                weighted_controls.assign(T_,{
-                    recovery_steer,
-                    fminf(params_.min_speed,fmaxf(0.0f,current_state.v))});
-                optimal_controls_=weighted_controls;
-                output=weighted_controls[0];
-                CUDA_CHECK(cudaMemcpy(d_weighted_controls_,weighted_controls.data(),
-                                      T_*sizeof(Control),cudaMemcpyHostToDevice));
-                weighted_control_rollout_kernel<<<1,1>>>(
-                    d_weighted_states_,d_weighted_controls_,current_state,params_,
-                    d_residual_hidden_,T_);
-                CUDA_CHECK(cudaGetLastError());
-                CUDA_CHECK(cudaMemcpy(weighted_control_trajectory_.data(),d_weighted_states_,
-                                      T_*sizeof(State),cudaMemcpyDeviceToHost));
-                }
-            }
-        }
 
         if(advance_warm_start) {
             for (int t = 0; t < T_ - 1; ++t) h_prev_controls_[t] = weighted_controls[t + 1];

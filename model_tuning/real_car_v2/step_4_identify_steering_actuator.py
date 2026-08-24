@@ -10,8 +10,11 @@ import steering_actuator_regression as regression
 # User-configurable Step 4 settings
 # ---------------------------------------------------------------------------
 ROOT = Path(__file__).resolve().parents[2]
-DATA_PATH = ROOT / "model_tuning/data/0821"
+DATA_PATH = ROOT / "model_tuning/data/ifac2026"
 OUTPUT_DIR = ROOT / "model_tuning/results/steering_actuator_regression"
+# Steering scale/bias/tau are identified by recursive open-loop response, not
+# by a one-step steering-angle target. Keep this aligned with the MPPI horizon.
+ROLLOUT_HORIZON_STEPS = 60       # 60 * 40 ms = 2.4 s
 FIX_STEER_TIME_CONSTANT = False
 STEER_SCALE_MIN = 0.5
 STEER_SCALE_MAX = 1.5
@@ -37,6 +40,8 @@ def main():
     """Apply the visible Step 4 settings and run the implementation."""
     regression.DATA = Path(DATA_PATH).expanduser().resolve()
     regression.OUT = Path(OUTPUT_DIR).expanduser().resolve()
+    regression.HORIZON = ROLLOUT_HORIZON_STEPS
+    regression.classic.HORIZON = ROLLOUT_HORIZON_STEPS
     regression.FIX_STEER_TIME_CONSTANT = FIX_STEER_TIME_CONSTANT
     regression.SCALE_BOUNDS = (STEER_SCALE_MIN, STEER_SCALE_MAX)
     regression.BIAS_BOUNDS = (STEER_BIAS_MIN_RAD, STEER_BIAS_MAX_RAD)

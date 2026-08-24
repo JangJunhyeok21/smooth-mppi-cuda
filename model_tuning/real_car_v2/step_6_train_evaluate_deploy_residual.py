@@ -26,7 +26,7 @@ EVALUATE_ONLY=False  # F5: one-step -> recursive -> evaluation 순서로 실행
 EVALUATION_MODEL_PATH=OUTPUT/"recursive"
 DEPLOY_AFTER_TRAINING=True
 ROLLOUT_DT_S=0.04
-HORIZON_STEPS=60  # Step 1 stores 2.4 s = HORIZON_STEPS * 40 ms
+HORIZON_STEPS=40  # Step 1 stores 2.4 s = HORIZON_STEPS * 40 ms
 INSPECT_BAG_ID=None  # None: INSPECT_RANDOM_SEED로 가능한 bag 하나를 선택
 INSPECT_RANDOM_SEED=31
 

@@ -2,7 +2,7 @@
   ros__parameters:
     # 사용 모델: dynamic_mlp_residual_servo_lag 또는 DYNAMIC_SERVO_LAG
     # MLP 모델만 아래 학습 가중치를 읽고, Classic 모델은 이 파일을 읽지 않는다.
-    dynamics_model: dynamic_mlp_residual_servo_lag
+    dynamics_model: DYNAMIC_SERVO_LAG
     dynamic_mlp_servo_lag_weights_path: config/dynamic_40ms_residual_servo_lag.bin
     # MLP 보정 출력만 제한한다. 센서값과 최종 state에는 적용하지 않는다.
     mlp_max_residual_ax: 0.0          # [m/s^2]
@@ -45,24 +45,24 @@
     q_error_speed: 20.0     # preserve straight speed; reduce speed only while pose error grows
     q_du: 0.12
     q_steer: 0.0
-    q_lat_g: 2000.0 # strongly reject combined-grip excess without lowering max_speed
+    q_lat_g: 200.0 # strongly reject combined-grip excess without lowering max_speed
     lat_g_soft_limit: 8.5                 # soft combined-grip ceiling # DD-diagram ay max 제한
     longitudinal_accel_soft_limit: 10.0   # do not penalize requested straight-line ax <= 10 m/s^2
     # 전륜 slip soft constraint: applied steer를 사용한 alpha_f 비용
-    q_front_slip: 5000.0
+    q_front_slip: 80.0
     front_slip_soft_limit_deg: 6.0
     front_slip_cost_min_speed: 1.5
     # Rear-slip soft constraint: q * max(0, |alpha_r|-limit)^2.
     # alpha_r = -atan2(vy-l_r*yaw_rate, |vx|). It complements the GG ellipse
     # by detecting rear-axle saturation while total ax/ay is still moderate.
-    q_rear_slip: 10000.0
+    q_rear_slip: 80.0
     rear_slip_soft_limit_deg: 6.0
     rear_slip_cost_min_speed: 1.5         # disable ill-conditioned low-vx slip cost
     # MPC-style lane-boundary slack:
     # s_k=max(0, collision_radius-min_boundary_clearance), cost=q_s*s_k^2.
     # Boundary violation remains finite/selectable; only physical obstacles
     # retain post-rollout hard candidate rejection.
-    collision_radius: 0.5       # planning clearance; absorb model/servo mismatch before wall contact
+    collision_radius: 0.3       # planning clearance; absorb model/servo mismatch before wall contact
     q_boundary_slack: 20000.0
     q_boundary_terminal_slack: 50000.0
     # LMPC와 같은 terminal safe set: 최근 2개 완주 lap에서 진행도 주변 20점씩 사용.
@@ -121,8 +121,8 @@
     l_f: 0.1833
     l_r: 0.1407
     # tiv_imu_bagdisjoint_kinematic_classic 식별 결과. l_f/l_r/mass는 학습 시 고정값.
-    kinematic_steer_scale: 1.19958229  # restored effective steering-response baseline
-    kinematic_steer_bias: 0.00227245701  # restored effective steering-response baseline
+    kinematic_steer_scale: 1.29371593  # Step 4 vehicle-response identification
+    kinematic_steer_bias: -0.0245638368  # Step 4 vehicle-response identification
     kinematic_position_speed_scale: 1.0  # offline state is physical ground-relative body velocity
     kinematic_no_slip: true               # residual checkpoint 학습 조건(beta=0)
     # vx_cmd 추종 회귀값: 종방향 residual 없이 실제 바퀴속도 응답을 재현
@@ -130,7 +130,7 @@
     # r_kin=vx*tan(delta)/L is a target, not an instantaneous yaw-rate assignment.
     kinematic_yaw_rate_time_constant: 0.1
     kinematic_max_yaw_accel: 15.0
-    steer_servo_time_constant: 0.19640877  # restored effective command-to-yaw response lag
+    steer_servo_time_constant: 0.185053863  # Step 4 vehicle-response identification
     # Servo specification: 60 deg / 0.16 s = 6.5449847 rad/s.
     actuator_max_steer_rate: 6.544984694978735 # 제조사 spec: 60 deg / 0.16 s = 6.5449847 rad/s
     # all6_seed31 검증 조합: 1.2 s yaw-rate MAE/p95가 회귀 후보보다 우수함.
@@ -163,15 +163,15 @@
     E_r: 0.0597
 
     # 0807 dynamic regression; used only by dynamic_mlp_residual.
-    dynamic_mlp_B_f: 5.450463587491685
-    dynamic_mlp_C_f: 0.4099617740329914
-    dynamic_mlp_D_f: 1.0703038784166876
-    dynamic_mlp_E_f: -9.998463776287327
-    dynamic_mlp_B_r: 6.295877387002132
-    dynamic_mlp_C_r: 0.5295450977214247
-    dynamic_mlp_D_r: 1.2310982590564592
-    dynamic_mlp_E_r: 0.1797613053409212
-    dynamic_mlp_I_z: 0.10507396329623564
+    dynamic_mlp_B_f: 2.8106457835009238
+    dynamic_mlp_C_f: 0.775431537087077
+    dynamic_mlp_D_f: 0.9220400888696738
+    dynamic_mlp_E_f: -4.92271228377628
+    dynamic_mlp_B_r: 3.1366228633512927
+    dynamic_mlp_C_r: 0.33160175643604217
+    dynamic_mlp_D_r: 2.4363987954512116
+    dynamic_mlp_E_r: -10.0
+    dynamic_mlp_I_z: 0.09059291359052173
 
     # --- Runtime environment and topics ---
     # Required CSV columns: x_m, y_m, w_tr_left_m, w_tr_right_m.

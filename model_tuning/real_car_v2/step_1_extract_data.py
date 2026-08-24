@@ -29,7 +29,7 @@ NEW_DATA_ROOTS = (
     # Path("/mnt/nas_custom/F1tenth/2026 IFAC/0817 (1)"),
     # Path("/mnt/nas_custom/F1tenth/2026 IFAC/0818"),
     # Path("/mnt/nas_custom/F1tenth/2026 IFAC/0819"),
-    Path("/mnt/nas_custom/F1tenth/2026 IFAC/0821"),
+    Path("/mnt/nas_custom/F1tenth/2026 IFAC/ifac2026"),
 )
 # Keep F5 configuration robust when a single Path is assigned without tuple
 # syntax.  A pathlib.Path is path-like but is not a collection of roots.
@@ -325,6 +325,82 @@ def causal_ema(values,alpha):
     result=np.empty_like(values,dtype=float);result[0]=values[0]
     for k in range(1,len(values)):result[k]=alpha*values[k]+(1.-alpha)*result[k-1]
     return result
+
+
+def refresh_saved_kf_from_yaml(directory):
+    """Rebuild KF/Pacejka columns in trimmed Step-1 NPZs without changing rows."""
+    cfg=yaml.safe_load((PROJECT_ROOT/"config/params.yaml").read_text())["/**"]["ros__parameters"]
+    parameter_set=ClassicModelParameters.from_mapping(cfg)
+    snapshot={**parameter_set.runtime_updates(),
+        "classic_kf_process_var":list(map(float,cfg["classic_kf_process_var"])),
+        "classic_kf_measurement_var":list(map(float,cfg["classic_kf_measurement_var"])),
+        "classic_kf_initial_var":list(map(float,cfg["classic_kf_initial_var"])),
+        "kf_pose_vy_window_s":float(cfg.get("kf_pose_vy_window_s",.12))}
+    paths=sorted(Path(directory).expanduser().resolve().glob("*.npz"))
+    if not paths:raise RuntimeError(f"no Step-1 NPZ files found in {directory}")
+    reports=[]
+    for number,path in enumerate(paths,1):
+        with np.load(path) as archive:
+            if not {"samples","columns","dt"}.issubset(archive.files):
+                print(f"[{number}/{len(paths)}] SKIPPED non-Step-1 NPZ: {path.name}")
+                continue
+            payload={key:np.asarray(archive[key]) for key in archive.files}
+        samples=np.asarray(payload["samples"],float).copy()
+        columns=np.asarray(payload["columns"]);names={str(v):i for i,v in enumerate(columns)}
+        required=("t","x","y","yaw","vx","steer","speed_cmd","imu_wz","imu_ax","imu_ay",
+                  "kf_x","kf_y","kf_yaw","kf_vx","kf_vy","kf_yaw_rate","kf_ax","kf_ay")
+        missing=[name for name in required if name not in names]
+        if missing:raise RuntimeError(f"{path}: missing Step-1 columns {missing}")
+        old_count=len(samples);old_first=float(samples[0,names["t"]]);old_last=float(samples[-1,names["t"]])
+        signs=np.asarray(payload.get("imu_axis_signs",np.ones(3)),float)
+        alpha=float(payload.get("imu_ema_alpha",cfg.get("imu_ema_alpha",IMU_EMA_ALPHA)))
+        sample_dt=float(payload["dt"]);window=float(cfg.get("kf_pose_vy_window_s",.12))
+        segment_ids=(samples[:,names["bag_id"]].astype(int) if "bag_id" in names
+                     else np.zeros(old_count,int))
+        segment_reports=[]
+        for segment_id in np.unique(segment_ids):
+            jj=np.flatnonzero(segment_ids==segment_id);part=samples[jj]
+            mcl_vy=causal_mcl_body_vy(part[:,names["t"]],part[:,names["x"]],
+                part[:,names["y"]],part[:,names["yaw"]],window)
+            gyro=causal_ema(signs[0]*part[:,names["imu_wz"]]-float(cfg.get("imu_wz_bias",0.)),alpha)
+            ax=causal_ema(signs[1]*part[:,names["imu_ax"]]-float(cfg.get("imu_ax_bias",0.)),alpha)
+            ay=causal_ema(signs[2]*part[:,names["imu_ay"]]-float(cfg.get("imu_ay_bias",0.)),alpha)
+            result=filter_classic_segment(part[:,names["x"]],part[:,names["y"]],
+                part[:,names["yaw"]],part[:,names["vx"]],mcl_vy,gyro,ax,ay,
+                part[:,names["steer"]],part[:,names["speed_cmd"]],sample_dt,cfg)
+            state=result["state"]
+            samples[np.ix_(jj,[names["kf_x"],names["kf_y"],names["kf_yaw"],
+                names["kf_vx"],names["kf_vy"],names["kf_yaw_rate"]])]=state
+            samples[np.ix_(jj,[names["kf_ax"],names["kf_ay"]])]=result["acceleration"]
+            reference=np.c_[part[:,names["x"]],part[:,names["y"]],part[:,names["yaw"]],
+                            part[:,names["vx"]],mcl_vy,gyro]
+            difference=state-reference;difference[:,2]=(difference[:,2]+np.pi)%(2*np.pi)-np.pi
+            segment_reports.append({"segment_id":int(segment_id),"samples":len(jj),
+                "raw_difference_rmse":np.sqrt(np.nanmean(difference**2,axis=0)).tolist()})
+        payload["samples"]=samples
+        payload["kf_parameter_hash"]=np.array(parameter_set.digest())
+        payload["kf_config_snapshot_json"]=np.array(json.dumps(snapshot,sort_keys=True))
+        temporary=path.with_name(path.stem+".refresh-kf.tmp.npz")
+        np.savez_compressed(temporary,**payload);temporary.replace(path)
+        metadata_path=path.with_suffix(".json")
+        if metadata_path.is_file():
+            metadata=json.loads(metadata_path.read_text())
+            metadata["output_samples"]=old_count
+            metadata["state_estimator"]={"method":"causal MPPI classic-model EKF",
+                "classic_parameter_hash":parameter_set.digest(),
+                "state_order":["x","y","yaw","vx","vy","yaw_rate"],
+                "comparison_reference":["MCL x","MCL y","MCL yaw","odom vx",
+                    "MCL-difference body vy","signed IMU yaw-rate"],
+                "segments":segment_reports,
+                "refreshed_from_trimmed_npz":True}
+            metadata_path.write_text(json.dumps(metadata,indent=2)+"\n")
+        if len(samples)!=old_count or samples[0,names["t"]]!=old_first or samples[-1,names["t"]]!=old_last:
+            raise RuntimeError(f"{path}: trim invariant changed during KF refresh")
+        reports.append((path.name,old_count,old_first,old_last))
+        print(f"[{number}/{len(paths)}] refreshed current-YAML KF: {path.name}; "
+              f"rows={old_count}, retained={old_first:.3f}..{old_last:.3f} s")
+    print(f"Refreshed {len(reports)} Step-1 NPZ files; parameter hash={parameter_set.digest()}")
+    return reports
 
 
 def draw_occupancy_map(axis,map_yaml):
@@ -1022,6 +1098,8 @@ def main():
                    help="s/e/q manual dataset trimming while each bag figure is open")
     p.add_argument("--preserve-existing-trim",action=argparse.BooleanOptionalAction,default=False,
                    help="reapply an existing NPZ's absolute retained interval after re-extraction")
+    p.add_argument("--refresh-saved-kf-from-yaml",action="store_true",
+                   help="recompute KF/Pacejka columns in saved trimmed NPZs using config/params.yaml")
     p.add_argument("--review-saved-collisions",action=argparse.BooleanOptionalAction,
                    default=REVIEW_SAVED_COLLISIONS,
                    help="skip extraction; review saved Step-1 NPZs and mark collision/stuck candidates")
@@ -1034,6 +1112,10 @@ def main():
     model_stride=args.model_dt/args.dt
     if not np.isclose(model_stride,round(model_stride),rtol=0.,atol=1e-9):
         p.error("--model-dt must be an integer multiple of --dt so model targets exist exactly")
+
+    if args.refresh_saved_kf_from_yaml:
+        refresh_saved_kf_from_yaml(args.output)
+        return
 
     if args.review_saved_collisions:
         if not USE_PLOT:raise SystemExit("--review-saved-collisions requires USE_PLOT=True")

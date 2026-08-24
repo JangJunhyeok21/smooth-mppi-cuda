@@ -45,6 +45,7 @@ SHOW_PLOTS = True
 INTERACTIVE_BAG_INSPECTOR = True
 TRAJECTORY_TIME_LABEL_INTERVAL_S = 1.0
 EVALUATE_ONLY = False
+YAML_EVALUATION_MODE = False
 EVALUATION_PARAMS_PATH = OUT / "params.json"
 APPLY_ACCEPTED_PARAMS_TO_YAML = False
 USE_VALIDATION_TEST_SPLIT = False
@@ -231,9 +232,12 @@ def load_regression_data(path,config):
                     paths.append(candidate)
                 else:
                     print(f"Skipping non-Step-1 NPZ: {candidate}")
-        if len(paths)<3:
-            raise RuntimeError(f"{path}: need at least three Step-1 NPZ files for "
-                               "bag-disjoint train/validation/test; found {len(paths)}")
+        minimum_files=1 if YAML_EVALUATION_MODE else 3
+        if len(paths)<minimum_files:
+            purpose=("YAML evaluation" if YAML_EVALUATION_MODE else
+                     "bag-disjoint train/validation/test")
+            raise RuntimeError(f"{path}: need at least {minimum_files} Step-1 NPZ "
+                               f"file(s) for {purpose}; found {len(paths)}")
         converted=[]
         for bag_index,candidate in enumerate(paths):
             item,_=load_regression_data(candidate,config)
@@ -1141,6 +1145,8 @@ def plot_clicked_classic_rollout(data,start,previous_tire,fitted_tire,
     """Open a 3x3 state/pose/acceleration comparison from one clicked row."""
     if TRAJECTORY_TIME_LABEL_INTERVAL_S<=0:
         raise ValueError("TRAJECTORY_TIME_LABEL_INTERVAL_S must be positive")
+    yaml_only=YAML_EVALUATION_MODE and np.allclose(
+        previous_tire,fitted_tire,equal_nan=True)
     starts_array=np.asarray([start],int)
     previous,truth,previous_accel,gt_accel=rollout_numpy(
         previous_tire,data,starts_array,previous_config,return_acceleration=True)
@@ -1177,9 +1183,10 @@ def plot_clicked_classic_rollout(data,start,previous_tire,fitted_tire,
     axis.plot(raw_pose[:,0],raw_pose[:,1],":",color="0.4",lw=2,
               label="raw MCL pose GT")
     axis.plot(previous_pose[:,0],previous_pose[:,1],"--",color="tab:blue",lw=2,
-              label="current parameters")
-    axis.plot(fitted_pose[:,0],fitted_pose[:,1],color="tab:red",lw=2,
-              label="fitted parameters")
+              label="current YAML" if yaml_only else "current parameters")
+    if not yaml_only:
+        axis.plot(fitted_pose[:,0],fitted_pose[:,1],color="tab:red",lw=2,
+                  label="fitted parameters")
     axis.scatter([0],[0],color="tab:green",s=45,zorder=5,label="clicked start")
     label_step=max(1,int(round(TRAJECTORY_TIME_LABEL_INTERVAL_S/.04)))
     for index in range(0,len(time),label_step):
@@ -1194,8 +1201,10 @@ def plot_clicked_classic_rollout(data,start,previous_tire,fitted_tire,
         axis.plot(time,truth_trace[:,column],"k-",lw=2.3,label="GT")
         axis.plot(time,raw_state_trace[:,column],":",color="0.4",lw=1.8,
                   label=f"raw KF {title}")
-        axis.plot(time,previous_trace[:,column],"--",color="tab:blue",lw=2,label="current")
-        axis.plot(time,fitted_trace[:,column],color="tab:red",lw=2,label="fitted")
+        axis.plot(time,previous_trace[:,column],"--",color="tab:blue",lw=2,
+                  label="current YAML" if yaml_only else "current")
+        if not yaml_only:
+            axis.plot(time,fitted_trace[:,column],color="tab:red",lw=2,label="fitted")
         if column==2:
             axis.plot(time,imu_yaw_rate,color="tab:green",ls=":",lw=1.9,
                       label="signed raw IMU yaw rate")
@@ -1209,8 +1218,10 @@ def plot_clicked_classic_rollout(data,start,previous_tire,fitted_tire,
         axis.plot(time,gt_pose[:,column],"k-",lw=2.3,label="GT")
         axis.plot(time,raw_pose[:,column],":",color="0.4",lw=1.8,
                   label=f"raw MCL {title}")
-        axis.plot(time,previous_pose[:,column],"--",color="tab:blue",lw=2,label="current")
-        axis.plot(time,fitted_pose[:,column],color="tab:red",lw=2,label="fitted")
+        axis.plot(time,previous_pose[:,column],"--",color="tab:blue",lw=2,
+                  label="current YAML" if yaml_only else "current")
+        if not yaml_only:
+            axis.plot(time,fitted_pose[:,column],color="tab:red",lw=2,label="fitted")
         axis.set(title=title,xlabel="rollout time [s]",ylabel=unit)
         axis.grid(alpha=.3);axis.legend()
     for axis,column,title in ((axes[2,1],0,"longitudinal acceleration ax"),
@@ -1223,9 +1234,10 @@ def plot_clicked_classic_rollout(data,start,previous_tire,fitted_tire,
         axis.plot(time,state_accel_trace[:,column],color="tab:purple",ls=":",lw=2,
                   label="configured-state derivative")
         axis.plot(time,previous_accel_trace[:,column],"--",color="tab:blue",lw=2,
-                  label="current model")
-        axis.plot(time,fitted_accel_trace[:,column],color="tab:red",lw=2,
-                  label="fitted model")
+                  label="current YAML model" if yaml_only else "current model")
+        if not yaml_only:
+            axis.plot(time,fitted_accel_trace[:,column],color="tab:red",lw=2,
+                      label="fitted model")
         axis.set(title=(f"{title} | state/model vs IMU RMSE="
                         f"{state_imu_rmse:.2f}/{fitted_imu_rmse:.2f} m/s²"),
                  xlabel="rollout time [s]",ylabel="m/s²")
@@ -1240,7 +1252,8 @@ def plot_clicked_classic_rollout(data,start,previous_tire,fitted_tire,
 
 
 def plot_interactive_bag_inspector(data,usable_starts,previous_tire,fitted_tire,
-                                   previous_config,fitted_config):
+                                   previous_config,fitted_config,navigation=False,
+                                   bag_position=None,bag_count=None):
     """Show one complete evaluation bag; p + click opens a detailed rollout."""
     if TRAJECTORY_TIME_LABEL_INTERVAL_S<=0:
         raise ValueError("TRAJECTORY_TIME_LABEL_INTERVAL_S must be positive")
@@ -1308,14 +1321,34 @@ def plot_interactive_bag_inspector(data,usable_starts,previous_tire,fitted_tire,
     axes[3,1].plot(time,raw_yaw,color="0.55",ls=":",label="raw MCL yaw")
     axes[3,1].plot(time,target_yaw,"k-",label="configured yaw GT")
     axes[3,1].set(title="yaw",xlabel="bag time [s]",ylabel="rad");axes[3,1].grid(alpha=.3);axes[3,1].legend()
-    time_axes=set(axes.flat[1:]);armed={"value":False}
+    time_axes=set(axes.flat[1:]);armed={"value":False};action={"value":None}
+    jump_buffer={"value":""}
     manager=getattr(fig.canvas,"manager",None);handler=getattr(manager,"key_press_handler_id",None)
     if handler is not None:fig.canvas.mpl_disconnect(handler)
     def on_key(event):
-        if event.key and event.key.lower()=="p":
+        key=(event.key or "").lower()
+        if key=="p":
             armed["value"]=True
             fig.suptitle(f"{bag_name} | PREDICTION ARMED: click a time panel",color="tab:red")
             fig.canvas.draw_idle();print("Step 3 prediction armed: click a time-series panel.")
+        elif navigation and key in ("left","right","q","escape"):
+            action["value"]={"left":"previous","right":"next",
+                             "q":"quit","escape":"quit"}[key]
+            plt.close(fig)
+        elif navigation and key.isdigit():
+            jump_buffer["value"]+=key
+            fig.suptitle(f"Jump to bag {jump_buffer['value']}/{int(bag_count)}: "
+                         "press Enter",color="tab:orange")
+            fig.canvas.draw_idle()
+        elif navigation and key in ("enter","return") and jump_buffer["value"]:
+            requested=int(jump_buffer["value"])-1
+            jump_buffer["value"]=""
+            if 0<=requested<int(bag_count):
+                action["value"]=("jump",requested);plt.close(fig)
+            else:
+                print(f"bag number must be in 1..{int(bag_count)}")
+        elif navigation and key=="backspace":
+            jump_buffer["value"]=jump_buffer["value"][:-1]
     def on_click(event):
         if not armed["value"] or event.inaxes not in time_axes or event.xdata is None:return
         armed["value"]=False
@@ -1328,14 +1361,58 @@ def plot_interactive_bag_inspector(data,usable_starts,previous_tire,fitted_tire,
                                      previous_config,fitted_config,bag_name)
     fig.canvas.mpl_connect("key_press_event",on_key)
     fig.canvas.mpl_connect("button_press_event",on_click)
-    fig.suptitle(f"Step 3 bag inspector | {bag_name} | press p, then click a time panel\n"
+    navigation_text=(f" | [{int(bag_position)+1}/{int(bag_count)}] Left/Right: bag, "
+                     "number+Enter: jump, q: quit" if navigation else "")
+    fig.suptitle(f"Step 3 bag inspector | {bag_name}{navigation_text} | "
+                 "press p, then click a time panel\n"
                  f"configured state vs IMU RMSE: ax={bag_ax_rmse:.2f} m/s², "
                  f"ay={bag_ay_rmse:.2f} m/s², yaw-rate={bag_yaw_rate_rmse:.3f} rad/s")
     print(f"{bag_name}: configured state vs IMU RMSE ax/ay/yaw-rate="
           f"{bag_ax_rmse:.3f}/{bag_ay_rmse:.3f}/{bag_yaw_rate_rmse:.4f}")
     output=OUT/"interactive_bag_inspector.png";fig.savefig(output,dpi=180)
     if SHOW_PLOTS:plt.show()
-    plt.close(fig);return output
+    plt.close(fig)
+    return (output,action["value"]) if navigation else output
+
+
+def plot_all_bag_yaml_evaluation(data,current_tire,current_config):
+    """Browse every loaded Step-1 bag and evaluate current YAML on a click."""
+    bag_ids=[int(value) for value in np.unique(data["bag_id"])]
+    if not bag_ids:return None
+    index=0
+    while 0<=index<len(bag_ids):
+        bag_id=bag_ids[index]
+        rows=np.flatnonzero(data["bag_id"]==bag_id)
+        first,last=int(rows[0]),int(rows[-1]);valid=np.asarray(data["valid"],bool)
+        candidates=np.asarray([
+            start for start in range(first+WARMUP_SAMPLES,last-2*HORIZON+1)
+            if valid[start:start+2*HORIZON+1].all()
+            and np.all(data["bag_id"][start-WARMUP_SAMPLES:start+2*HORIZON+1]
+                       ==bag_id)],dtype=int)
+        bag_name=(Path(str(data["source_paths"][bag_id])).name
+                  if "source_paths" in data.files else f"bag_id={bag_id}")
+        if not len(candidates):
+            print(f"[{index+1}/{len(bag_ids)}] {bag_name}: no valid "
+                  f"{HORIZON*.04:.2f} s open-loop start; skipping interactive window")
+            index+=1
+            continue
+        sampled=candidates[np.linspace(0,len(candidates)-1,
+            min(MAX_PER_BAG,len(candidates))).astype(int)]
+        result=metrics(current_tire,data,sampled,current_config)
+        print(f"[{index+1}/{len(bag_ids)}] {bag_name}: windows={len(sampled)}, "
+              f"position mean/P95={result['trajectory_mean_m']:.4f}/"
+              f"{result['trajectory_p95_m']:.4f} m, yaw mean/P95="
+              f"{result['trajectory_yaw_mean_rad']:.4f}/"
+              f"{result['trajectory_yaw_p95_rad']:.4f} rad")
+        _,requested=plot_interactive_bag_inspector(
+            data,np.asarray([candidates[0]]),current_tire,current_tire,
+            current_config,current_config,navigation=True,
+            bag_position=index,bag_count=len(bag_ids))
+        if requested=="quit":break
+        if requested=="previous":index=(index-1)%len(bag_ids)
+        elif isinstance(requested,tuple) and requested[0]=="jump":index=requested[1]
+        else:index=(index+1)%len(bag_ids)
+    return OUT/"interactive_bag_inspector.png"
 
 
 def plot_open_loop_evaluation(data, previous_tire, fitted_tire, previous_config,
@@ -1519,6 +1596,19 @@ def main():
     config=yaml.safe_load((ROOT/"config/params.yaml").read_text())["/**"]["ros__parameters"]
     config["load_transfer_h_cg_m"]=float(LOAD_TRANSFER_H_CG_M)
     data,data_contract=load_regression_data(DATA,config)
+    previous_config=dict(config)
+    current=np.asarray([config[f"dynamic_mlp_{name}"] for name in NAMES],float)
+    if YAML_EVALUATION_MODE:
+        print("Step 3 YAML evaluation mode: regression and YAML update are disabled.")
+        print(f"Loaded data: {data_contract}")
+        print(f"Current YAML: {ROOT/'config/params.yaml'}")
+        print("Controls: Left/Right changes bag, number+Enter jumps to a bag, "
+              "p then click evaluates that start, q exits.")
+        if not SHOW_PLOTS:
+            print("STEP3_USE_PLOT=0: interactive evaluation requires plots; nothing to show.")
+            return
+        plot_all_bag_yaml_evaluation(data,current,previous_config)
+        return
     local_fraction=float(os.environ.get("CLASSIC_LOCAL_FRACTION","0"))
     if local_fraction>0:
         center=np.asarray([config[f"dynamic_mlp_{name}"] for name in NAMES],float)
@@ -1547,8 +1637,6 @@ def main():
     if min(map(len,(train,validation,test)))==0:
         raise RuntimeError(f"{DATA}: no usable 1.0 s rollout in split sizes "
             f"train={len(train)}, validation={len(validation)}, test={len(test)}")
-    previous_config=dict(config)
-    current=np.asarray([config[f"dynamic_mlp_{name}"] for name in NAMES],float)
     if EVALUATE_ONLY:
         parameter_path=Path(EVALUATION_PARAMS_PATH).expanduser().resolve()
         if not parameter_path.is_file():

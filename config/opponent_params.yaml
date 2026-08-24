@@ -122,8 +122,8 @@
     l_f: 0.1833
     l_r: 0.1407
     # tiv_imu_bagdisjoint_kinematic_classic 식별 결과. l_f/l_r/mass는 학습 시 고정값.
-    kinematic_steer_scale: 1.19958229  # restored effective steering-response baseline
-    kinematic_steer_bias: 0.00227245701  # restored effective steering-response baseline
+    kinematic_steer_scale: 1.29371593  # Step 4 vehicle-response identification
+    kinematic_steer_bias: -0.0245638368  # Step 4 vehicle-response identification
     kinematic_position_speed_scale: 1.0  # offline state is physical ground-relative body velocity
     kinematic_no_slip: true               # residual checkpoint 학습 조건(beta=0)
     # vx_cmd 추종 회귀값: 종방향 residual 없이 실제 바퀴속도 응답을 재현
@@ -131,7 +131,7 @@
     # r_kin=vx*tan(delta)/L is a target, not an instantaneous yaw-rate assignment.
     kinematic_yaw_rate_time_constant: 0.1
     kinematic_max_yaw_accel: 15.0
-    steer_servo_time_constant: 0.19640877  # restored effective command-to-yaw response lag
+    steer_servo_time_constant: 0.185053863  # Step 4 vehicle-response identification
     # Servo specification: 60 deg / 0.16 s = 6.5449847 rad/s.
     actuator_max_steer_rate: 6.544984694978735 # 제조사 spec: 60 deg / 0.16 s = 6.5449847 rad/s
     # all6_seed31 검증 조합: 1.2 s yaw-rate MAE/p95가 회귀 후보보다 우수함.

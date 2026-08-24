@@ -254,6 +254,8 @@ def main():
         "fixed_actuator_max_steer_rate": float(config["actuator_max_steer_rate"]),
         "input_path":str(Path(DATA).resolve()),
         "input_contract":data_contract,
+        "rollout_horizon_steps":int(HORIZON),
+        "rollout_horizon_s":float(HORIZON*.04),
         "gt_consistency_mode":classic.GT_CONSISTENCY_MODE,
         "loss_weights":{"vx":classic.VX_LOSS_WEIGHT,
             "vy":classic.VY_LOSS_WEIGHT,

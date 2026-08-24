@@ -15,7 +15,7 @@ import visualize_and_regress_longitudinal_actuator as regression
 # User-configurable Step 2 settings
 # ---------------------------------------------------------------------------
 ROOT = Path(__file__).resolve().parents[2]
-SOURCE_DIRS = (ROOT / "model_tuning/data/0821",)
+SOURCE_DIRS = (ROOT / "model_tuning/data/ifac2026",)
 OUTPUT_DIR = ROOT / "model_tuning/results/longitudinal_actuator_regression"
 
 # Identified parameter bounds. Units: Kp [1/s], time constants [s].
@@ -29,7 +29,7 @@ BRAKE_TIME_CONSTANT_MAX = 0.8
 # Match the MPPI/Step-3/Step-6 horizon while retaining the 20 ms source grid.
 # 60 model knots * 40 ms = 2.4 s = 120 source samples * 20 ms.
 MODEL_DT_S = 0.04
-HORIZON_STEPS = 60
+HORIZON_STEPS = 40
 WARMUP_DURATION_S = 0.8
 START_STRIDE_SAMPLES = 5
 MAX_ROLLOUTS_PER_SESSION = 800

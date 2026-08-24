@@ -14,7 +14,7 @@ from matplotlib.lines import Line2D
 
 
 
-MAP_NAME = "map2"
+MAP_NAME = "ifac2026"
 ROOT = Path(__file__).resolve().parents[1]
 
 USE_EQUAL = True

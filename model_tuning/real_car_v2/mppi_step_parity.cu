@@ -10,8 +10,11 @@
 // Fixed-input fixture for the production 40 ms servo-lag CUDA step. Runtime
 // parameters are supplied by the Python checker from params.yaml/regression.
 int main(int argc,char **argv){
-    if(argc!=14)throw std::runtime_error(
-        "usage: mppi_step_parity WEIGHTS STEPS Bf Cf Df Ef Br Cr Dr Er Iz min_speed max_speed");
+    if(argc!=32)throw std::runtime_error(
+        "usage: mppi_step_parity WEIGHTS STEPS Bf Cf Df Ef Br Cr Dr Er Iz "
+        "min_speed max_speed min_accel max_accel mass lf lr steer_scale steer_bias "
+        "steer_tau max_steer max_steer_rate speed_kp accel_tau brake_tau max_ref_rate "
+        "position_scale residual_ax residual_ay residual_yaw_accel");
     int devices=0;auto status=cudaGetDeviceCount(&devices);
     if(status!=cudaSuccess||devices<1){std::cerr<<"CUDA parity unavailable: "<<cudaGetErrorString(status)<<'\n';return 2;}
     const int steps=std::atoi(argv[2]);mppi::Params p{};p.dt=.02f;p.control_dt=.02f;p.model_dt=.04f;
@@ -20,21 +23,22 @@ int main(int argc,char **argv){
     p.dynamics_model=vx_delta_24d
         ?mppi::DYNAMIC_MLP_RESIDUAL_SERVO_LAG_VX_DELTA_24D
         :mppi::DYNAMIC_MLP_RESIDUAL_SERVO_LAG;
-    // Match the deployed controller and simulator plant.  The old fixture
-    // used [-10, 10], so its speed-servo response diverged after one knot even
-    // though both runtime models clamp longitudinal acceleration to [-1, 1].
-    p.min_accel=-1.f;p.max_accel=1.f;
-    p.min_speed=std::atof(argv[12]);p.max_speed=std::atof(argv[13]);p.mass=3.74f;p.l_f=.163f;p.l_r=.161f;
-    p.kinematic_steer_scale=1.f;p.kinematic_steer_bias=.01015773f;
-    p.speed_servo_kp=27.85168694f;p.steer_servo_time_constant=.15514851356820727f;
-    p.actuator_max_steer_rate=6.544984694978735f;p.speed_reference_accel_time_constant=.09013387f;
-    p.speed_reference_brake_time_constant=.09717008f;p.actuator_max_speed_reference_rate=5.89577526f;
+    p.min_speed=std::atof(argv[12]);p.max_speed=std::atof(argv[13]);
+    p.min_accel=std::atof(argv[14]);p.max_accel=std::atof(argv[15]);
+    p.mass=std::atof(argv[16]);p.l_f=std::atof(argv[17]);p.l_r=std::atof(argv[18]);
+    p.kinematic_steer_scale=std::atof(argv[19]);p.kinematic_steer_bias=std::atof(argv[20]);
+    p.steer_servo_time_constant=std::atof(argv[21]);p.max_steer=std::atof(argv[22]);
+    p.actuator_max_steer_rate=std::atof(argv[23]);p.speed_servo_kp=std::atof(argv[24]);
+    p.speed_reference_accel_time_constant=std::atof(argv[25]);
+    p.speed_reference_brake_time_constant=std::atof(argv[26]);
+    p.actuator_max_speed_reference_rate=std::atof(argv[27]);
+    p.kinematic_position_speed_scale=std::atof(argv[28]);
     p.dynamic_mlp_B_f=std::atof(argv[3]);p.dynamic_mlp_C_f=std::atof(argv[4]);
     p.dynamic_mlp_D_f=std::atof(argv[5]);p.dynamic_mlp_E_f=std::atof(argv[6]);
     p.dynamic_mlp_B_r=std::atof(argv[7]);p.dynamic_mlp_C_r=std::atof(argv[8]);
     p.dynamic_mlp_D_r=std::atof(argv[9]);p.dynamic_mlp_E_r=std::atof(argv[10]);p.dynamic_mlp_I_z=std::atof(argv[11]);
-    p.mlp_max_residual_ax=0.f;p.mlp_max_residual_ay=8.f;
-    p.mlp_max_residual_yaw_accel=12.f;
+    p.mlp_max_residual_ax=std::atof(argv[29]);p.mlp_max_residual_ay=std::atof(argv[30]);
+    p.mlp_max_residual_yaw_accel=std::atof(argv[31]);
     const float wb=p.l_f+p.l_r;p.F_zf=p.mass*9.81f*p.l_r/wb;p.F_zr=p.mass*9.81f*p.l_f/wb;
     mppi::MPPISolver solver(1,std::max(2,steps),p);
     if(vx_delta_24d)solver.load_dynamic_mlp_vx_delta_residual_weights(argv[1]);

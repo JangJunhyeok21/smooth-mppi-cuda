@@ -47,7 +47,7 @@
     q_steer: 0.10
     q_lat_g: 60.0 # friction ellipse 초과 비용
     lat_g_soft_limit: 6.5                 # soft combined-grip ceiling # DD-diagram ay max 제한
-    longitudinal_accel_soft_limit: 2.0    # friction ellipse ax axis [m/s^2] #DD-diagram ax max 제한
+    longitudinal_accel_soft_limit: 9.0    # friction ellipse ax axis [m/s^2] #DD-diagram ax max 제한
     # 전륜 slip soft constraint: applied steer를 사용한 alpha_f 비용
     q_front_slip: 300.0
     front_slip_soft_limit_deg: 8.0
@@ -68,7 +68,6 @@
     # true: reject an off-track weighted-control rollout and use the
     # lowest-cost safe sampled sequence. false: publish standard MPPI weighted
     # controls without this post-optimization replacement.
-    weighted_trajectory_safety_enabled: true  # 가중평균 traj가 경계/장애물 침범 시 safe sample 사용
     # LMPC와 같은 terminal safe set: 최근 2개 완주 lap에서 진행도 주변 20점씩 사용.
     # 목적함수 전환: mpcc=contour/progress, lmpc=terminal safe-set/cost-to-go.
     # 현재 2 m/s safe set은 느리므로 랩타임 주행 기본값은 mpcc이다.
@@ -82,7 +81,7 @@
     safe_set_state_scale_yaw: 0.5      # yaw 오차 정규화 크기 [rad]
     q_progress: 100.0        # 경계를 가로지르는 가짜 progress가 지배하지 않도록 제한
     q_escape_vel: 0.0      # horizon 말단의 전진속도 보상
-    horizon_steps: 60       # model_dt=0.04 s 기준 3.2 s prediction horizon
+    horizon_steps: 60       # 60 * model_dt(0.04 s) = 2.4 s prediction horizon
     # --- Obstacle Avoidance Params ---
     obstacle_avoidance_enabled: true
     # Separate predictor publishes obstacle-major poses at each 40 ms MPPI knot.
@@ -103,7 +102,7 @@
     noise_accel_std: 2.0     # m/s^3
     max_steer_rate: 50.0    # rad/s
     # Input slew rate: m/s^2 for direct-speed models, m/s^3 for acceleration-command models.
-    max_accel_rate: 4.0
+    max_accel_rate: 50.0
     lambda: 20.0
     num_samples: 1600        # desktop simulation: ~4 ms measured
     visualize_candidates: false # K*T 후보 복사 비활성화
@@ -181,7 +180,7 @@
     # PathPublisher converts them to center/left/right paths.
     # Relative paths are resolved from the installed package share directory.
     # STEP3 track을 STEP4 minimum-curvature optimizer로 변환한 MPPI 산출물.
-    csv_file_path: data/map2/map2_mppi_track_optimal.csv
+    csv_file_path: data/ifac2026/ifac2026_mppi_track_optimal.csv
     frame_id: map
     publish_rate: 0.2 # Hz
     # true : simulator pose + twist come from simulation_odom_topic
@@ -195,7 +194,7 @@
 
 map2_opponent_driver:
   ros__parameters:
-    track_csv: data/map2/map2_mppi_track_optimal.csv
+    track_csv: data/ifac2026/ifac2026_mppi_track_optimal.csv
     target_speed: 1.8
     lookahead_points: 12
 

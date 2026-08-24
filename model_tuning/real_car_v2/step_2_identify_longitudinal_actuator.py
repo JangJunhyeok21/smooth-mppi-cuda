@@ -3,6 +3,8 @@
 
 This calibration is invoked by the alternating refinement loop. If accepted,
 Evaluate all tuned parameters in Step 6 before regenerating causal KF states.
+The v_ref slew-rate limit is a fixed runtime constraint read from params.yaml;
+it is deliberately not an identification variable.
 """
 from pathlib import Path
 

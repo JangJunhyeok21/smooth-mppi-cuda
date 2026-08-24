@@ -640,6 +640,9 @@ def main():
     print("\nTuned longitudinal-actuator parameter candidates:")
     for name, previous, tuned in zip(report["parameter_order"], old, fitted):
         print(f"  {name}: {previous:.9g} -> {tuned:.9g}")
+    print("  actuator_max_speed_reference_rate: "
+          f"{cfg['actuator_max_speed_reference_rate']:.9g} "
+          "(fixed from params.yaml; not regressed)")
     if UPDATE_CONFIG and gate:
         print(f"Applied the tuned parameters to: {CONFIG_PATH}")
     elif not UPDATE_CONFIG:

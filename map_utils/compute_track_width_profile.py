@@ -136,10 +136,35 @@ def _read_pgm_token(fp) -> bytes:
 
 
 def load_pgm(pgm_path: Path) -> np.ndarray:
+    """Load a ROS occupancy-map image as 0..255 grayscale pixels.
+
+    The historical name is retained for callers, but ROS map YAML files may
+    reference PNG images as well as PGM images.  Keeping the returned range
+    identical is important because ``build_traversable_mask`` applies ROS map
+    ``negate`` and threshold semantics to 8-bit intensity values.
+    """
+    pgm_path = Path(pgm_path)
+    with pgm_path.open("rb") as probe:
+        signature = probe.read(8)
+
+    if signature.startswith(b"\x89PNG\r\n\x1a\n"):
+        try:
+            from PIL import Image
+        except ImportError as exc:
+            raise RuntimeError(
+                f"PNG map {pgm_path} requires Pillow (PIL)") from exc
+        with Image.open(pgm_path) as source:
+            # ROS occupancy maps use image luminance.  Explicit conversion also
+            # handles RGB/RGBA/palette PNG files without changing downstream
+            # threshold calculations.
+            return np.asarray(source.convert("L"), dtype=np.float32)
+
     with pgm_path.open("rb") as fp:
         magic = _read_pgm_token(fp)
         if magic not in {b"P2", b"P5"}:
-            raise ValueError(f"Unsupported PGM format {magic!r} in {pgm_path}")
+            raise ValueError(
+                f"Unsupported occupancy-map image format {magic!r} in {pgm_path}; "
+                "supported formats are PGM (P2/P5) and PNG")
 
         dims = _read_pgm_token(fp).split()
         if len(dims) != 2:

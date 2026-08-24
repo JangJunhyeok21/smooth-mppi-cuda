@@ -13,9 +13,55 @@ import numpy as np
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MAP_NAME = "map2"
+MAP_NAME = "ifac2026"
 DEFAULT_INPUT = ROOT / f"data/{MAP_NAME}/{MAP_NAME}_mppi_track.csv"
 DEFAULT_OUTPUT = ROOT / f"data/{MAP_NAME}/{MAP_NAME}_mppi_track_optimal.csv"
+
+
+def intersect_boundary_along_normals(
+        race: np.ndarray, yaw: np.ndarray, boundaries: tuple[np.ndarray, ...],
+        expected_side: float, label: str) -> tuple[np.ndarray, np.ndarray]:
+    """Intersect each raceline normal with a closed physical boundary.
+
+    ``expected_side`` is +1 for the left boundary and -1 for the right.  This
+    preserves the geometric MPPI contract after a minimum-curvature line cuts
+    corners; matching the two paths by normalized arclength does not.
+    """
+    # At tight bends a normal ray can hit the boundary whose historical CSV
+    # label is opposite to the local raceline side.  Both polylines together
+    # define the physical corridor; search both without adding a spurious
+    # connecting segment between them.
+    q = np.concatenate(boundaries, axis=0)
+    segment = np.concatenate([
+        np.roll(boundary, -1, axis=0) - boundary for boundary in boundaries],
+        axis=0)
+    intersections = np.empty_like(race)
+    signed_widths = np.empty(len(race), dtype=float)
+    eps = 1.0e-10
+    for index, (point, heading) in enumerate(zip(race, yaw)):
+        normal = np.array([-np.sin(heading), np.cos(heading)])
+        delta = q - point
+        denominator = normal[0] * segment[:, 1] - normal[1] * segment[:, 0]
+        usable = np.abs(denominator) > eps
+        t = np.full(len(segment), np.nan)
+        u = np.full(len(segment), np.nan)
+        t[usable] = ((delta[usable, 0] * segment[usable, 1]
+                      - delta[usable, 1] * segment[usable, 0])
+                     / denominator[usable])
+        u[usable] = ((delta[usable, 0] * normal[1]
+                      - delta[usable, 1] * normal[0])
+                     / denominator[usable])
+        valid = usable & (u >= -1.0e-8) & (u <= 1.0 + 1.0e-8)
+        valid &= expected_side * t > 1.0e-6
+        candidates = np.flatnonzero(valid)
+        if not len(candidates):
+            raise RuntimeError(
+                f"raceline point {index} has no {label} boundary intersection "
+                "along its local normal; check track orientation/boundaries")
+        chosen = candidates[np.argmin(np.abs(t[candidates]))]
+        signed_widths[index] = t[chosen]
+        intersections[index] = point + t[chosen] * normal
+    return intersections, np.abs(signed_widths)
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
@@ -28,7 +74,7 @@ def parse_args() -> argparse.Namespace:
                         default=ROOT / f"model_tuning/results/{MAP_NAME}_raceline.png")
     parser.add_argument("--alpha-racer-root", type=Path, default=Path(
         "/home/a/alpha-RACER/global_racetrajectory_optimization"))
-    parser.add_argument("--vehicle-width", type=float, default=0.90,
+    parser.add_argument("--vehicle-width", type=float, default=1.20,
                         help="경계 최적화에 사용하는 차량 폭 [m]")
     parser.add_argument("--curvature-limit", type=float, default=8.0,
                         help="raceline 곡률 상한 [1/m]")
@@ -110,34 +156,32 @@ def main() -> None:
                            f"p95={np.percentile(np.abs(heading_error), 95):.3f} rad")
 
     # IQP changes its working reference line and widths. Never reconstruct the
-    # physical boundaries from that result. Project every raceline point onto
-    # the *input* centerline and interpolate the explicit original boundary
-    # coordinates instead.
+    # physical boundaries from that result.  More importantly, do not pair the
+    # raceline and centerline by normalized lap progress: corner cutting makes
+    # that boundary vector strongly tangential and overstates the usable road
+    # width.  Intersect the local raceline normal with the original physical
+    # boundary polylines instead.
     original_center = np.column_stack((raw["x_m"], raw["y_m"]))
     left_original = np.column_stack((raw["left_x_m"], raw["left_y_m"]))
     right_original = np.column_stack((raw["right_x_m"], raw["right_y_m"]))
-    original_segment_length = np.linalg.norm(
-        np.roll(original_center, -1, axis=0) - original_center, axis=1)
-    original_s = np.r_[0.0, np.cumsum(original_segment_length)]
-    race_segment_length = np.linalg.norm(np.diff(
-        np.vstack((race, race[0])), axis=0), axis=1)
-    race_fraction = np.r_[0.0, np.cumsum(race_segment_length[:-1])] / np.sum(race_segment_length)
-    target_s = race_fraction * original_s[-1]
-    projection_index = np.searchsorted(original_s, target_s, side="right") - 1
-    projection_index = np.clip(projection_index, 0, len(original_center) - 1)
-    next_projection_index = (projection_index + 1) % len(original_center)
-    projection_t = ((target_s - original_s[projection_index]) /
-                    np.maximum(original_segment_length[projection_index], 1.0e-12))
-    blend = projection_t[:, None]
-    center_xy = (original_center[projection_index] * (1.0 - blend)
-                 + original_center[next_projection_index] * blend)
-    left_xy = (left_original[projection_index] * (1.0 - blend)
-               + left_original[next_projection_index] * blend)
-    right_xy = (right_original[projection_index] * (1.0 - blend)
-                + right_original[next_projection_index] * blend)
-    # Widths are measured from raceline to the unchanged physical boundaries.
-    left_width = np.linalg.norm(left_xy - race, axis=1)
-    right_width = np.linalg.norm(right_xy - race, axis=1)
+    left_xy, left_width = intersect_boundary_along_normals(
+        race, yaw, (left_original, right_original), +1.0, "left")
+    right_xy, right_width = intersect_boundary_along_normals(
+        race, yaw, (left_original, right_original), -1.0, "right")
+    # Diagnostic-only reference point: midpoint of the two normal
+    # intersections. MPPI consumes the explicit boundaries, not this column.
+    center_xy = 0.5 * (left_xy + right_xy)
+    left_tangent_error = np.abs(
+        (left_xy[:, 0] - race[:, 0]) * np.cos(yaw)
+        + (left_xy[:, 1] - race[:, 1]) * np.sin(yaw))
+    right_tangent_error = np.abs(
+        (right_xy[:, 0] - race[:, 0]) * np.cos(yaw)
+        + (right_xy[:, 1] - race[:, 1]) * np.sin(yaw))
+    print("normal-boundary validation: "
+          f"left tangent p95={np.percentile(left_tangent_error, 95):.3e} m, "
+          f"right tangent p95={np.percentile(right_tangent_error, 95):.3e} m, "
+          f"width range=({left_width.min():.3f}, {left_width.max():.3f})/"
+          f"({right_width.min():.3f}, {right_width.max():.3f}) m")
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with args.output.open("w", newline="") as handle:

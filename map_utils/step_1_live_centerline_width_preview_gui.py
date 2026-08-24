@@ -14,7 +14,7 @@ from matplotlib.backend_bases import Event, KeyEvent, MouseEvent
 from matplotlib.collections import LineCollection
 from matplotlib.lines import Line2D
 
-MAP_NAME = "map2"
+MAP_NAME = "ifac2026"
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MAP_YAML = Path(f"{ROOT}/data/{MAP_NAME}/{MAP_NAME}.yaml")
 DEFAULT_CENTERLINE_OUTPUT = Path(f"{ROOT}/data/{MAP_NAME}/centerline.csv")

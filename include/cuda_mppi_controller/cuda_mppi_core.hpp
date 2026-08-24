@@ -126,7 +126,6 @@ struct Params {
     float collision_radius;
     float q_boundary_slack;
     float q_boundary_terminal_slack;
-    bool weighted_trajectory_safety_enabled;
 
     // LMPC terminal safe set. The host selects the same local 2*K_NEAR
     // samples as lmpc.cpp; each rollout solves the convex terminal projection.
@@ -166,6 +165,7 @@ struct Params {
     float I_z;
     float kinematic_steer_scale;
     float kinematic_steer_bias;
+    float kinematic_position_speed_scale;
     bool kinematic_no_slip;
     float l_f;
     float l_r;
@@ -269,9 +269,6 @@ private:
     int model_knot_phase_{0};
     std::vector<float> h_costs_;        
     std::vector<float> h_weights_;      
-    // Per-rollout signed safety clearances: >= 0 is outside the obstacle or
-    // boundary, < 0 is penetration. Keeping these on the device avoids
-    // copying K*T states to the CPU when the weighted trajectory is unsafe.
     std::vector<float> h_min_boundary_clearances_;
     std::vector<float> h_min_obstacle_clearances_;
     int best_k_ = 0;

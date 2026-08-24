@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Record consecutive Map1 MPPI laps (or collision/timeout) and plot them."""
+"""Record MPPI laps on an arbitrary track (or collision/timeout)."""
 import csv
 import argparse
 import math
@@ -22,11 +22,12 @@ TARGET_LAPS = 10.0
 TIMEOUT_SECONDS = 180.0
 OUTPUT_DIRECTORY = Path(
     "/home/a/smooth-mppi-cuda/model_tuning/results/map1_boundary_soft_10laps")
+DEFAULT_TRACK = Path(__file__).resolve().parents[1] / "data/map1/map1_centerline.csv"
 
 
 class Recorder(Node):
     def __init__(self, target_laps=TARGET_LAPS, timeout_seconds=TIMEOUT_SECONDS,
-                 output_directory=OUTPUT_DIRECTORY):
+                 output_directory=OUTPUT_DIRECTORY, track_path=DEFAULT_TRACK):
         super().__init__("map1_lap_recorder")
         self.target_laps = target_laps
         self.timeout_seconds = timeout_seconds
@@ -35,8 +36,7 @@ class Recorder(Node):
         self.t0 = None; self.start = None; self.left_start = False
         self.latest_pose = None
         self.previous_recorded_pose = None
-        centerline_path = Path(__file__).resolve().parents[1] / "data/map1/map1_centerline.csv"
-        centerline = np.genfromtxt(centerline_path, delimiter=",", names=True)
+        centerline = np.genfromtxt(track_path, delimiter=",", names=True)
         self.centerline_xy = np.column_stack((centerline["x_m"], centerline["y_m"]))
         closed = np.vstack((self.centerline_xy, self.centerline_xy[0]))
         segment_length = np.hypot(np.diff(closed[:, 0]), np.diff(closed[:, 1]))
@@ -139,8 +139,10 @@ def main():
     parser.add_argument("--laps",type=float,default=TARGET_LAPS)
     parser.add_argument("--timeout",type=float,default=TIMEOUT_SECONDS)
     parser.add_argument("--output",type=Path,default=OUTPUT_DIRECTORY)
+    parser.add_argument("--track",type=Path,default=DEFAULT_TRACK,
+                        help="closed CSV containing x_m,y_m")
     args=parser.parse_args()
-    rclpy.init(); n=Recorder(args.laps,args.timeout,args.output)
+    rclpy.init(); n=Recorder(args.laps,args.timeout,args.output,args.track)
     try:rclpy.spin(n)
     except KeyboardInterrupt:
         if rclpy.ok(): n.finish("interrupted")

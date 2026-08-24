@@ -32,7 +32,7 @@ def _load_local_cubic_spline_2d():
 
 CubicSpline2D = _load_local_cubic_spline_2d()
 
-MAP_NAME = "map2"
+MAP_NAME = "ifac2026"
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CENTERLINE = Path(f"{ROOT}/data/{MAP_NAME}/centerline.csv")
 DEFAULT_WIDTH_PROFILE = Path(f"{ROOT}/data/{MAP_NAME}/width_profile.csv")

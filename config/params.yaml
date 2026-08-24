@@ -37,12 +37,12 @@
     max_speed: 12.0  # IFAC2026 measured collision-free: 13.86 s/lap
 
     # --- Costs (최적화 결과 반영) ---
-    q_v: 16.0 # vs 크기에 비례해서 
+    q_v: 1.0 # vs 크기에 비례해서 
     q_dist: 0.0             # legacy Euclidean path cost (MPCC에서는 0 유지)
-    q_contour: 1.5          # raceline은 강제 경로가 아닌 out-in-out 유도선으로 사용
-    q_lag: 0.1              # raceline 접선방향 오차는 최소한으로만 억제
+    q_contour: 0.0          # raceline은 강제 경로가 아닌 out-in-out 유도선으로 사용
+    q_lag: 0.0              # raceline 접선방향 오차는 최소한으로만 억제
     q_heading: 1.0          # 역주행/불안정 억제를 위한 약한 방향 regularization만 유지
-    q_error_speed: 20.0     # preserve straight speed; reduce speed only while pose error grows
+    q_error_speed: 0.0     # preserve straight speed; reduce speed only while pose error grows
     q_du: 0.12
     q_steer: 0.0
     q_lat_g: 200.0 # strongly reject combined-grip excess without lowering max_speed
@@ -92,11 +92,11 @@
     # car_radius 진입 전부터 회피를 준비해 속도/조향의 급격한 변화를 막는다.
     obstacle_soft_margin: 0.0  # soft cost 시작 반경 = car_radius + 1.0 m
     # s=max(0, car_radius+margin-distance), cost=q_obs*s^2
-    q_obs: 15000.0
+    q_obs: 10000.0
     
     # --- Noise & Tuning ---
-    noise_steer_std: 0.5    # rad/s
-    noise_accel_std: 5.0     # speed-command exploration rate [m/s^2]
+    noise_steer_std: 0.25    # rad/s
+    noise_accel_std: 0.5     # speed-command exploration rate [m/s^2]
     max_steer_rate: 50.0    # rad/s
     # Input slew rate: m/s^2 for direct-speed models, m/s^3 for acceleration-command models.
     # Direct-speed command slew limit [m/s^2]. At the 50 Hz controller tick,

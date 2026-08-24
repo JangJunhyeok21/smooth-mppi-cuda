@@ -1,0 +1,22 @@
+{
+  "contract": "MDN_SLCMPC_Frenet_recursive_speed",
+  "include_speed_feature": true,
+  "input_dim": 72,
+  "dt": 0.04,
+  "horizon": 60,
+  "history": 6,
+  "data_dir": "/home/a/smooth-mppi-cuda/model_tuning/data/simulator_mppi_mdn_ifac2026",
+  "track_csv": "/home/a/smooth-mppi-cuda/data/ifac2026/ifac2026_mppi_track_optimal.csv",
+  "test_bag": "episode_002.npz",
+  "pose_noise_augmentation": {
+    "std_m": 0.05,
+    "max_abs_per_axis_m": 0.1,
+    "noisy_copies_per_clean_sample": 2
+  },
+  "metrics": {
+    "ds_rmse": 0.017274782061576843,
+    "d_rmse": 0.0054718004539608955,
+    "yaw_rmse": 0.010600065812468529,
+    "speed_rmse": 0.10890321433544159
+  }
+}

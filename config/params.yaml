@@ -92,7 +92,7 @@
     # car_radius 진입 전부터 회피를 준비해 속도/조향의 급격한 변화를 막는다.
     obstacle_soft_margin: 0.0  # soft cost 시작 반경 = car_radius + 1.0 m
     # s=max(0, car_radius+margin-distance), cost=q_obs*s^2
-    q_obs: 5000.0
+    q_obs: 15000.0
     
     # --- Noise & Tuning ---
     noise_steer_std: 0.5    # rad/s

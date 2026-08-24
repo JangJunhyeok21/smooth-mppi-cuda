@@ -2,7 +2,7 @@
   ros__parameters:
     # 사용 모델: dynamic_mlp_residual_servo_lag 또는 DYNAMIC_SERVO_LAG
     # MLP 모델만 아래 학습 가중치를 읽고, Classic 모델은 이 파일을 읽지 않는다.
-    dynamics_model: DYNAMIC_SERVO_LAG
+    dynamics_model: dynamic_mlp_residual_servo_lag
     dynamic_mlp_servo_lag_weights_path: config/dynamic_40ms_residual_servo_lag.bin
     # MLP 보정 출력만 제한한다. 센서값과 최종 state에는 적용하지 않는다.
     mlp_max_residual_ax: 0.0          # [m/s^2]
@@ -32,7 +32,7 @@
     max_steer: 0.4788        # rad
     # 현재 배포 모델의 학습 계약. ±4 후보는 tail 평가 미통과로 아직 배포하지 않는다.
     min_accel: -9.0          # m/s^2
-    max_accel: 9.0           # m/s^2
+    max_accel: 10.0          # match the simulator plant; max_speed stays opponent-specific
     min_speed: 0.5
     max_speed: 2.0  # 허용하는 최고속도
 
@@ -127,7 +127,7 @@
     kinematic_position_speed_scale: 1.0  # offline state is physical ground-relative body velocity
     kinematic_no_slip: true               # residual checkpoint 학습 조건(beta=0)
     # vx_cmd 추종 회귀값: 종방향 residual 없이 실제 바퀴속도 응답을 재현
-    speed_servo_kp: 31.0919997  # bag/session-disjoint vx rollout regression
+    speed_servo_kp: 10.3739069  # same longitudinal plant as simulator/ego
     # r_kin=vx*tan(delta)/L is a target, not an instantaneous yaw-rate assignment.
     kinematic_yaw_rate_time_constant: 0.1
     kinematic_max_yaw_accel: 15.0
@@ -135,9 +135,9 @@
     # Servo specification: 60 deg / 0.16 s = 6.5449847 rad/s.
     actuator_max_steer_rate: 6.544984694978735 # 제조사 spec: 60 deg / 0.16 s = 6.5449847 rad/s
     # all6_seed31 검증 조합: 1.2 s yaw-rate MAE/p95가 회귀 후보보다 우수함.
-    speed_reference_accel_time_constant: 0.106283219  # bag/session-disjoint vx rollout regression
-    speed_reference_brake_time_constant: 0.117442196  # bag/session-disjoint vx rollout regression
-    actuator_max_speed_reference_rate: 5.89577526
+    speed_reference_accel_time_constant: 0.0358766486
+    speed_reference_brake_time_constant: 0.112208409
+    actuator_max_speed_reference_rate: 10.0
     I_z: 0.04712
     Cm0: 0.04                # 고속 감쇠용 모터 역기전력 계수
     
@@ -164,15 +164,15 @@
     E_r: 0.0597
 
     # 0807 dynamic regression; used only by dynamic_mlp_residual.
-    dynamic_mlp_B_f: 4.16766713
-    dynamic_mlp_C_f: 0.0965687874
-    dynamic_mlp_D_f: 3.49991551
-    dynamic_mlp_E_f: -10.0
-    dynamic_mlp_B_r: 6.18341084
-    dynamic_mlp_C_r: 0.184955889
-    dynamic_mlp_D_r: 1.76127063
-    dynamic_mlp_E_r: -3.23353467
-    dynamic_mlp_I_z: 0.06362626658698842
+    dynamic_mlp_B_f: 2.8106457835009238
+    dynamic_mlp_C_f: 0.775431537087077
+    dynamic_mlp_D_f: 0.9220400888696738
+    dynamic_mlp_E_f: -4.92271228377628
+    dynamic_mlp_B_r: 3.1366228633512927
+    dynamic_mlp_C_r: 0.33160175643604217
+    dynamic_mlp_D_r: 2.4363987954512116
+    dynamic_mlp_E_r: -10.0
+    dynamic_mlp_I_z: 0.09059291359052173
 
     # --- Runtime environment and topics ---
     # Required CSV columns: x_m, y_m, w_tr_left_m, w_tr_right_m.

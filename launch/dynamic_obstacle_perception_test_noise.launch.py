@@ -1,4 +1,4 @@
-"""Map2 F1stateArr integration test with noisy dynamic-object pose."""
+"""IFAC2026 F1stateArr integration test with noisy dynamic-object pose."""
 import os
 
 from ament_index_python.packages import get_package_share_directory
@@ -21,5 +21,6 @@ def generate_launch_description():
                 "input_pose_noise_std_m":LaunchConfiguration("input_pose_noise_std_m"),
                 "input_pose_noise_max_m":LaunchConfiguration("input_pose_noise_max_m"),
                 "input_pose_noise_seed":LaunchConfiguration("input_pose_noise_seed"),
+                "track_csv":"data/ifac2026/ifac2026_mppi_track_optimal.csv",
             }.items()),
     ])

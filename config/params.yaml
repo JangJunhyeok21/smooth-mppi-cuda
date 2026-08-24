@@ -63,7 +63,7 @@
     # Boundary violation remains finite/selectable; only physical obstacles
     # retain post-rollout hard candidate rejection.
     collision_radius: 0.3       # planning clearance; absorb model/servo mismatch before wall contact
-    q_boundary_slack: 20000.0
+    q_boundary_slack: 10000.0
     q_boundary_terminal_slack: 50000.0
     # LMPC와 같은 terminal safe set: 최근 2개 완주 lap에서 진행도 주변 20점씩 사용.
     # 목적함수 전환: mpcc=contour/progress, lmpc=terminal safe-set/cost-to-go.

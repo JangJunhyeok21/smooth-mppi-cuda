@@ -1,4 +1,4 @@
-"""Map2 integration test using the real F1stateArr perception contract."""
+"""IFAC2026 integration test using the real F1stateArr perception contract."""
 
 import os
 import sys
@@ -76,13 +76,14 @@ def generate_launch_description():
                 share, "config", "dynamic_obstacle_predictor.yaml")),
         DeclareLaunchArgument(
             "track_csv",
-            default_value="data/map2/map2_mppi_track_optimal.csv"),
+            default_value="data/ifac2026/ifac2026_mppi_track_optimal.csv"),
         DeclareLaunchArgument("input_pose_noise_std_m", default_value="0.0"),
         DeclareLaunchArgument("input_pose_noise_max_m", default_value="0.10"),
         DeclareLaunchArgument("input_pose_noise_seed", default_value="20260824"),
-        DeclareLaunchArgument("static_x", default_value="1.2929498265693544"),
-        DeclareLaunchArgument("static_y", default_value="-2.148326999195452"),
-        DeclareLaunchArgument("static_yaw", default_value="2.140535854443902"),
+        # A point on the IFAC2026 optimal track, sufficiently far from spawn.
+        DeclareLaunchArgument("static_x", default_value="4.768191657687998"),
+        DeclareLaunchArgument("static_y", default_value="20.72259889846179"),
+        DeclareLaunchArgument("static_yaw", default_value="2.825987545488635"),
         # Use the exact same simulator + ego/opponent MPPI composition as the
         # normal overtaking launch.  Only replace predictor input with the
         # synthetic F1stateArr perception bridge below.

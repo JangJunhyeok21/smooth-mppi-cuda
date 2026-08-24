@@ -22,7 +22,7 @@ dynamic_obstacle_predictor:
     # Relative paths are resolved from the package share directory.
     use_speed_model_path: config/predictor/dynamic_obstacle_frenet_speed_mdn_pose_noise/frenet_mdn.onnx
     no_speed_model_path: config/predictor/dynamic_obstacle_frenet_mdn_pose_noise/frenet_mdn.onnx
-    track_csv: data/map2/map2_mppi_track_optimal.csv
+    track_csv: data/ifac2026/ifac2026_mppi_track_optimal.csv
 
     # |v| <= threshold: fixed-pose circular ellipse. |v| > threshold: MDN.
     dynamic_speed_threshold: 1.0

@@ -32,7 +32,7 @@ def generate_launch_description():
         DeclareLaunchArgument("input_pose_noise_seed", default_value="20260824"),
         DeclareLaunchArgument(
             "track_csv",
-            default_value="data/map2/map2_mppi_track_optimal.csv",
+            default_value="data/ifac2026/ifac2026_mppi_track_optimal.csv",
             description="Package-relative MPPI and predictor track CSV"),
         IncludeLaunchDescription(PythonLaunchDescriptionSource(
             os.path.join(get_package_share_directory("f1tenth_gym_ros"), "launch", "gym_bridge_launch.py"))),

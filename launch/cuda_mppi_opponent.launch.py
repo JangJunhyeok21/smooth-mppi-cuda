@@ -24,7 +24,7 @@ def generate_launch_description():
             'opponent_param_file', default_value=default_params,
             description='Opponent-only MPPI parameter file'),
         DeclareLaunchArgument(
-            'track_csv', default_value='data/map2/map2_mppi_track_optimal.csv',
+            'track_csv', default_value='data/ifac2026/ifac2026_mppi_track_optimal.csv',
             description='Package-relative opponent track CSV'),
         Node(
             package='smppi_cuda_controller', executable='smppi_node',

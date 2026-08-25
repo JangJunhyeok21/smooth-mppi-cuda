@@ -74,7 +74,7 @@ def parse_args() -> argparse.Namespace:
                         default=ROOT / f"model_tuning/results/{MAP_NAME}_raceline.png")
     parser.add_argument("--alpha-racer-root", type=Path, default=Path(
         "/home/a/alpha-RACER/global_racetrajectory_optimization"))
-    parser.add_argument("--vehicle-width", type=float, default=1.20,
+    parser.add_argument("--vehicle-width", type=float, default=1.25,
                         help="경계 최적화에 사용하는 차량 폭 [m]")
     parser.add_argument("--curvature-limit", type=float, default=8.0,
                         help="raceline 곡률 상한 [1/m]")

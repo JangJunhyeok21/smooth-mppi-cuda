@@ -14,7 +14,7 @@ import classic_model_regression as regression
 ROOT = Path(__file__).resolve().parents[2]
 # 변경사항
 DATA_PATH = ROOT / "model_tuning/data/ifac2026_collision_refined_current_kf_gt"
-YAML_EVALUATION_MODE = True # os.environ.get("STEP3_YAML_EVALUATION_MODE", "0") != "0"
+YAML_EVALUATION_MODE = False # os.environ.get("STEP3_YAML_EVALUATION_MODE", "0") != "0"
 REGRESSION_METHODS = ("de_robust_ls",) # adam, de_robust_ls, mlp_surrogate
 
 OUTPUT_DIR = Path(os.environ.get("DYNAMIC_REGRESSION_OUT",
@@ -59,10 +59,10 @@ GT_CONSISTENCY_MODE = "adjust_states_to_pose"  # "adjust_pose_to_states", "adjus
 # Open-loop optimization/model-selection weights. Increase POSITION_LOSS_WEIGHT
 # when MPPI path placement is more important than matching individual states.
 VX_LOSS_WEIGHT = 0.0
-VY_LOSS_WEIGHT = 0.1
-YAW_RATE_LOSS_WEIGHT = 0.4
+VY_LOSS_WEIGHT = 0.0
+YAW_RATE_LOSS_WEIGHT = 3.0
 POSITION_LOSS_WEIGHT = 8.0
-YAW_TRAJECTORY_LOSS_WEIGHT = 5.5
+YAW_TRAJECTORY_LOSS_WEIGHT = 10.5
 
 # Smoothing used only by "adjust_states_to_pose" before pose differentiation.
 VY_POSE_DERIVATIVE_SMOOTH_WINDOW_S = 0.20
@@ -74,11 +74,11 @@ LOAD_TRANSFER_H_CG_M = float(os.environ.get("LOAD_TRANSFER_H_CG_M","0.0"))
 PACEJKA_B_F_BOUNDS = (0.2, 30.0)
 PACEJKA_C_F_BOUNDS = (0.0, 2.5)
 PACEJKA_D_F_BOUNDS = (0.05, 3.5)
-PACEJKA_E_F_BOUNDS = (-2.0, 1.0)
+PACEJKA_E_F_BOUNDS = (-100000.0, 1.0)
 PACEJKA_B_R_BOUNDS = (0.2, 30.0)
 PACEJKA_C_R_BOUNDS = (0.0, 2.5)
 PACEJKA_D_R_BOUNDS = (0.05, 3.5)
-PACEJKA_E_R_BOUNDS = (-2.0, 1.0)
+PACEJKA_E_R_BOUNDS = (-100000.0, 1.0)
 YAW_INERTIA_MIN = 0.005
 YAW_INERTIA_MAX = 0.5
 

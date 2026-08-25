@@ -29,7 +29,7 @@ NEW_DATA_ROOTS = (
     # Path("/mnt/nas_custom/F1tenth/2026 IFAC/0817 (1)"),
     # Path("/mnt/nas_custom/F1tenth/2026 IFAC/0818"),
     # Path("/mnt/nas_custom/F1tenth/2026 IFAC/0819"),
-    Path("/mnt/nas_custom/F1tenth/2026 IFAC/ifac2026"),
+    # Path("/mnt/nas_custom/F1tenth/2026 IFAC/ifac2026"),
     Path("/mnt/nas_custom/F1tenth/2026 IFAC/ifac2026_pratice_3th/"),
 )
 # Keep F5 configuration robust when a single Path is assigned without tuple

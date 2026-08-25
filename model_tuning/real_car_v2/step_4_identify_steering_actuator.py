@@ -29,11 +29,11 @@ POSE_DERIVATIVE_SMOOTH_WINDOW_S = 0.20
 
 # Step 4 open-loop loss/model-selection weights. These are independent user
 # settings, but normally should match Step 3 for a consistent deployment gate.
-VX_LOSS_WEIGHT = 0.1
+VX_LOSS_WEIGHT = 0.0
 VY_LOSS_WEIGHT = 0.1
-YAW_RATE_LOSS_WEIGHT = 1.5
+YAW_RATE_LOSS_WEIGHT = 2.5
 POSITION_LOSS_WEIGHT = 8.0
-YAW_TRAJECTORY_LOSS_WEIGHT = 5.5
+YAW_TRAJECTORY_LOSS_WEIGHT = 10.5
 
 
 def main():

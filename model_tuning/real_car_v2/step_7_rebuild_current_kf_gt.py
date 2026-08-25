@@ -1,16 +1,20 @@
 #!/usr/bin/env python3
-"""Step 7: clone manually trimmed Step-1 archives and rebuild current-KF GT.
+"""Step 7: extract configured bags, retain trims, and rebuild current-KF GT.
 
-No rosbag is read and no trim decision is recomputed.  Every selected NPZ and
-its JSON metadata are copied first; only the KF/Pacejka-derived columns in the
-copy are refreshed from config/params.yaml.  Step 6 then interpolates these
-refreshed ``samples`` columns at callback timestamps to construct recursive GT.
+By default Step 1 is first run over every bag found below ``RAW_BAG_ROOTS``.
+Existing manual trim intervals are reapplied when a matching NPZ exists; new
+bags enter Step 1's interactive trim workflow.  The selected NPZs are then
+collision-refined and their KF/Pacejka-derived columns are refreshed from
+config/params.yaml.  Step 6 interpolates these refreshed ``samples`` columns at
+callback timestamps to construct recursive GT.
 """
 from __future__ import annotations
 
 import argparse
 import json
 import shutil
+import subprocess
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -23,12 +27,63 @@ from step_1_extract_data import collision_review_mask, refresh_saved_kf_from_yam
 ROOT = Path(__file__).resolve().parents[2]
 
 # User-configurable defaults.  The source is never modified.
+RAW_BAG_ROOTS = (
+    Path("/mnt/nas_custom/F1tenth/2026 IFAC/ifac2026"),
+    Path("/mnt/nas_custom/F1tenth/2026 IFAC/ifac2026_pratice_3th"),
+)
+# F5/direct-execution defaults. These are equivalent to passing
+# --no-extract-raw-bags and --overwrite on the command line.
+EXTRACT_RAW_BAGS = False # False일 경우 기존 Step-1 NPZ를 그대로 사용하고, True일 경우 RAW_BAG_ROOTS에서 새로 Step-1을 수행
 SOURCE_DATA_PATH = ROOT / "model_tuning/data/ifac2026"
 OUTPUT_DATA_PATH = ROOT / "model_tuning/data/ifac2026_collision_refined_current_kf_gt"
-OVERWRITE_OUTPUT = False
+OVERWRITE_OUTPUT = True
 REFINE_COLLISIONS_AND_SPLIT = True
 # A retained piece must support actuator warm-up plus a full 1.6 s rollout.
 MINIMUM_SEGMENT_DURATION_S = 2.5
+
+
+def discover_raw_bags(roots: tuple[Path, ...]) -> list[Path]:
+    """Discover every rosbag2 directory below all configured roots."""
+    bags: set[Path] = set()
+    missing = []
+    for root in roots:
+        root = root.expanduser()
+        if not root.is_dir():
+            missing.append(str(root))
+            continue
+        bags.update(metadata.parent.resolve()
+                    for metadata in root.rglob("metadata.yaml"))
+    if missing:
+        raise RuntimeError("raw bag roots do not exist: " + ", ".join(missing))
+    result = sorted(bags)
+    if not result:
+        raise RuntimeError(
+            "no rosbag2 metadata.yaml found below: " +
+            ", ".join(str(root) for root in roots))
+    return result
+
+
+def run_step1_for_raw_bags(roots: tuple[Path, ...], output: Path) -> int:
+    """Run Step 1 once with the union of bags from every configured root."""
+    bags = discover_raw_bags(roots)
+    root_counts = {
+        str(root): sum(1 for bag in bags
+                       if bag.is_relative_to(root.expanduser().resolve()))
+        for root in roots
+    }
+    print("Step 7 raw-bag inputs:")
+    for root, count in root_counts.items():
+        print(f"  {root}: {count} bags")
+    command = [
+        sys.executable,
+        str(Path(__file__).with_name("step_1_extract_data.py")),
+        *map(str, bags),
+        "--output", str(output),
+        "--no-review-saved-collisions",
+        "--preserve-existing-trim",
+    ]
+    subprocess.run(command, cwd=ROOT, check=True)
+    return len(bags)
 
 
 def archive_signature(path: Path) -> dict:
@@ -231,7 +286,19 @@ def main() -> None:
     parser.add_argument("--source", type=Path, default=SOURCE_DATA_PATH)
     parser.add_argument("--output", type=Path, default=OUTPUT_DATA_PATH)
     parser.add_argument("--overwrite", action="store_true", default=OVERWRITE_OUTPUT)
+    parser.add_argument(
+        "--raw-root", type=Path, action="append", default=None,
+        help=("rosbag root to pass through Step 1; repeat for multiple roots "
+              "(default: RAW_BAG_ROOTS)"))
+    parser.add_argument(
+        "--extract-raw-bags", action=argparse.BooleanOptionalAction,
+        default=EXTRACT_RAW_BAGS,
+        help=("run Step 1 over the union of all raw roots before rebuilding "
+              "the current-KF dataset"))
     args = parser.parse_args()
+    raw_roots = tuple(args.raw_root) if args.raw_root else RAW_BAG_ROOTS
+    if args.extract_raw_bags:
+        run_step1_for_raw_bags(raw_roots, args.source)
     build(args.source, args.output, args.overwrite)
 
 

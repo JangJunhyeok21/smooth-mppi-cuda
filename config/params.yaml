@@ -164,14 +164,14 @@
     E_r: 0.0597
 
     # 0807 dynamic regression; used only by dynamic_mlp_residual.
-    dynamic_mlp_B_f: 4.6831638515901375
-    dynamic_mlp_C_f: 0.27946503463774897
-    dynamic_mlp_D_f: 1.7695749799699274
-    dynamic_mlp_E_f: -1.9993252777945043
-    dynamic_mlp_B_r: 4.363806277953832
-    dynamic_mlp_C_r: 0.7652213211298782
-    dynamic_mlp_D_r: 1.4379688568401385
-    dynamic_mlp_E_r: 0.999999757857285
+    dynamic_mlp_B_f: 0.3366075474431282
+    dynamic_mlp_C_f: 0.6356924636110722
+    dynamic_mlp_D_f: 1.0411165641262696
+    dynamic_mlp_E_f: -14231.435412582694
+    dynamic_mlp_B_r: 0.8670431599215196
+    dynamic_mlp_C_r: 1.078260951127556
+    dynamic_mlp_D_r: 1.3367398542655606
+    dynamic_mlp_E_r: -5504.52844896071
     dynamic_mlp_I_z: 0.09059291359052173
 
     # --- Runtime environment and topics ---

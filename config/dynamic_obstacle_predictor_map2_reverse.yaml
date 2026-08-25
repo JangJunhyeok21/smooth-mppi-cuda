@@ -6,6 +6,7 @@ dynamic_obstacle_predictor:
     enable_clicked_point_static_obstacle: true
     clicked_point_topic: /clicked_point
     clicked_point_static_obstacle_lifetime_s: 5.0
+    max_clicked_point_static_obstacles: 1
 
     output_topic: /mppi/dynamic_obstacle_trajectory
     marker_topic: /mppi/dynamic_obstacle_prediction_markers

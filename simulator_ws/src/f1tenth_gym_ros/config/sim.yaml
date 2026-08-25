@@ -123,8 +123,8 @@ bridge:
     # /ego_racecar/odom remains ground truth. Noise is published separately on
     # /ego_racecar/odom_noise for ego MPPI only. Simulator physics, collision
     # checks, opponent odometry and map->base_link TF remain noise-free.
-    ego_pose_noise_std_m: 0.05
-    ego_pose_noise_max_m: 0.10
+    ego_pose_noise_std_m: 0.2
+    ego_pose_noise_max_m: 0.15
     ego_pose_yaw_noise_std_rad: 0.0
     ego_pose_yaw_noise_max_rad: 0.0
     ego_pose_noise_seed: 20260825

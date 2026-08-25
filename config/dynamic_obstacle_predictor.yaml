@@ -11,10 +11,13 @@ dynamic_obstacle_predictor:
     input_pose_noise_max_m: 0.10
     input_pose_noise_seed: 20260824
     # RViz Publish Point (/clicked_point) becomes a temporary static circular
-    # obstacle. A new click replaces it and restarts this lifetime.
+    # obstacle. Each click adds a new obstacle (up to
+    # max_clicked_point_static_obstacles, oldest evicted first) with its own
+    # lifetime.
     enable_clicked_point_static_obstacle: true
     clicked_point_topic: /clicked_point
-    clicked_point_static_obstacle_lifetime_s: 5.0
+    clicked_point_static_obstacle_lifetime_s: 50.0
+    max_clicked_point_static_obstacles: 4
 
     output_topic: /mppi/dynamic_obstacle_trajectory
     marker_topic: /mppi/dynamic_obstacle_prediction_markers

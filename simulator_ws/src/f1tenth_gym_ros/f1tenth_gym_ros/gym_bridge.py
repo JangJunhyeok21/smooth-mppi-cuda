@@ -75,6 +75,9 @@ class GymBridge(Node):
 
         self.declare_parameter('ego_namespace')
         self.declare_parameter('ego_odom_topic')
+        self.declare_parameter('ego_noisy_odom_topic', 'odom_noise')
+        self.declare_parameter('ego_noisy_odom_marker_topic', 'odom_noise_marker')
+        self.declare_parameter('ego_noisy_odom_marker_lifetime_s', 0.2)
         self.declare_parameter('ego_opp_odom_topic')
         self.declare_parameter('ego_scan_topic')
         self.declare_parameter('ego_drive_topic')
@@ -92,6 +95,11 @@ class GymBridge(Node):
         self.declare_parameter('sx')
         self.declare_parameter('sy')
         self.declare_parameter('stheta')
+        self.declare_parameter('ego_pose_noise_std_m', 0.0)
+        self.declare_parameter('ego_pose_noise_max_m', 0.0)
+        self.declare_parameter('ego_pose_yaw_noise_std_rad', 0.0)
+        self.declare_parameter('ego_pose_yaw_noise_max_rad', 0.0)
+        self.declare_parameter('ego_pose_noise_seed', 20260825)
         self.declare_parameter('initial_speed', 0.0)
         self.declare_parameter('sx1')
         self.declare_parameter('sy1')
@@ -305,6 +313,30 @@ class GymBridge(Node):
         sy = self.get_parameter('sy').value
         stheta = self.get_parameter('stheta').value
         self.ego_pose = [sx, sy, stheta]
+        self.ego_pose_noise_std_m = float(
+            self.get_parameter('ego_pose_noise_std_m').value)
+        self.ego_pose_noise_max_m = float(
+            self.get_parameter('ego_pose_noise_max_m').value)
+        self.ego_pose_yaw_noise_std_rad = float(
+            self.get_parameter('ego_pose_yaw_noise_std_rad').value)
+        self.ego_pose_yaw_noise_max_rad = float(
+            self.get_parameter('ego_pose_yaw_noise_max_rad').value)
+        if min(self.ego_pose_noise_std_m, self.ego_pose_noise_max_m,
+               self.ego_pose_yaw_noise_std_rad,
+               self.ego_pose_yaw_noise_max_rad) < 0.0:
+            raise ValueError('ego pose noise parameters must be non-negative')
+        self.ego_pose_noise_rng = np.random.default_rng(
+            int(self.get_parameter('ego_pose_noise_seed').value))
+        self.ego_observed_pose = list(self.ego_pose)
+        self._sample_ego_observed_pose()
+        self.get_logger().info(
+            'Ego odometry pose noise: xy std=%.3f m max=%.3f m, '
+            'yaw std=%.4f rad max=%.4f rad, seed=%d' % (
+                self.ego_pose_noise_std_m,
+                self.ego_pose_noise_max_m,
+                self.ego_pose_yaw_noise_std_rad,
+                self.ego_pose_yaw_noise_max_rad,
+                int(self.get_parameter('ego_pose_noise_seed').value)))
         self.ego_speed = [0.0, 0.0, 0.0]
         self.ego_requested_speed = 0.0
         self.ego_requested_accel = 0.0
@@ -319,6 +351,14 @@ class GymBridge(Node):
         self.angle_inc = scan_fov / scan_beams
         self.ego_namespace = self.get_parameter('ego_namespace').value
         ego_odom_topic = self.ego_namespace + '/' + self.get_parameter('ego_odom_topic').value
+        ego_noisy_odom_topic = (self.ego_namespace + '/' +
+            self.get_parameter('ego_noisy_odom_topic').value)
+        ego_noisy_odom_marker_topic = (self.ego_namespace + '/' +
+            self.get_parameter('ego_noisy_odom_marker_topic').value)
+        self.ego_noisy_odom_marker_lifetime_s = float(
+            self.get_parameter('ego_noisy_odom_marker_lifetime_s').value)
+        if self.ego_noisy_odom_marker_lifetime_s < 0.0:
+            raise ValueError('ego_noisy_odom_marker_lifetime_s must be non-negative')
         self.scan_distance_to_base_link = self.get_parameter('scan_distance_to_base_link').value
 
         if num_agents == 2:
@@ -404,6 +444,10 @@ class GymBridge(Node):
         # publishers
         self.ego_scan_pub = self.create_publisher(LaserScan, ego_scan_topic, 1)
         self.ego_odom_pub = self.create_publisher(Odometry, ego_odom_topic, 1)
+        self.ego_noisy_odom_pub = self.create_publisher(
+            Odometry, ego_noisy_odom_topic, 1)
+        self.ego_noisy_odom_marker_pub = self.create_publisher(
+            Marker, ego_noisy_odom_marker_topic, 1)
         self.ego_imu_pub = self.create_publisher(Imu, '/imu/data', 10)
         self.collision_pub = self.create_publisher(Bool, '/collision0', 1)
         self.ego_drive_published = False
@@ -763,9 +807,33 @@ class GymBridge(Node):
         self.ego_pose[0] =  float(self.obs['poses_x'][0])
         self.ego_pose[1] =  float(self.obs['poses_y'][0])
         self.ego_pose[2] =  float(self.obs['poses_theta'][0])
+        self._sample_ego_observed_pose()
         self.ego_speed[0] = float(self.obs['linear_vels_x'][0])
         self.ego_speed[1] = float(self.obs['linear_vels_y'][0])
         self.ego_speed[2] = float(self.obs['ang_vels_z'][0])
+
+    def _sample_ego_observed_pose(self):
+        """Sample odometry-only localization noise without changing physics."""
+        observed = list(self.ego_pose)
+        if self.ego_pose_noise_std_m > 0.0 and self.ego_pose_noise_max_m > 0.0:
+            xy_noise = np.clip(
+                self.ego_pose_noise_rng.normal(
+                    0.0, self.ego_pose_noise_std_m, size=2),
+                -self.ego_pose_noise_max_m,
+                self.ego_pose_noise_max_m)
+            observed[0] += float(xy_noise[0])
+            observed[1] += float(xy_noise[1])
+        if (self.ego_pose_yaw_noise_std_rad > 0.0 and
+                self.ego_pose_yaw_noise_max_rad > 0.0):
+            yaw_noise = float(np.clip(
+                self.ego_pose_noise_rng.normal(
+                    0.0, self.ego_pose_yaw_noise_std_rad),
+                -self.ego_pose_yaw_noise_max_rad,
+                self.ego_pose_yaw_noise_max_rad))
+            observed[2] = math.atan2(
+                math.sin(observed[2] + yaw_noise),
+                math.cos(observed[2] + yaw_noise))
+        self.ego_observed_pose = observed
 
     def _publish_collision_flag(self, collision_flag):
 
@@ -790,6 +858,46 @@ class GymBridge(Node):
         ego_odom.twist.twist.linear.y = self.ego_speed[1]
         ego_odom.twist.twist.angular.z = self.ego_speed[2]
         self.ego_odom_pub.publish(ego_odom)
+
+        # Publish a separate noisy localization observation for ego MPPI.
+        # The canonical simulator odometry above remains exact ground truth.
+        ego_noisy_odom = Odometry()
+        ego_noisy_odom.header.stamp = ts
+        ego_noisy_odom.header.frame_id = 'map'
+        ego_noisy_odom.child_frame_id = self.ego_namespace + '/base_link'
+        ego_noisy_odom.pose.pose.position.x = self.ego_observed_pose[0]
+        ego_noisy_odom.pose.pose.position.y = self.ego_observed_pose[1]
+        noisy_quat = quaternion_from_yaw(self.ego_observed_pose[2])
+        ego_noisy_odom.pose.pose.orientation.x = noisy_quat[1]
+        ego_noisy_odom.pose.pose.orientation.y = noisy_quat[2]
+        ego_noisy_odom.pose.pose.orientation.z = noisy_quat[3]
+        ego_noisy_odom.pose.pose.orientation.w = noisy_quat[0]
+        ego_noisy_odom.twist.twist.linear.x = self.ego_speed[0]
+        ego_noisy_odom.twist.twist.linear.y = self.ego_speed[1]
+        ego_noisy_odom.twist.twist.angular.z = self.ego_speed[2]
+        self.ego_noisy_odom_pub.publish(ego_noisy_odom)
+
+        # Odometry has no lifetime field. Publish the same noisy pose as an
+        # RViz marker so its persistence can be configured from sim.yaml.
+        noisy_marker = Marker()
+        noisy_marker.header.stamp = ts
+        noisy_marker.header.frame_id = 'map'
+        noisy_marker.ns = 'ego_odom_noise'
+        noisy_marker.id = 0
+        noisy_marker.type = Marker.ARROW
+        noisy_marker.action = Marker.ADD
+        noisy_marker.pose = ego_noisy_odom.pose.pose
+        noisy_marker.scale.x = 0.35
+        noisy_marker.scale.y = 0.08
+        noisy_marker.scale.z = 0.08
+        noisy_marker.color.r = 1.0
+        noisy_marker.color.g = 0.2
+        noisy_marker.color.b = 0.1
+        noisy_marker.color.a = 0.9
+        lifetime_ns = int(round(self.ego_noisy_odom_marker_lifetime_s * 1.0e9))
+        noisy_marker.lifetime.sec = lifetime_ns // 1_000_000_000
+        noisy_marker.lifetime.nanosec = lifetime_ns % 1_000_000_000
+        self.ego_noisy_odom_marker_pub.publish(noisy_marker)
 
         if self.has_opp:
             opp_odom = Odometry()

@@ -155,10 +155,13 @@ private:
 
         if (obstacle_avoidance_enabled_) {
             RCLCPP_INFO(
-                this->get_logger(), "Obstacle input: %s",
+                this->get_logger(), "Obstacle input: %s%s",
                 dynamic_obstacle_prediction_enabled_
                     ? dynamic_obstacle_trajectory_topic_.c_str()
-                    : "disabled (predictor required)");
+                    : "disabled (predictor required)",
+                dynamic_obstacle_prediction_enabled_ &&
+                        predictor_static_obstacles_only_
+                    ? " [static entries only]" : "");
         } else {
             RCLCPP_INFO(this->get_logger(), "Obstacle input: disabled");
         }
@@ -185,6 +188,15 @@ private:
         smppi_cuda_controller::msg::DynamicObstacleTrajectory::SharedPtr msg) {
         const int horizon = static_cast<int>(msg->horizon);
         const int obstacle_count = static_cast<int>(msg->obstacle_ids.size());
+        // An empty predictor message explicitly clears a just-expired
+        // clicked-point obstacle instead of waiting for the stale timeout.
+        if (obstacle_count == 0) {
+            solver_->set_dynamic_obstacles({}, {}, {}, {}, {}, {}, 0, 0);
+            dynamic_obstacle_active_ = false;
+            dynamic_obstacle_count_ = 0;
+            dynamic_obstacle_horizon_ = 0;
+            return;
+        }
         std::size_t expected = 0;
         if (msg->is_dynamic.size() == static_cast<std::size_t>(obstacle_count)) {
             for (const bool is_dynamic : msg->is_dynamic) {
@@ -222,9 +234,16 @@ private:
         dynamic_obs_semi_major_.reserve(expanded_size);
         dynamic_obs_semi_minor_.clear();
         dynamic_obs_semi_minor_.reserve(expanded_size);
+        dynamic_obs_is_dynamic_.clear();
+        dynamic_obs_is_dynamic_.reserve(obstacle_count);
         std::size_t packed_index = 0;
+        int selected_obstacle_count = 0;
         for (int obstacle = 0; obstacle < obstacle_count; ++obstacle) {
             const int packed_points = msg->is_dynamic[obstacle] ? horizon : 1;
+            if (predictor_static_obstacles_only_ && msg->is_dynamic[obstacle]) {
+                packed_index += static_cast<std::size_t>(packed_points);
+                continue;
+            }
             for (int step = 0; step < horizon; ++step) {
                 const std::size_t source = packed_index +
                     (msg->is_dynamic[obstacle] ? step : 0);
@@ -234,14 +253,22 @@ private:
                 dynamic_obs_semi_major_.push_back(msg->semi_major[source]);
                 dynamic_obs_semi_minor_.push_back(msg->semi_minor[source]);
             }
+            dynamic_obs_is_dynamic_.push_back(msg->is_dynamic[obstacle]);
+            ++selected_obstacle_count;
             packed_index += static_cast<std::size_t>(packed_points);
         }
-        dynamic_obs_is_dynamic_ = msg->is_dynamic;
-        dynamic_obstacle_count_ = obstacle_count;
+        if (selected_obstacle_count == 0) {
+            solver_->set_dynamic_obstacles({}, {}, {}, {}, {}, {}, 0, 0);
+            dynamic_obstacle_active_ = false;
+            dynamic_obstacle_count_ = 0;
+            dynamic_obstacle_horizon_ = 0;
+            return;
+        }
+        dynamic_obstacle_count_ = selected_obstacle_count;
         dynamic_obstacle_horizon_ = horizon;
         solver_->set_dynamic_obstacles(dynamic_obs_x_, dynamic_obs_y_,
             dynamic_obs_yaw_, dynamic_obs_semi_major_, dynamic_obs_semi_minor_,
-            dynamic_obs_is_dynamic_, obstacle_count, horizon);
+            dynamic_obs_is_dynamic_, selected_obstacle_count, horizon);
         dynamic_obstacle_stamp_ = this->now();
         dynamic_obstacle_active_ = true;
         // Do not charge the current-pose fallback in addition to its predicted
@@ -763,6 +790,9 @@ private:
         this->declare_parameter("dynamic_obstacle_prediction_enabled", false);
         dynamic_obstacle_prediction_enabled_ = this->get_parameter(
             "dynamic_obstacle_prediction_enabled").as_bool();
+        this->declare_parameter("predictor_static_obstacles_only", false);
+        predictor_static_obstacles_only_ = this->get_parameter(
+            "predictor_static_obstacles_only").as_bool();
         this->declare_parameter("dynamic_obstacle_trajectory_topic",
                                 "/mppi/dynamic_obstacle_trajectory");
         dynamic_obstacle_trajectory_topic_ = this->get_parameter(
@@ -1610,6 +1640,7 @@ private:
     bool publish_visualization_{false};
     bool obstacle_avoidance_enabled_{false};
     bool dynamic_obstacle_prediction_enabled_{false};
+    bool predictor_static_obstacles_only_{false};
     bool dynamic_obstacle_active_{false};
     int dynamic_obstacle_count_{0};
     int dynamic_obstacle_horizon_{0};

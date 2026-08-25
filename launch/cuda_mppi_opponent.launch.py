@@ -40,9 +40,10 @@ def generate_launch_description():
                 'visualization_topic': '/mppi_opponent_viz',
                 'optimal_trajectory_topic': '/mppi_opponent_optimal_trajectory',
                 'kf_state_topic': '/opp_kf_state',
-                # The shared predictor describes this opponent for ego MPPI;
-                # consuming it here would make mppi2 avoid itself.
-                'obstacle_avoidance_enabled': False,
-                'dynamic_obstacle_prediction_enabled': False,
+                # Consume only predictor entries marked static. The dynamic
+                # entry describes this opponent itself and must be discarded.
+                'obstacle_avoidance_enabled': True,
+                'dynamic_obstacle_prediction_enabled': True,
+                'predictor_static_obstacles_only': True,
             }]),
     ])

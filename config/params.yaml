@@ -83,6 +83,8 @@
     obstacle_avoidance_enabled: true
     # Separate predictor publishes obstacle-major poses at each 40 ms MPPI knot.
     dynamic_obstacle_prediction_enabled: true
+    # false: ego avoids both static objects and predicted dynamic trajectories.
+    predictor_static_obstacles_only: false
     dynamic_obstacle_trajectory_topic: /mppi/dynamic_obstacle_trajectory
     # MPPI receives obstacles exclusively from the separate predictor node.
     obstacle_timeout: 0.5
@@ -183,7 +185,7 @@
     # true : simulator pose + twist come from simulation_odom_topic
     # false: real_pose_topic supplies map pose and real_odom_topic supplies velocity
     is_simulation: true
-    simulation_odom_topic: /ego_racecar/odom
+    simulation_odom_topic: /ego_racecar/odom_noise
     simulation_drive_topic: /drive  # must match f1tenth_gym_ros sim.yaml ego_drive_topic
     real_pose_topic: /newmcl_pose
     real_odom_topic: /odom

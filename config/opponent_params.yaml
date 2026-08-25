@@ -80,10 +80,12 @@
     q_escape_vel: 0.0      # horizon 말단의 전진속도 보상
     horizon_steps: 40       # 40 * model_dt(0.04 s) = 1.6 s prediction horizon
     # --- Obstacle Avoidance Params ---
-    # The shared predictor predicts this opponent itself for the ego MPPI.
-    # Subscribing here would make mppi2 avoid its own predicted trajectory.
-    obstacle_avoidance_enabled: false
-    dynamic_obstacle_prediction_enabled: false
+    # Subscribe to the shared predictor, but discard dynamic trajectories so
+    # mppi2 does not avoid its own prediction. Clicked/perceived static objects
+    # (is_dynamic=false) are still included in the opponent obstacle cost.
+    obstacle_avoidance_enabled: true
+    dynamic_obstacle_prediction_enabled: true
+    predictor_static_obstacles_only: true
     dynamic_obstacle_trajectory_topic: /mppi/dynamic_obstacle_trajectory
     # MPPI receives obstacles exclusively from the separate predictor node.
     obstacle_timeout: 0.5

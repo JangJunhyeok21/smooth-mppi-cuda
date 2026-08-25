@@ -33,7 +33,6 @@ from geometry_msgs.msg import Twist
 from geometry_msgs.msg import TransformStamped
 from geometry_msgs.msg import Transform
 from geometry_msgs.msg import Quaternion
-from geometry_msgs.msg import PointStamped
 from ackermann_msgs.msg import AckermannDriveStamped
 from visualization_msgs.msg import Marker
 from tf2_ros import TransformBroadcaster
@@ -416,7 +415,6 @@ class GymBridge(Node):
             self.opp_ego_odom_pub = self.create_publisher(Odometry, opp_ego_odom_topic, 1)
             self.opp_drive_published = False
 
-        self.point_marker_pub = self.create_publisher(Marker, '/points', 10)
 
         if self.get_parameter('use_sim_time_bridge').value:
             self.get_logger().info('Using simulation time.')
@@ -453,13 +451,6 @@ class GymBridge(Node):
                 '/cmd_vel',
                 self.teleop_callback,
                 1)
-
-        self.points = []
-        self.point_sub = self.create_subscription(
-            PointStamped,
-            '/clicked_point',
-            self.point_callback,
-            10)
 
         self.sim_paused = False
         self.pause_subscriber = self.create_subscription(
@@ -632,9 +623,6 @@ class GymBridge(Node):
         else:
             self.ego_steer = 0.0
 
-    def point_callback(self, point_msg):
-        self.points.append(point_msg.point)
-
     def drive_timer_callback(self):
         if self.sim_paused:
             return  # Skip stepping the sim if paused
@@ -748,22 +736,6 @@ class GymBridge(Node):
             self.opp_scan = [float(x) for x in self.opp_scan]
             opp_scan.ranges = self.opp_scan
             self.opp_scan_pub.publish(opp_scan)
-
-        point_marker = Marker()
-        point_marker.header.stamp = ts
-        point_marker.header.frame_id = 'map'
-        point_marker.type = Marker.POINTS
-        point_marker.action = Marker.ADD
-        for i in range(len(self.points)):
-            point_marker.pose.orientation.w = 1.0
-            point_marker.scale.x = 0.1
-            point_marker.scale.y = 0.1
-            point_marker.color.a = 1.0
-            point_marker.color.r = 0.0
-            point_marker.color.g = 1.0
-            point_marker.color.b = 0.0
-            point_marker.points.append(self.points[i])
-        self.point_marker_pub.publish(point_marker)
 
         # pub tf
         self._publish_odom(ts)

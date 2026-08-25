@@ -1,0 +1,9 @@
+free_thresh: 0.196
+image: scaled_map.pgm
+negate: 0
+occupied_thresh: 0.65
+origin:
+- -4.479863
+- -11.654408
+- 0.0
+resolution: 0.05

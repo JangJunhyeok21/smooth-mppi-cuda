@@ -15,7 +15,7 @@ RUNS = int(os.environ.get("F1TENTH_STRESS_RUNS", "30"))
 STARTUP_SECONDS = 3.0
 RUN_TIMEOUT_SECONDS = 35.0
 ROOT = Path("/home/a/smooth-mppi-cuda")
-SIM_ROOT = Path("/home/a/f1tenth_gym_ros")
+SIM_ROOT = ROOT / "simulator_ws"
 SOURCE_RESULT = ROOT / "model_tuning/map1_closed_loop_no_imu"
 OUTPUT = ROOT / "model_tuning/results/obstacle_avoidance_stress_30"
 

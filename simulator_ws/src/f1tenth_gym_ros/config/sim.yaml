@@ -1,0 +1,138 @@
+# MIT License
+
+# Copyright (c) 2020 Hongrui Zheng
+
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+
+bridge:
+  ros__parameters:
+    # topics and namespaces
+    ego_namespace: 'ego_racecar'
+    ego_scan_topic: 'scan'
+    ego_odom_topic: 'odom'
+    ego_opp_odom_topic: 'opp_odom'
+    # Must match smooth-mppi-cuda simulation_drive_topic. The bridge node has
+    # no namespace, therefore this resolves to the absolute /drive topic.
+    ego_drive_topic: '/drive'
+    opp_namespace: 'opp_racecar'
+    opp_scan_topic: 'opp_scan'
+    opp_odom_topic: 'odom'
+    opp_ego_odom_topic: 'opp_odom'
+    opp_drive_topic: 'opp_drive'
+
+    # transform related
+    scan_distance_to_base_link: 0.0
+
+    # laserscan parameters
+    scan_fov: 4.7
+    scan_beams: 1080
+
+    # map parameters
+    # Austin  berlin  levinelobby_track  porto  icra2025  iccas2024  iv2024
+    map_path: '/home/a/smooth-mppi-cuda/data/map2/map2'
+    map_img_ext: '.pgm'
+
+    # car parameters and scale
+    vehicle_params: 'f1tenth'
+    restart_simulation: false
+    scale: 1.0
+    # Must match smooth-mppi-cuda/config/params.yaml.
+    # Same 22-D IMU-feature residual plant as CUDA MPPI.
+    # Match the deployed MPPI plant: one learned residual transition is
+    # evaluated every 40 ms.  The 10 ms simulator physics ticks only expose
+    # intermediate states between two consecutive 40 ms model knots.
+    dynamics_model: dynamic_mlp_residual_servo_lag
+    kinematic_noslip_noimu_weights_path: /home/a/smooth-mppi-cuda/config/ifac0807_strict_noslip_noimu_16d.bin
+    lateral_velocity_kf_enabled: false
+    # Used only when dynamics_model is kinematic_mlp.
+    mlp_weights_path: '/home/a/smooth-mppi-cuda/config/kinematic_mlp_no_imu.bin'
+    # 100 Hz simulator physics. 각 learned plant의 model_dt 전이를
+    # 10 ms 중간 상태로 보간해서 odom/TF를 부드럽게 발행한다.
+    mppi_dt: 0.01
+    dynamic_mlp_model_dt: 0.04
+    # 실시간 MPPI가 아닌 simulator plant 전용 1.09M-parameter GRU.
+    # 0817~0820 전체 실차 구간의 1.2초 재귀 궤적 오차를 최소화한 simulator 전용 모델.
+    simulator_gru_model_path: /home/a/smooth-mppi-cuda/model_tuning/results/simulator_gru_0817_0820_overfit_seed31/simulator_gru.ts
+    simulator_gru_history_steps: 50
+    simulator_gru_model_dt: 0.02
+    # gym_bridge_launch.py replaces this fallback with the model path resolved
+    # from MPPI config/params.yaml.
+    dynamic_mlp_weights_path: config/dynamic_40ms_residual_servo_lag.bin
+    dynamic_mlp_vx_delta_weights_path: /home/a/smooth-mppi-cuda/config/dynamic_40ms_vx_delta_history_24d.bin
+    mppi_min_speed: 0.5
+    mppi_max_speed: 12.0
+    mppi_min_accel: -9.0
+    mppi_max_accel: 10.0
+    max_steer: 0.4788
+    speed_servo_kp: 10.3739069
+    # Ackermann steering command is already wheel angle.
+    kinematic_steer_scale: 1.29371593
+    kinematic_steer_bias: -0.0245638368
+    kinematic_position_speed_scale: 1.0
+    steer_servo_time_constant: 0.185053863
+    actuator_max_steer_rate: 6.544984694978735
+    speed_reference_accel_time_constant: 0.0358766486
+    speed_reference_brake_time_constant: 0.112208409
+    actuator_max_speed_reference_rate: 10.0
+    dynamic_mlp_B_f: 2.8106457835009238
+    dynamic_mlp_C_f: 0.775431537087077
+    dynamic_mlp_D_f: 0.9220400888696738
+    dynamic_mlp_E_f: -4.92271228377628
+    dynamic_mlp_B_r: 3.1366228633512927
+    dynamic_mlp_C_r: 0.33160175643604217
+    dynamic_mlp_D_r: 2.4363987954512116
+    dynamic_mlp_E_r: -10.0
+    dynamic_mlp_I_z: 0.09059291359052173
+    mass: 3.904
+    l_f: 0.1833
+    l_r: 0.1407
+    kinematic_no_slip: true
+
+    # opponent parameters
+    num_agent: 2
+
+    # ego starting pose on map
+    # Low-curvature Map1 segment (centerline index 186).  Starting at the old
+    # origin placed the car immediately before a tightening bend and made the
+    # first uninformed MPPI population prone to selecting an off-map path.
+    # Keep normal racing speed; only move the deterministic spawn.
+    sx: 5.73275632738849
+    sy: -2.7164015483210995
+    stheta: 2.0396268447710835
+
+    # opp starting pose on map
+    # Stationary obstacle on a wide Map1 section.  With no
+    # /opp_drive publisher gym_bridge holds this car at zero speed.
+    # Placed on the obstacle-free MPPI racing line measured in the baseline
+    # run; maintaining that line now causes a physical collision.
+    sx1: 4.4478704550662265
+    sy1: -3.483583072215551
+    stheta1: 2.1524574871591735
+    static_opponent: false
+
+    # teleop
+    # /drive만 제어입력으로 사용해 의도치 않은 /cmd_vel 개입을 막는다.
+    kb_teleop: False
+
+    # drive with accel or speed
+    # Kinematic+MLP must consume the same [steer, acceleration] Control as MPPI.
+    drive_with_accel: True
+
+    # use simulation time
+    use_sim_time: False

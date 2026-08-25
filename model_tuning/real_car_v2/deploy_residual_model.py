@@ -21,8 +21,7 @@ YAML_PATH = ROOT / "config/params.yaml"
 RUNTIME_BINARY_PATH = ROOT / "config/dynamic_40ms_residual_servo_lag.bin"
 RUNTIME_BINARY_CONFIG_PATH = "config/dynamic_40ms_residual_servo_lag.bin"
 SIMULATOR_YAML_PATHS = (
-    ROOT / "f1tenth_gym_ros/src/f1tenth_gym_ros/config/sim.yaml",
-    Path("/home/a/f1tenth_gym_ros/src/f1tenth_gym_ros/config/sim.yaml"),
+    ROOT / "simulator_ws/src/f1tenth_gym_ros/config/sim.yaml",
 )
 ACTIVATE_MODEL = True
 ALLOW_BOUNDARY_REGRESSION = True  # explicit real-car deployment selection

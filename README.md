@@ -185,7 +185,7 @@ ros2 launch ekf_pose smppi_with_ekf.launch.py
 ```bash
 cd /home/a/smooth-mppi-cuda
 source /opt/ros/humble/setup.bash
-source /home/a/smooth-mppi-cuda/f1tenth_gym_ros/install/setup.bash
+source /home/a/smooth-mppi-cuda/simulator_ws/install/setup.bash
 
 colcon build --packages-select smppi_cuda_controller --symlink-install \
   --cmake-args -DCMAKE_BUILD_TYPE=Release \
@@ -448,7 +448,7 @@ MPPI 주행 episode를 수집한다.
 ```bash
 cd /home/a/smooth-mppi-cuda
 source /opt/ros/humble/setup.bash
-source f1tenth_gym_ros/install/setup.bash
+source simulator_ws/install/setup.bash
 source install/setup.bash
 
 /home/a/anaconda3/envs/RL/bin/python \
@@ -628,7 +628,7 @@ minor = semi_minor + obstacle_soft_margin
 ```bash
 cd /home/a/smooth-mppi-cuda
 source /opt/ros/humble/setup.bash
-source f1tenth_gym_ros/install/setup.bash
+source simulator_ws/install/setup.bash
 source install/setup.bash
 ros2 launch smppi_cuda_controller dynamic_obstacle_overtaking.launch.py
 ```
@@ -902,7 +902,7 @@ python model_tuning/export_mlp_cuda.py \
   config/kinematic_mlp_residual.bin \
   --normalization model_tuning/deploy_mppi_mlp/normalization.npz \
   --header include/cuda_mppi_controller/kinematic_mlp_weights.hpp \
-  --simulator-model /home/a/f1tenth_gym_ros/src/f1tenth_gym/f1tenth_gym/envs/dynamic_models/kinematic_mlp.py
+  --simulator-model /home/a/smooth-mppi-cuda/simulator_ws/src/f1tenth_gym/f1tenth_gym/envs/dynamic_models/kinematic_mlp.py
 ```
 
 MPPI `config/params.yaml`은 다음을 선택해야 한다.
@@ -932,7 +932,7 @@ cd /home/a/smooth-mppi-cuda
 source /opt/ros/humble/setup.bash
 colcon build --packages-select smppi_cuda_controller --symlink-install
 
-cd /home/a/f1tenth_gym_ros
+cd /home/a/smooth-mppi-cuda/simulator_ws
 colcon build --packages-select f1tenth_gym_ros --symlink-install
 
 cd /home/a/smooth-mppi-cuda

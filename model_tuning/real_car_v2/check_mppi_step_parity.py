@@ -12,7 +12,7 @@ import yaml
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 CUDA_EXE = ROOT / "build/smppi_cuda_controller/mppi_step_parity"
-SIMULATOR_MODEL = (ROOT / "f1tenth_gym_ros/src/f1tenth_gym/f1tenth_gym/envs"
+SIMULATOR_MODEL = (ROOT / "simulator_ws/src/f1tenth_gym/f1tenth_gym/envs"
                    / "dynamic_models/dynamic_mlp_residual.py")
 STEPS = 30
 TOLERANCE = 2.0e-3

@@ -33,7 +33,7 @@
     # 현재 배포 모델의 학습 계약. ±4 후보는 tail 평가 미통과로 아직 배포하지 않는다.
     min_accel: -9.0          # m/s^2
     max_accel: 10.0          # permit the requested 10 m/s^2 longitudinal acceleration
-    min_speed: 0.5
+    min_speed: 0.15
     max_speed: 12.0  # IFAC2026 measured collision-free: 13.86 s/lap
 
     # --- Costs (최적화 결과 반영) ---

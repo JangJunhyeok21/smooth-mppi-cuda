@@ -16,7 +16,7 @@ dynamic_obstacle_predictor:
     # lifetime.
     enable_clicked_point_static_obstacle: true
     clicked_point_topic: /clicked_point
-    clicked_point_static_obstacle_lifetime_s: 50.0
+    clicked_point_static_obstacle_lifetime_s: 20.0
     max_clicked_point_static_obstacles: 4
 
     output_topic: /mppi/dynamic_obstacle_trajectory
@@ -41,8 +41,8 @@ dynamic_obstacle_predictor:
     # |v| <= threshold: fixed-pose circular ellipse. |v| > threshold: MDN.
     dynamic_speed_threshold: 1.0
     # Static obstacle ellipse semi-major == semi-minor == this radius.
-    static_car_radius: 0.55
-    opponent_radius: 0.4
+    static_car_radius: 0.5
+    opponent_radius: 0.3
     maximum_radius: 0.75
     longitudinal_ellipse_gain: 5.1
     lateral_ellipse_gain: 1.1

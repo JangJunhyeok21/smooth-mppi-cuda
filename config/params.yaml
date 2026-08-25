@@ -34,11 +34,11 @@
     min_accel: -9.0          # m/s^2
     max_accel: 10.0          # permit the requested 10 m/s^2 longitudinal acceleration
     min_speed: 0.15
-    max_speed: 12.0  # IFAC2026 measured collision-free: 13.86 s/lap
+    max_speed: 8.0  # IFAC2026 measured collision-free: 13.86 s/lap
 
     # --- Costs (최적화 결과 반영) ---
     q_v: 1.0 # vs 크기에 비례해서 
-    q_dist: 10.0             # legacy Euclidean path cost (MPCC에서는 0 유지)
+    q_dist: 5.0             # legacy Euclidean path cost (MPCC에서는 0 유지)
     q_contour: 0.0          # raceline은 강제 경로가 아닌 out-in-out 유도선으로 사용
     q_lag: 0.0              # raceline 접선방향 오차는 최소한으로만 억제
     q_heading: 1.0          # 역주행/불안정 억제를 위한 약한 방향 regularization만 유지
@@ -49,13 +49,13 @@
     lat_g_soft_limit: 8.5                 # soft combined-grip ceiling # DD-diagram ay max 제한
     longitudinal_accel_soft_limit: 10.0   # do not penalize requested straight-line ax <= 10 m/s^2
     # 전륜 slip soft constraint: applied steer를 사용한 alpha_f 비용
-    q_front_slip: 80.0
+    q_front_slip: 800.0
     front_slip_soft_limit_deg: 6.0
     front_slip_cost_min_speed: 1.5
     # Rear-slip soft constraint: q * max(0, |alpha_r|-limit)^2.
     # alpha_r = -atan2(vy-l_r*yaw_rate, |vx|). It complements the GG ellipse
     # by detecting rear-axle saturation while total ax/ay is still moderate.
-    q_rear_slip: 80.0
+    q_rear_slip: 800.0
     rear_slip_soft_limit_deg: 6.0
     rear_slip_cost_min_speed: 1.5         # disable ill-conditioned low-vx slip cost
     # MPC-style lane-boundary slack:
@@ -137,7 +137,7 @@
     # all6_seed31 검증 조합: 1.2 s yaw-rate MAE/p95가 회귀 후보보다 우수함.
     speed_reference_accel_time_constant: 0.0358766486  # bag/session-disjoint vx rollout regression
     speed_reference_brake_time_constant: 0.112208409  # bag/session-disjoint vx rollout regression
-    actuator_max_speed_reference_rate: 8.0  # allow internal v_ref to follow at 10 m/s^2
+    actuator_max_speed_reference_rate: 3.0  # allow internal v_ref to follow at 10 m/s^2
     I_z: 0.04712
     Cm0: 0.04                # 고속 감쇠용 모터 역기전력 계수
     
@@ -185,7 +185,7 @@
     publish_rate: 0.2 # Hz
     # true : simulator pose + twist come from simulation_odom_topic
     # false: real_pose_topic supplies map pose and real_odom_topic supplies velocity
-    is_simulation: true
+    is_simulation: false
     simulation_odom_topic: /ego_racecar/odom_noise
     simulation_drive_topic: /drive  # must match f1tenth_gym_ros sim.yaml ego_drive_topic
     real_pose_topic: /newmcl_pose

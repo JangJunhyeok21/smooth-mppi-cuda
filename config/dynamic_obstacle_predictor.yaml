@@ -1,7 +1,7 @@
 dynamic_obstacle_predictor:
   ros__parameters:
     # Input selection: simulation | perception | both
-    input_mode: simulation
+    input_mode: perception
     simulation_odom_topic: /opp_racecar/odom
     perception_topic: /f1/perception/object/obstacles/arr
     # Apply Gaussian localization noise to dynamic-object x/y inputs. The
@@ -41,8 +41,8 @@ dynamic_obstacle_predictor:
     # |v| <= threshold: fixed-pose circular ellipse. |v| > threshold: MDN.
     dynamic_speed_threshold: 1.0
     # Static obstacle ellipse semi-major == semi-minor == this radius.
-    static_car_radius: 0.5
-    opponent_radius: 0.3
+    static_car_radius: 0.6
+    opponent_radius: 0.45
     maximum_radius: 0.75
     longitudinal_ellipse_gain: 5.1
     lateral_ellipse_gain: 1.1

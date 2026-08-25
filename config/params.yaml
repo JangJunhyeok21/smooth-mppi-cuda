@@ -184,7 +184,7 @@
     publish_rate: 0.2 # Hz
     # true : simulator pose + twist come from simulation_odom_topic
     # false: real_pose_topic supplies map pose and real_odom_topic supplies velocity
-    is_simulation: true
+    is_simulation: false
     simulation_odom_topic: /ego_racecar/odom
     simulation_drive_topic: /drive  # must match f1tenth_gym_ros sim.yaml ego_drive_topic
     real_pose_topic: /newmcl_pose

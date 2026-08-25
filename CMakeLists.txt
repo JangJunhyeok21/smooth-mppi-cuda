@@ -154,7 +154,7 @@ set(SMPPI_NODE_DEPENDENCIES
 )
 ament_target_dependencies(smppi_node ${SMPPI_NODE_DEPENDENCIES})
 ament_target_dependencies(dynamic_obstacle_predictor_node
-  rclcpp nav_msgs visualization_msgs geometry_msgs)
+  rclcpp nav_msgs ament_index_cpp visualization_msgs geometry_msgs)
 if(f1_msgs_FOUND)
   ament_target_dependencies(dynamic_obstacle_predictor_node f1_msgs)
   target_compile_definitions(dynamic_obstacle_predictor_node PRIVATE SMPPI_HAS_F1_MSGS=1)

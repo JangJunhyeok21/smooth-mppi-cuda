@@ -87,9 +87,7 @@
     # Separate predictor publishes obstacle-major poses at each 40 ms MPPI knot.
     dynamic_obstacle_prediction_enabled: true
     dynamic_obstacle_trajectory_topic: /mppi/dynamic_obstacle_trajectory
-    # Legacy simulator-only fallback when prediction is disabled. Real-car
-    # perception is consumed exclusively by the separate predictor node.
-    simulation_obstacle_odom_topic: /opp_racecar/odom
+    # MPPI receives obstacles exclusively from the separate predictor node.
     obstacle_timeout: 0.5
     car_radius: 0.24           # ego footprint radius; predictor supplies opponent radius
     # car_radius 진입 전부터 회피를 준비해 속도/조향의 급격한 변화를 막는다.
@@ -206,8 +204,8 @@ smppi_opponent_controller:
     simulation_odom_topic: /opp_racecar/odom
     simulation_drive_topic: /opp_drive
     imu_topic: /opp_imu/data
-    obstacle_avoidance_enabled: false
-    dynamic_obstacle_prediction_enabled: false
+    obstacle_avoidance_enabled: true
+    dynamic_obstacle_prediction_enabled: true
     visualization_topic: /mppi2/viz
     optimal_trajectory_topic: /mppi2/optimal_trajectory
     kf_state_topic: /mppi2/kf_state

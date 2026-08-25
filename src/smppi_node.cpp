@@ -91,17 +91,10 @@ public:
                     "Dynamic obstacle trajectory input: %s",
                     dynamic_obstacle_trajectory_topic_.c_str());
             }
-            if (!dynamic_obstacle_prediction_enabled_ && is_simulation_) {
-                obstacle_odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
-                    simulation_obstacle_odom_topic_, 10,
-                    std::bind(&MPPINode::obstacle_odom_callback, this, std::placeholders::_1));
-                RCLCPP_INFO(this->get_logger(),
-                    "Simulation obstacle input: %s [nav_msgs/Odometry]",
-                    simulation_obstacle_odom_topic_.c_str());
-            } else if (!dynamic_obstacle_prediction_enabled_) {
+            if (!dynamic_obstacle_prediction_enabled_) {
                 RCLCPP_WARN(this->get_logger(),
-                    "Real-car obstacle avoidance has no direct perception "
-                    "fallback; enable the predictor trajectory input");
+                    "Obstacle avoidance has no direct simulator/perception fallback; "
+                    "enable the predictor trajectory input");
             }
         }
         // The no-IMU rollout neither subscribes to nor waits for IMU.  Keep the
@@ -165,8 +158,7 @@ private:
                 this->get_logger(), "Obstacle input: %s",
                 dynamic_obstacle_prediction_enabled_
                     ? dynamic_obstacle_trajectory_topic_.c_str()
-                    : (is_simulation_ ? simulation_obstacle_odom_topic_.c_str()
-                                      : "disabled (predictor required)"));
+                    : "disabled (predictor required)");
         } else {
             RCLCPP_INFO(this->get_logger(), "Obstacle input: disabled");
         }
@@ -187,17 +179,6 @@ private:
         for(int row=0;row<6;++row)for(int col=0;col<6;++col)
             msg.covariance[row*6+col]=lateral_velocity_kf_.getCovariance(row,col);
         kf_state_pub_->publish(msg);
-    }
-
-    void obstacle_odom_callback(const nav_msgs::msg::Odometry::SharedPtr msg) {
-        if (!std::isfinite(msg->pose.pose.position.x) ||
-            !std::isfinite(msg->pose.pose.position.y)) return;
-        const float obstacle_x = static_cast<float>(msg->pose.pose.position.x);
-        const float obstacle_y = static_cast<float>(msg->pose.pose.position.y);
-        mppi_params_.obs_x[0] = obstacle_x;
-        mppi_params_.obs_y[0] = obstacle_y;
-        mppi_params_.num_obstacles = 1;
-        obstacle_stamp_ = this->now();
     }
 
     void dynamic_obstacle_callback(const
@@ -786,7 +767,6 @@ private:
                                 "/mppi/dynamic_obstacle_trajectory");
         dynamic_obstacle_trajectory_topic_ = this->get_parameter(
             "dynamic_obstacle_trajectory_topic").as_string();
-        this->declare_parameter("simulation_obstacle_odom_topic", "/opp_racecar/odom"); simulation_obstacle_odom_topic_=this->get_parameter("simulation_obstacle_odom_topic").as_string();
         this->declare_parameter("obstacle_timeout", 0.5); obstacle_timeout_s_=this->get_parameter("obstacle_timeout").as_double();
         this->declare_parameter("noise_steer_std",      0.4);    mppi_params_.noise_steer_std  = this->get_parameter("noise_steer_std").as_double();
         this->declare_parameter("noise_accel_std",      2.0);    mppi_params_.noise_accel_std  = this->get_parameter("noise_accel_std").as_double();
@@ -1227,13 +1207,6 @@ private:
     }
 
     void timer_callback() {
-        if (obstacle_avoidance_enabled_ && mppi_params_.num_obstacles > 0 &&
-            obstacle_timeout_s_ > 0.0 &&
-            (this->now() - obstacle_stamp_).seconds() > obstacle_timeout_s_) {
-            mppi_params_.num_obstacles = 0;
-            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
-                "Obstacle input is stale; disabling obstacle cost until a new sample arrives");
-        }
         if (dynamic_obstacle_active_ && obstacle_timeout_s_ > 0.0 &&
             (this->now() - dynamic_obstacle_stamp_).seconds() > obstacle_timeout_s_) {
             solver_->set_dynamic_obstacles({}, {}, {}, {}, {}, {}, 0, 0);
@@ -1602,7 +1575,6 @@ private:
     std::vector<float> ref_path_xs_, ref_path_ys_, ref_path_yaws_;
 
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;  // 단일 구독
-    rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr obstacle_odom_sub_;
     rclcpp::Subscription<smppi_cuda_controller::msg::DynamicObstacleTrajectory>::SharedPtr
         dynamic_obstacle_sub_;
     rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr mcl_pose_sub_;
@@ -1621,7 +1593,6 @@ private:
     std::string selected_drive_topic_, csv_file_path_, imu_topic_, dynamics_model_name_;
     std::string visualization_topic_;
     std::string optimal_trajectory_topic_, kf_state_topic_;
-    std::string simulation_obstacle_odom_topic_;
     std::string dynamic_obstacle_trajectory_topic_;
     std::string dynamic_mlp_servo_lag_weights_path_;
     std::string safe_set_file_path_,objective_mode_name_;
@@ -1647,7 +1618,6 @@ private:
     std::vector<bool> dynamic_obs_is_dynamic_;
     rclcpp::Time dynamic_obstacle_stamp_{0, 0, RCL_ROS_TIME};
     double obstacle_timeout_s_{0.5};
-    rclcpp::Time obstacle_stamp_{0, 0, RCL_ROS_TIME};
     int published_obstacle_marker_count_{0};
     int published_optimal_arrow_count_{0};
     bool is_simulation_{true}, pose_received_{false}, velocity_received_{false};

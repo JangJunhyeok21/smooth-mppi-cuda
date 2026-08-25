@@ -84,9 +84,7 @@
     # Separate predictor publishes obstacle-major poses at each 40 ms MPPI knot.
     dynamic_obstacle_prediction_enabled: true
     dynamic_obstacle_trajectory_topic: /mppi/dynamic_obstacle_trajectory
-    # Legacy simulator-only fallback when prediction is disabled. Real-car
-    # perception is consumed exclusively by the separate predictor node.
-    simulation_obstacle_odom_topic: /opp_racecar/odom
+    # MPPI receives obstacles exclusively from the separate predictor node.
     obstacle_timeout: 0.5
     car_radius: 0.24           # ego footprint radius; predictor supplies opponent radius
     # car_radius 진입 전부터 회피를 준비해 속도/조향의 급격한 변화를 막는다.
@@ -184,7 +182,7 @@
     publish_rate: 0.2 # Hz
     # true : simulator pose + twist come from simulation_odom_topic
     # false: real_pose_topic supplies map pose and real_odom_topic supplies velocity
-    is_simulation: false
+    is_simulation: true
     simulation_odom_topic: /ego_racecar/odom
     simulation_drive_topic: /drive  # must match f1tenth_gym_ros sim.yaml ego_drive_topic
     real_pose_topic: /newmcl_pose

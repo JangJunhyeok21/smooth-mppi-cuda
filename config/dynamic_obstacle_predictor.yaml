@@ -1,7 +1,7 @@
 dynamic_obstacle_predictor:
   ros__parameters:
     # Input selection: simulation | perception | both
-    input_mode: perception
+    input_mode: simulation
     simulation_odom_topic: /opp_racecar/odom
     perception_topic: /f1/perception/object/obstacles/arr
     # RViz Publish Point (/clicked_point) becomes one persistent static

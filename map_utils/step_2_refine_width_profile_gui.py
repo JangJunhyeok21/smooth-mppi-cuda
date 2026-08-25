@@ -17,7 +17,7 @@ from matplotlib.lines import Line2D
 MAP_NAME = "ifac2026"
 ROOT = Path(__file__).resolve().parents[1]
 
-USE_EQUAL = True
+USE_EQUAL = False
 if USE_EQUAL:
     DEFAULT_MAP_YAML = Path(f"{ROOT}/data/{MAP_NAME}/{MAP_NAME}.yaml")
     DEFAULT_INPUT = Path(f"{ROOT}/data/{MAP_NAME}/width_profile_xy.csv")

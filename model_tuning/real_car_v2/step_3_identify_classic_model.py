@@ -19,8 +19,9 @@ REGRESSION_METHODS = ("de_robust_ls",) # adam, de_robust_ls, mlp_surrogate
 
 OUTPUT_DIR = Path(os.environ.get("DYNAMIC_REGRESSION_OUT",
     ROOT / "model_tuning/results/dynamic_40ms_regression_collision_refined"))
-ROLLOUT_HORIZON_STEPS = 40       # 60 * 40 ms = 2.4 s
+ROLLOUT_HORIZON_STEPS = 40       # 40 * 40 ms = 1.6 s
 MAX_WINDOWS_PER_BAG = 2000
+V_MIN = 0.1                      # [m/s] reject rollouts containing lower GT vx
 ACTUATOR_WARMUP_SAMPLES = 40     # 40 * 20 ms = 0.8 s
 RANDOM_SEED = 31
 USE_PLOT = os.environ.get("STEP3_USE_PLOT","1")!="0"
@@ -60,9 +61,12 @@ GT_CONSISTENCY_MODE = "adjust_states_to_pose"  # "adjust_pose_to_states", "adjus
 # when MPPI path placement is more important than matching individual states.
 VX_LOSS_WEIGHT = 0.0
 VY_LOSS_WEIGHT = 0.0
-YAW_RATE_LOSS_WEIGHT = 3.0
-POSITION_LOSS_WEIGHT = 8.0
-YAW_TRAJECTORY_LOSS_WEIGHT = 10.5
+# Global weight search (2026-08-25): keep the original total weight 28.5,
+# while using the validation/test Pareto-best ratio yaw-rate:position:yaw =
+# 2.5:1.0:0.1.
+YAW_RATE_LOSS_WEIGHT = 19.7916666667
+POSITION_LOSS_WEIGHT = 7.9166666667
+YAW_TRAJECTORY_LOSS_WEIGHT = 0.7916666667
 
 # Smoothing used only by "adjust_states_to_pose" before pose differentiation.
 VY_POSE_DERIVATIVE_SMOOTH_WINDOW_S = 0.20
@@ -74,11 +78,14 @@ LOAD_TRANSFER_H_CG_M = float(os.environ.get("LOAD_TRANSFER_H_CG_M","0.0"))
 PACEJKA_B_F_BOUNDS = (0.2, 30.0)
 PACEJKA_C_F_BOUNDS = (0.0, 2.5)
 PACEJKA_D_F_BOUNDS = (0.05, 3.5)
-PACEJKA_E_F_BOUNDS = (-100000.0, 1.0)
+PACEJKA_E_F_BOUNDS = (-10.0, 1.0)
 PACEJKA_B_R_BOUNDS = (0.2, 30.0)
 PACEJKA_C_R_BOUNDS = (0.0, 2.5)
 PACEJKA_D_R_BOUNDS = (0.05, 3.5)
-PACEJKA_E_R_BOUNDS = (-100000.0, 1.0)
+PACEJKA_E_R_BOUNDS = (-10.0, 1.0)
+# True: E_f=E_r=0으로 고정하고 B/C/D만 회귀한다.
+# False: 위의 E bounds를 사용해 B/C/D/E를 모두 회귀한다.
+FIX_PACEJKA_E_ZERO = False
 YAW_INERTIA_MIN = 0.005
 YAW_INERTIA_MAX = 0.5
 
@@ -109,6 +116,9 @@ def main():
     regression.OUT = Path(OUTPUT_DIR).expanduser().resolve()
     regression.HORIZON = ROLLOUT_HORIZON_STEPS
     regression.MAX_PER_BAG = MAX_WINDOWS_PER_BAG
+    if V_MIN < 0.0:
+        raise ValueError(f"V_MIN must be non-negative, got {V_MIN}")
+    regression.V_MIN = float(V_MIN)
     regression.WARMUP_SAMPLES = ACTUATOR_WARMUP_SAMPLES
     regression.SEED = RANDOM_SEED
     regression.SHOW_PLOTS = USE_PLOT
@@ -138,6 +148,9 @@ def main():
         PACEJKA_B_R_BOUNDS, PACEJKA_C_R_BOUNDS,
         PACEJKA_D_R_BOUNDS, PACEJKA_E_R_BOUNDS,
     ), dtype=np.float64)
+    regression.FIX_PACEJKA_E_ZERO = bool(FIX_PACEJKA_E_ZERO)
+    if FIX_PACEJKA_E_ZERO:
+        regression.BOUNDS[[3, 7]] = 0.0
     regression.I_Z_MIN = YAW_INERTIA_MIN
     regression.I_Z_MAX = YAW_INERTIA_MAX
     regression.REGRESSION_METHODS = REGRESSION_METHODS

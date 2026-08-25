@@ -34,14 +34,14 @@
     min_accel: -9.0          # m/s^2
     max_accel: 10.0          # permit the requested 10 m/s^2 longitudinal acceleration
     min_speed: 0.15
-    max_speed: 8.0  # IFAC2026 measured collision-free: 13.86 s/lap
+    max_speed: 10.0  # IFAC2026 30-lap candidate; simulator and MPPI use the same limit
 
     # --- Costs (최적화 결과 반영) ---
     q_v: 1.0 # vs 크기에 비례해서 
     q_dist: 5.0             # legacy Euclidean path cost (MPCC에서는 0 유지)
-    q_contour: 0.0          # raceline은 강제 경로가 아닌 out-in-out 유도선으로 사용
+    q_contour: 0.0          # raceline is used as a progress reference, not a hard path
     q_lag: 0.0              # raceline 접선방향 오차는 최소한으로만 억제
-    q_heading: 1.0          # 역주행/불안정 억제를 위한 약한 방향 regularization만 유지
+    q_heading: 1.0          # weak direction regularization
     q_error_speed: 0.0     # preserve straight speed; reduce speed only while pose error grows
     q_du: 0.12
     q_steer: 0.0
@@ -76,7 +76,7 @@
     safe_set_state_scale_x: 1.0        # x 오차 정규화 크기 [m]
     safe_set_state_scale_y: 1.0        # y 오차 정규화 크기 [m]
     safe_set_state_scale_yaw: 0.5      # yaw 오차 정규화 크기 [rad]
-    q_progress: 100.0        # 경계를 가로지르는 가짜 progress가 지배하지 않도록 제한
+    q_progress: 110.0        # stable 8-second-range long-run candidate
     q_escape_vel: 0.0      # horizon 말단의 전진속도 보상
     horizon_steps: 40       # 40 * model_dt(0.04 s) = 1.6 s prediction horizon
     # --- Obstacle Avoidance Params ---
@@ -97,7 +97,7 @@
     
     # --- Noise & Tuning ---
     noise_steer_std: 0.25    # rad/s
-    noise_accel_std: 0.5     # speed-command exploration rate [m/s^2]
+    noise_accel_std: 0.7     # stable long-run speed-command exploration [m/s^2]
     max_steer_rate: 50.0    # rad/s
     # Input slew rate: m/s^2 for direct-speed models, m/s^3 for acceleration-command models.
     # Direct-speed command slew limit [m/s^2]. At the 50 Hz controller tick,
@@ -137,7 +137,7 @@
     # all6_seed31 검증 조합: 1.2 s yaw-rate MAE/p95가 회귀 후보보다 우수함.
     speed_reference_accel_time_constant: 0.0358766486  # bag/session-disjoint vx rollout regression
     speed_reference_brake_time_constant: 0.112208409  # bag/session-disjoint vx rollout regression
-    actuator_max_speed_reference_rate: 3.0  # allow internal v_ref to follow at 10 m/s^2
+    actuator_max_speed_reference_rate: 6.0  # fixed for IFAC2026 lap-time tuning
     I_z: 0.04712
     Cm0: 0.04                # 고속 감쇠용 모터 역기전력 계수
     

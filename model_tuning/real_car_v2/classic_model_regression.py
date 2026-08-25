@@ -24,6 +24,7 @@ HORIZON = 25                    # 1.0 s at one 40 ms MPPI knot
 # optimizer balanced per bag, but cap redundant windows so a full rerun remains
 # practical after adding a day of data.
 MAX_PER_BAG = 80
+V_MIN = 0.5                     # minimum GT longitudinal speed used for fitting
 WARMUP_SAMPLES = 40             # 0.8 s at source 50 Hz
 ADAM_RESTARTS = int(os.environ.get("CLASSIC_ADAM_RESTARTS","3"))
 ADAM_STEPS = int(os.environ.get("CLASSIC_ADAM_STEPS","600"))
@@ -39,6 +40,7 @@ NAMES = ("B_f", "C_f", "D_f", "E_f", "B_r", "C_r", "D_r", "E_r")
 BOUNDS = np.asarray((
     (.2, 30.), (.5, 2.5), (.05, 3.5), (-1., 1.),
     (.2, 30.), (.5, 2.5), (.05, 3.5), (-1., 1.)), dtype=np.float64)
+FIX_PACEJKA_E_ZERO = True
 REFERENCE = np.asarray((6., 1.3, 1.0, 0., 6., 1.3, 1.0, 0.))
 FROZEN_MLP_BIN = os.environ.get("FROZEN_MLP_BIN")
 CLASSIC_RESIDUAL_PENALTY = float(os.environ.get("CLASSIC_RESIDUAL_PENALTY", "0.0001"))
@@ -371,6 +373,10 @@ def frozen_mlp_forward(feature):
 def starts(data, split):
     features, bag, splits, valid = (data[k] for k in
                                     ("features", "bag_id", "split", "valid"))
+    # Use the same state target as the rollout loss. In
+    # adjust_states_to_pose mode this is pose-derived GT, not raw KF vx.
+    longitudinal_speed = (data["teacher_state"][:, 0]
+                          if "teacher_state" in data.files else features[:, 0])
     result = []
     for bag_id in np.unique(bag[splits == split]):
         candidate = np.asarray([
@@ -386,12 +392,39 @@ def starts(data, split):
             and ("mcl_pose" not in data.files or np.max(np.abs(
                 (np.diff(data["mcl_pose"][index:index+2*HORIZON+1,2])+np.pi)
                 %(2*np.pi)-np.pi)) <= MAX_YAW_STEP_20MS)
-            and np.mean(np.abs(features[index:index+2*HORIZON, 0])) > .5], int)
+            # Reject the candidate if any 20 ms GT sample in the recursive
+            # rollout falls below V_MIN. Warm-up remains available only for
+            # reconstructing actuator state and is not a loss target.
+            and np.all(longitudinal_speed[index:index+2*HORIZON+1] >= V_MIN)], int)
         if len(candidate) > MAX_PER_BAG:
             candidate = candidate[np.linspace(
                 0, len(candidate)-1, MAX_PER_BAG).astype(int)]
         result.extend(candidate[::3])
     return np.asarray(result, int)
+
+
+def robust_least_squares_refine(initial, data, window_starts, config):
+    """Run robust LS only over parameters that are not fixed by their bounds."""
+    initial = np.asarray(initial, dtype=np.float64).copy()
+    fixed = np.isclose(BOUNDS[:, 0], BOUNDS[:, 1])
+    initial[fixed] = BOUNDS[fixed, 0]
+    free = np.flatnonzero(~fixed)
+    if not len(free):
+        return initial
+
+    def expand(free_parameters):
+        parameters = initial.copy()
+        parameters[free] = free_parameters
+        return parameters
+
+    result = least_squares(
+        lambda free_parameters: (
+            rollout_numpy(expand(free_parameters), data, window_starts, config)[0]
+            - rollout_numpy(expand(free_parameters), data, window_starts, config)[1]
+        ).ravel(),
+        initial[free], bounds=(BOUNDS[free, 0], BOUNDS[free, 1]),
+        loss="soft_l1", f_scale=.3, max_nfev=100)
+    return expand(result.x)
 
 
 def rollout_numpy(parameters, data, window_starts, config, return_residual=False,
@@ -1627,6 +1660,9 @@ def main():
         for index in (3,7):BOUNDS[index]=(center[index]-.2,center[index]+.2)
         BOUNDS[:,0]=np.maximum(BOUNDS[:,0],original[:,0]);BOUNDS[:,1]=np.minimum(BOUNDS[:,1],original[:,1])
         REFERENCE=center
+    if FIX_PACEJKA_E_ZERO:
+        BOUNDS[[3, 7]] = 0.0
+        REFERENCE[[3, 7]] = 0.0
     split_starts = tuple(starts(data, index) for index in range(3))
     if USE_VALIDATION_TEST_SPLIT:
         train, validation, test = split_starts
@@ -1718,17 +1754,17 @@ def main():
         raise ValueError("REGRESSION_METHODS must contain at least one mode")
     candidates={}
     if INCLUDE_CURRENT_MODEL_AS_CANDIDATE:
-        candidates["current"]=current
+        fitting_current=current.copy()
+        if FIX_PACEJKA_E_ZERO:
+            fitting_current[[3,7]]=0.0
+        candidates["current"]=fitting_current
     print("Step 3 regression methods: " + ", ".join(methods))
     if "de_robust_ls" in methods:
         de=differential_evolution(lambda p:objective(p,data,train,config),BOUNDS,
             seed=SEED,popsize=DE_POPSIZE,maxiter=DE_MAXITER,tol=8e-4,
             polish=False,workers=1)
-        ls=least_squares(lambda p:(rollout_numpy(p,data,train,config)[0]
-            -rollout_numpy(p,data,train,config)[1]).ravel(),de.x,
-            bounds=(BOUNDS[:,0],BOUNDS[:,1]),loss="soft_l1",f_scale=.3,
-            max_nfev=100)
-        candidates["de_robust_ls"]=ls.x
+        candidates["de_robust_ls"]=robust_least_squares_refine(
+            de.x,data,train,config)
     if "adam_differentiable" in methods:
         candidates["adam_differentiable"]=adam_search(data,train,config)
     if "mlp_surrogate" in methods:
@@ -1768,7 +1804,8 @@ def main():
     selected_metrics={split:metrics(selected,data,indices,fitted_config)
                       for split,indices in (("train",train),("validation",validation),("test",test))}
     tolerance=.01*(BOUNDS[:,1]-BOUNDS[:,0])
-    boundary={name:bool(abs(value-low)<=tol or abs(high-value)<=tol)
+    boundary={name:bool(low != high and
+                       (abs(value-low)<=tol or abs(high-value)<=tol))
               for name,value,(low,high),tol in zip(NAMES,selected,BOUNDS,tolerance)}
     # Keep deployment comparison valid even when the user deliberately forces
     # selection among newly fitted methods only.
@@ -1788,6 +1825,7 @@ def main():
         "use_validation_test_split":USE_VALIDATION_TEST_SPLIT,
         "gt_consistency_mode":GT_CONSISTENCY_MODE,
         "load_transfer_h_cg_m":float(LOAD_TRANSFER_H_CG_M),
+        "fix_pacejka_e_zero":bool(FIX_PACEJKA_E_ZERO),
         "state_target":("MCL-pose-derived [vx,vy,yaw_rate]"
                         if GT_CONSISTENCY_MODE=="adjust_states_to_pose"
                         else "original classic-KF [vx,vy,yaw_rate]"),
@@ -1799,6 +1837,8 @@ def main():
             "trajectory_yaw":YAW_TRAJECTORY_LOSS_WEIGHT},
         "window_filter":{"max_position_step_20ms_m":MAX_POSITION_STEP_20MS,
             "max_yaw_step_20ms_rad":MAX_YAW_STEP_20MS,
+            "v_min_mps":float(V_MIN),
+            "speed_rule":"all rollout GT vx samples >= V_MIN",
             "collision_filter":"none; Step 1 manual review owns collision removal"},
         "previous_position_speed_scale":previous_position_scale,
         "position_speed_scale":fitted_position_scale,

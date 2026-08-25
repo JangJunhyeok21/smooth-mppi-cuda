@@ -4,9 +4,11 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import IncludeLaunchDescription
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
@@ -23,8 +25,16 @@ def generate_launch_description():
     os.environ["F1TENTH_SIM_NUM_AGENTS"] = "1"
 
     params = os.path.join(controller_share, "config", "params.yaml")
-    track_override = {"csv_file_path": track_csv}
+    max_speed = LaunchConfiguration("max_speed")
+    track_override = {
+        "csv_file_path": track_csv,
+        "is_simulation": True,
+        "max_speed": ParameterValue(max_speed, value_type=float),
+    }
     return LaunchDescription([
+        DeclareLaunchArgument(
+            "max_speed", default_value="12.0",
+            description="Maximum MPPI speed command for IFAC2026 A/B tests"),
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(os.path.join(
                 gym_share, "launch", "gym_bridge_launch.py"))),
@@ -43,4 +53,3 @@ def generate_launch_description():
             parameters=[params, track_override],
         ),
     ])
-

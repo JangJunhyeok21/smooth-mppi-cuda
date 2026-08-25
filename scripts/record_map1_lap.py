@@ -68,7 +68,10 @@ class Recorder(Node):
             # At 100 Hz even 5 m/s moves only 0.05 m. A 0.5 m one-frame
             # displacement is a manual relocation or simulator reset, never a
             # valid vehicle transition; invalidate the run immediately.
-            if pose_jump > 0.5:
+            # The simulator can publish one initialization/respawn transition
+            # immediately after the first drive command.  Do not confuse that
+            # startup hand-off with an in-run external relocation.
+            if pose_jump > 0.5 and self.rel() > 2.0:
                 self.finish("external_pose_reset")
                 return
         self.previous_recorded_pose = (p.x, p.y)

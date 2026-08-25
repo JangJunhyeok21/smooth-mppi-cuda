@@ -30,6 +30,7 @@ NEW_DATA_ROOTS = (
     # Path("/mnt/nas_custom/F1tenth/2026 IFAC/0818"),
     # Path("/mnt/nas_custom/F1tenth/2026 IFAC/0819"),
     Path("/mnt/nas_custom/F1tenth/2026 IFAC/ifac2026"),
+    Path("/mnt/nas_custom/F1tenth/2026 IFAC/ifac2026_pratice_3th/"),
 )
 # Keep F5 configuration robust when a single Path is assigned without tuple
 # syntax.  A pathlib.Path is path-like but is not a collection of roots.
@@ -41,7 +42,7 @@ else:
 # reported as SKIPPED by read_streams instead of silently entering the archive.
 BAG_PATH = sorted({metadata.parent for root in NEW_DATA_ROOTS
                    for metadata in root.rglob("metadata.yaml")})
-OUTPUT_PATH = PROJECT_ROOT / "model_tuning/data/ifac0810_0819_autonomous_physics_clean"
+OUTPUT_PATH = PROJECT_ROOT / "model_tuning/data/ifac2026"
 # F5/direct execution is an interactive inspection workflow.  Set this to
 # False only for unattended batch extraction.
 USE_PLOT = os.environ.get("STEP1_USE_PLOT", "1") != "0"
@@ -52,7 +53,7 @@ REVIEW_SAVED_COLLISIONS = True
 IMU_WZ_SIGN = 1.0; IMU_AX_SIGN = 1.0; IMU_AY_SIGN = 1.0; IMU_EMA_ALPHA = .25
 IMU_SIGN_CUTOVER = dtlib.date(2026, 8, 15)
 POSE_TOPIC = "/newmcl_pose"; VELOCITY_TOPIC = "/odom"; COMMAND_TOPIC = "/ackermann_cmd"; IMU_TOPIC = "/imu/data"
-DEFAULT_MAP_YAML = (PROJECT_ROOT / "data/map2/map2.yaml") # 그냥 시각화 용도임
+DEFAULT_MAP_YAML = (PROJECT_ROOT / "data/ifac2026/ifac2026.yaml") # 그냥 시각화 용도임
 APPLIED_COMMAND_TOPIC = "/drive"
 COMMAND_STEER_MATCH_TOL = 1e-4; COMMAND_SPEED_MATCH_TOL = 1e-4
 # A rollout starting shortly before a manual takeover still contains a response

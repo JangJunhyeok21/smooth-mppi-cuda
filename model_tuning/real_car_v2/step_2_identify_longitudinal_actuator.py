@@ -15,8 +15,8 @@ import visualize_and_regress_longitudinal_actuator as regression
 # User-configurable Step 2 settings
 # ---------------------------------------------------------------------------
 ROOT = Path(__file__).resolve().parents[2]
-SOURCE_DIRS = (ROOT / "model_tuning/data/ifac2026",)
-OUTPUT_DIR = ROOT / "model_tuning/results/longitudinal_actuator_regression"
+SOURCE_DIRS = (ROOT / "model_tuning/data/ifac2026_collision_refined_current_kf_gt",)
+OUTPUT_DIR = ROOT / "model_tuning/results/longitudinal_actuator_regression_collision_refined"
 
 # Identified parameter bounds. Units: Kp [1/s], time constants [s].
 SPEED_SERVO_KP_MIN = 0.05

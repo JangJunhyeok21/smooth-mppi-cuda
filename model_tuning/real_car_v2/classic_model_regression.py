@@ -31,6 +31,9 @@ SURROGATE_SAMPLES = int(os.environ.get("CLASSIC_SURROGATE_SAMPLES","400"))
 SURROGATE_PROPOSALS = int(os.environ.get("CLASSIC_SURROGATE_PROPOSALS","40000"))
 DE_POPSIZE = int(os.environ.get("CLASSIC_DE_POPSIZE","6"))
 DE_MAXITER = int(os.environ.get("CLASSIC_DE_MAXITER","35"))
+REGRESSION_METHODS = ("adam",)
+INCLUDE_CURRENT_MODEL_AS_CANDIDATE = True
+RUN_ALTERNATING_PACEJKA_IZ = False
 
 NAMES = ("B_f", "C_f", "D_f", "E_f", "B_r", "C_r", "D_r", "E_r")
 BOUNDS = np.asarray((
@@ -1375,8 +1378,9 @@ def plot_interactive_bag_inspector(data,usable_starts,previous_tire,fitted_tire,
     return (output,action["value"]) if navigation else output
 
 
-def plot_all_bag_yaml_evaluation(data,current_tire,current_config):
-    """Browse every loaded Step-1 bag and evaluate current YAML on a click."""
+def plot_all_bag_evaluation(data,previous_tire,fitted_tire,
+                            previous_config,fitted_config):
+    """Browse every loaded Step-1 bag and evaluate a clicked open-loop start."""
     bag_ids=[int(value) for value in np.unique(data["bag_id"])]
     if not bag_ids:return None
     index=0
@@ -1398,15 +1402,20 @@ def plot_all_bag_yaml_evaluation(data,current_tire,current_config):
             continue
         sampled=candidates[np.linspace(0,len(candidates)-1,
             min(MAX_PER_BAG,len(candidates))).astype(int)]
-        result=metrics(current_tire,data,sampled,current_config)
+        previous_result=metrics(previous_tire,data,sampled,previous_config)
+        fitted_result=metrics(fitted_tire,data,sampled,fitted_config)
         print(f"[{index+1}/{len(bag_ids)}] {bag_name}: windows={len(sampled)}, "
-              f"position mean/P95={result['trajectory_mean_m']:.4f}/"
-              f"{result['trajectory_p95_m']:.4f} m, yaw mean/P95="
-              f"{result['trajectory_yaw_mean_rad']:.4f}/"
-              f"{result['trajectory_yaw_p95_rad']:.4f} rad")
+              f"position mean/P95 current={previous_result['trajectory_mean_m']:.4f}/"
+              f"{previous_result['trajectory_p95_m']:.4f}, fitted="
+              f"{fitted_result['trajectory_mean_m']:.4f}/"
+              f"{fitted_result['trajectory_p95_m']:.4f} m; yaw mean/P95 current="
+              f"{previous_result['trajectory_yaw_mean_rad']:.4f}/"
+              f"{previous_result['trajectory_yaw_p95_rad']:.4f}, fitted="
+              f"{fitted_result['trajectory_yaw_mean_rad']:.4f}/"
+              f"{fitted_result['trajectory_yaw_p95_rad']:.4f} rad")
         _,requested=plot_interactive_bag_inspector(
-            data,np.asarray([candidates[0]]),current_tire,current_tire,
-            current_config,current_config,navigation=True,
+            data,np.asarray([candidates[0]]),previous_tire,fitted_tire,
+            previous_config,fitted_config,navigation=True,
             bag_position=index,bag_count=len(bag_ids))
         if requested=="quit":break
         if requested=="previous":index=(index-1)%len(bag_ids)
@@ -1416,7 +1425,8 @@ def plot_all_bag_yaml_evaluation(data,current_tire,current_config):
 
 
 def plot_open_loop_evaluation(data, previous_tire, fitted_tire, previous_config,
-                              fitted_config, validation, test):
+                              fitted_config, validation, test,
+                              open_interactive_inspector=True):
     """Visualize evaluation GT/previous/fitted free rollouts for all states."""
     heldout=np.unique(np.concatenate((validation,test)))
     if not len(heldout):
@@ -1583,7 +1593,7 @@ def plot_open_loop_evaluation(data, previous_tire, fitted_tire, previous_config,
               f"{item['kf_state_integration_end_yaw_error_rad']:+.4f}/"
               f"{item['kf_state_integration_yaw_rmse_rad']:.4f} rad")
     plot_vy_reference_point_diagnostic(data,fitted_config)
-    if INTERACTIVE_BAG_INSPECTOR:
+    if INTERACTIVE_BAG_INSPECTOR and open_interactive_inspector:
         inspector=plot_interactive_bag_inspector(
             data,heldout,previous_tire,fitted_tire,previous_config,fitted_config)
         print(f"interactive Step 3 bag inspector: {inspector}")
@@ -1607,7 +1617,8 @@ def main():
         if not SHOW_PLOTS:
             print("STEP3_USE_PLOT=0: interactive evaluation requires plots; nothing to show.")
             return
-        plot_all_bag_yaml_evaluation(data,current,previous_config)
+        plot_all_bag_evaluation(
+            data,current,current,previous_config,previous_config)
         return
     local_fraction=float(os.environ.get("CLASSIC_LOCAL_FRACTION","0"))
     if local_fraction>0:
@@ -1665,7 +1676,8 @@ def main():
         (OUT/"evaluation_only_report.json").write_text(
             json.dumps(evaluation_report,indent=2)+"\n")
         plot_path=plot_open_loop_evaluation(
-            data,current,selected,previous_config,fitted_config,validation,test)
+            data,current,selected,previous_config,fitted_config,validation,test,
+            open_interactive_inspector=False)
         tire_plot_path=plot_tire_force_curves(data,current,selected,fitted_config)
         print(json.dumps(evaluation_report,indent=2))
         print_pose_metric_change("Step 3 evaluation-only validation",
@@ -1674,6 +1686,11 @@ def main():
         print("Step 3 evaluation-only mode: optimizer was not executed.")
         print(f"open-loop plot: {plot_path}")
         print(f"Pacejka Fy-vs-alpha plot: {tire_plot_path}")
+        if SHOW_PLOTS and INTERACTIVE_BAG_INSPECTOR:
+            print("Controls: Left/Right changes bag, number+Enter jumps to a bag, "
+                  "p then click evaluates that start, q exits.")
+            plot_all_bag_evaluation(
+                data,current,selected,previous_config,fitted_config)
         return
     previous_position_scale=float(config.get("kinematic_position_speed_scale",1.0))
     fitted_position_scale=(estimate_position_speed_scale(data,train)
@@ -1683,15 +1700,39 @@ def main():
     config["kinematic_position_speed_scale"]=fitted_position_scale
     print(f"Step 3 position speed scale: {previous_position_scale:.6f} -> "
           f"{fitted_position_scale:.6f}")
-    # Existing robust optimizer retained strictly as a comparison baseline.
-    de=differential_evolution(lambda p:objective(p,data,train,config),BOUNDS,
-        seed=SEED,popsize=DE_POPSIZE,maxiter=DE_MAXITER,tol=8e-4,polish=False,workers=1)
-    ls=least_squares(lambda p:(rollout_numpy(p,data,train,config)[0]
-        -rollout_numpy(p,data,train,config)[1]).ravel(),de.x,
-        bounds=(BOUNDS[:,0],BOUNDS[:,1]),loss="soft_l1",f_scale=.3,max_nfev=100)
-    candidates={"current":current,"de_robust_ls":ls.x,
-                "adam_differentiable":adam_search(data,train,config),
-                "mlp_surrogate":surrogate_search(data,train,config,rng)}
+    aliases={"adam":"adam_differentiable",
+             "adam_differentiable":"adam_differentiable",
+             "de":"de_robust_ls", "de_robust_ls":"de_robust_ls",
+             "surrogate":"mlp_surrogate", "mlp_surrogate":"mlp_surrogate"}
+    requested_methods=((REGRESSION_METHODS,)
+                       if isinstance(REGRESSION_METHODS,str)
+                       else REGRESSION_METHODS)
+    try:
+        methods=tuple(dict.fromkeys(aliases[str(mode).strip().lower()]
+                                    for mode in requested_methods))
+    except KeyError as exc:
+        raise ValueError(
+            f"Unknown Step 3 regression mode {exc.args[0]!r}; choose from "
+            "'adam', 'de_robust_ls', and 'mlp_surrogate'.") from None
+    if not methods:
+        raise ValueError("REGRESSION_METHODS must contain at least one mode")
+    candidates={}
+    if INCLUDE_CURRENT_MODEL_AS_CANDIDATE:
+        candidates["current"]=current
+    print("Step 3 regression methods: " + ", ".join(methods))
+    if "de_robust_ls" in methods:
+        de=differential_evolution(lambda p:objective(p,data,train,config),BOUNDS,
+            seed=SEED,popsize=DE_POPSIZE,maxiter=DE_MAXITER,tol=8e-4,
+            polish=False,workers=1)
+        ls=least_squares(lambda p:(rollout_numpy(p,data,train,config)[0]
+            -rollout_numpy(p,data,train,config)[1]).ravel(),de.x,
+            bounds=(BOUNDS[:,0],BOUNDS[:,1]),loss="soft_l1",f_scale=.3,
+            max_nfev=100)
+        candidates["de_robust_ls"]=ls.x
+    if "adam_differentiable" in methods:
+        candidates["adam_differentiable"]=adam_search(data,train,config)
+    if "mlp_surrogate" in methods:
+        candidates["mlp_surrogate"]=surrogate_search(data,train,config,rng)
     comparison={}
     for name,parameters in candidates.items():
         comparison[name]={"parameters":dict(zip(NAMES,parameters.tolist())),
@@ -1702,13 +1743,18 @@ def main():
     winner=min(comparison,key=lambda name:comparison[name]["validation_score"])
     base_selected=np.asarray([comparison[winner]["parameters"][name] for name in NAMES])
     base_iz=float(config["dynamic_mlp_I_z"])
-    alternating_selected, alternating_iz, alternating_trace = alternating_pacejka_inertia(
-        base_selected, data, train, config)
-    alternating_config={**config,"dynamic_mlp_I_z":alternating_iz}
-    alternating_validation=metrics(
-        alternating_selected,data,validation,alternating_config)
-    alternating_accepted=(validation_score(alternating_validation)
-                          < comparison[winner]["validation_score"])
+    alternating_selected,alternating_iz=base_selected,base_iz
+    alternating_trace=[]
+    alternating_validation=comparison[winner]["validation"]
+    alternating_accepted=False
+    if RUN_ALTERNATING_PACEJKA_IZ:
+        alternating_selected, alternating_iz, alternating_trace = alternating_pacejka_inertia(
+            base_selected, data, train, config)
+        alternating_config={**config,"dynamic_mlp_I_z":alternating_iz}
+        alternating_validation=metrics(
+            alternating_selected,data,validation,alternating_config)
+        alternating_accepted=(validation_score(alternating_validation)
+                              < comparison[winner]["validation_score"])
     if alternating_accepted:
         selected,selected_iz=alternating_selected,alternating_iz
         selected_method=winner+"+alternating_pacejka_Iz"
@@ -1724,7 +1770,9 @@ def main():
     tolerance=.01*(BOUNDS[:,1]-BOUNDS[:,0])
     boundary={name:bool(abs(value-low)<=tol or abs(high-value)<=tol)
               for name,value,(low,high),tol in zip(NAMES,selected,BOUNDS,tolerance)}
-    previous_validation=comparison["current"]["validation"]
+    # Keep deployment comparison valid even when the user deliberately forces
+    # selection among newly fitted methods only.
+    previous_validation=metrics(current,data,validation,config)
     fitted_validation=selected_metrics["validation"]
     previous_p95_score=(POSITION_LOSS_WEIGHT*previous_validation["trajectory_p95_m"]
         +YAW_TRAJECTORY_LOSS_WEIGHT*previous_validation["trajectory_yaw_p95_rad"])
@@ -1755,6 +1803,14 @@ def main():
         "previous_position_speed_scale":previous_position_scale,
         "position_speed_scale":fitted_position_scale,
         "parameter_names":list(NAMES)+["I_z","kinematic_position_speed_scale"],
+        "regression_configuration":{
+            "requested_methods":list(methods),
+            "include_current_model_as_candidate":bool(INCLUDE_CURRENT_MODEL_AS_CANDIDATE),
+            "run_alternating_pacejka_iz":bool(RUN_ALTERNATING_PACEJKA_IZ),
+            "adam_restarts":int(ADAM_RESTARTS),"adam_steps":int(ADAM_STEPS),
+            "de_population_size":int(DE_POPSIZE),"de_max_iterations":int(DE_MAXITER),
+            "surrogate_samples":int(SURROGATE_SAMPLES),
+            "surrogate_proposals":int(SURROGATE_PROPOSALS)},
         "selection":"lowest evaluation open-loop score",
         "selected_method":selected_method,"expanded_fitted":{**dict(zip(NAMES,selected.tolist())),
             "I_z":selected_iz,

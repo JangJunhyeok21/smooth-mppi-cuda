@@ -12,9 +12,13 @@ import classic_model_regression as regression
 # User-configurable Step 3 settings
 # ---------------------------------------------------------------------------
 ROOT = Path(__file__).resolve().parents[2]
-DATA_PATH = ROOT / "model_tuning/data/ifac2026"
+# 변경사항
+DATA_PATH = ROOT / "model_tuning/data/ifac2026_collision_refined_current_kf_gt"
+YAML_EVALUATION_MODE = True # os.environ.get("STEP3_YAML_EVALUATION_MODE", "0") != "0"
+REGRESSION_METHODS = ("de_robust_ls",) # adam, de_robust_ls, mlp_surrogate
+
 OUTPUT_DIR = Path(os.environ.get("DYNAMIC_REGRESSION_OUT",
-    ROOT / "model_tuning/results/dynamic_40ms_regression"))
+    ROOT / "model_tuning/results/dynamic_40ms_regression_collision_refined"))
 ROLLOUT_HORIZON_STEPS = 40       # 60 * 40 ms = 2.4 s
 MAX_WINDOWS_PER_BAG = 2000
 ACTUATOR_WARMUP_SAMPLES = 40     # 40 * 20 ms = 0.8 s
@@ -30,7 +34,6 @@ EVALUATION_PARAMS_PATH = OUTPUT_DIR / "params.json"
 # evaluate the parameters currently stored in config/params.yaml interactively.
 # Use Left/Right to change bag, or type a bag number and Enter to jump;
 # press p and click a time-series panel to start an open-loop prediction.
-YAML_EVALUATION_MODE = True #os.environ.get("STEP3_YAML_EVALUATION_MODE", "0") != "0"
 # Apply a gate-passing candidate to config/params.yaml for the next numbered
 # stage. A rejected/boundary candidate remains isolated in params.json.
 APPLY_ACCEPTED_PARAMS_TO_YAML = os.environ.get("STEP3_APPLY_TO_YAML","1")!="0"
@@ -57,9 +60,9 @@ GT_CONSISTENCY_MODE = "adjust_states_to_pose"  # "adjust_pose_to_states", "adjus
 # when MPPI path placement is more important than matching individual states.
 VX_LOSS_WEIGHT = 0.0
 VY_LOSS_WEIGHT = 0.1
-YAW_RATE_LOSS_WEIGHT = 1.5
-POSITION_LOSS_WEIGHT = 1.5
-YAW_TRAJECTORY_LOSS_WEIGHT = 1.5
+YAW_RATE_LOSS_WEIGHT = 0.4
+POSITION_LOSS_WEIGHT = 8.0
+YAW_TRAJECTORY_LOSS_WEIGHT = 5.5
 
 # Smoothing used only by "adjust_states_to_pose" before pose differentiation.
 VY_POSE_DERIVATIVE_SMOOTH_WINDOW_S = 0.20
@@ -71,16 +74,31 @@ LOAD_TRANSFER_H_CG_M = float(os.environ.get("LOAD_TRANSFER_H_CG_M","0.0"))
 PACEJKA_B_F_BOUNDS = (0.2, 30.0)
 PACEJKA_C_F_BOUNDS = (0.0, 2.5)
 PACEJKA_D_F_BOUNDS = (0.05, 3.5)
-PACEJKA_E_F_BOUNDS = (-10.0, 1.0)
+PACEJKA_E_F_BOUNDS = (-2.0, 1.0)
 PACEJKA_B_R_BOUNDS = (0.2, 30.0)
 PACEJKA_C_R_BOUNDS = (0.0, 2.5)
 PACEJKA_D_R_BOUNDS = (0.05, 3.5)
-PACEJKA_E_R_BOUNDS = (-10.0, 1.0)
+PACEJKA_E_R_BOUNDS = (-2.0, 1.0)
 YAW_INERTIA_MIN = 0.005
 YAW_INERTIA_MAX = 0.5
 
+# Regression backends to execute.  The best validation result among these and
+# (optionally) the current YAML model is selected.
+# Available modes:
+#   "adam"          : differentiable recursive rollout optimized by AdamW
+#   "de_robust_ls"  : differential evolution followed by robust least squares
+#   "mlp_surrogate": learn an objective surrogate, then search the surrogate
+# Adam is the default so Step 3 no longer has to run every expensive backend.
+INCLUDE_CURRENT_MODEL_AS_CANDIDATE = True
+# This is a separate DE-based Pacejka/I_z coordinate-descent refinement. Keep
+# it disabled for a genuinely Adam-only experiment; otherwise it can drive E
+# back to a bound even when Adam itself returned an interior solution.
+RUN_ALTERNATING_PACEJKA_IZ = False
+
 ADAM_RESTARTS = 3
 ADAM_STEPS = 600
+DE_POPULATION_SIZE = 6
+DE_MAX_ITERATIONS = 35
 SURROGATE_SAMPLES = 400
 SURROGATE_PROPOSALS = 40000
 
@@ -122,8 +140,13 @@ def main():
     ), dtype=np.float64)
     regression.I_Z_MIN = YAW_INERTIA_MIN
     regression.I_Z_MAX = YAW_INERTIA_MAX
+    regression.REGRESSION_METHODS = REGRESSION_METHODS
+    regression.INCLUDE_CURRENT_MODEL_AS_CANDIDATE = INCLUDE_CURRENT_MODEL_AS_CANDIDATE
+    regression.RUN_ALTERNATING_PACEJKA_IZ = RUN_ALTERNATING_PACEJKA_IZ
     regression.ADAM_RESTARTS = ADAM_RESTARTS
     regression.ADAM_STEPS = ADAM_STEPS
+    regression.DE_POPSIZE = DE_POPULATION_SIZE
+    regression.DE_MAXITER = DE_MAX_ITERATIONS
     regression.SURROGATE_SAMPLES = SURROGATE_SAMPLES
     regression.SURROGATE_PROPOSALS = SURROGATE_PROPOSALS
     regression.main()

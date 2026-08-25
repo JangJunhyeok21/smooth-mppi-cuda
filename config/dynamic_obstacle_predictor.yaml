@@ -4,6 +4,12 @@ dynamic_obstacle_predictor:
     input_mode: simulation
     simulation_odom_topic: /opp_racecar/odom
     perception_topic: /f1/perception/object/obstacles/arr
+    # Apply Gaussian localization noise to dynamic-object x/y inputs. The
+    # sampled error is clipped independently per axis to +/- 0.10 m, matching
+    # the pose-noise augmentation used to train the deployed MDN.
+    input_pose_noise_std_m: 0.05
+    input_pose_noise_max_m: 0.10
+    input_pose_noise_seed: 20260824
     # RViz Publish Point (/clicked_point) becomes one persistent static
     # circular obstacle. A new click replaces the previous clicked obstacle.
     enable_clicked_point_static_obstacle: true

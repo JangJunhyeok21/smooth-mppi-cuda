@@ -188,9 +188,3 @@
     real_pose_topic: /newmcl_pose
     real_odom_topic: /odom
     real_drive_topic: /drive
-
-map2_opponent_driver:
-  ros__parameters:
-    track_csv: data/ifac2026/ifac2026_mppi_track_optimal.csv
-    target_speed: 1.8
-    lookahead_points: 12

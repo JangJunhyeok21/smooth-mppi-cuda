@@ -2,14 +2,14 @@
   ros__parameters:
     # 사용 모델: dynamic_mlp_residual_servo_lag 또는 DYNAMIC_SERVO_LAG
     # MLP 모델만 아래 학습 가중치를 읽고, Classic 모델은 이 파일을 읽지 않는다.
-    dynamics_model: dynamic_mlp_residual_servo_lag
+    dynamics_model: DYNAMIC_SERVO_LAG
     dynamic_mlp_servo_lag_weights_path: config/dynamic_40ms_residual_servo_lag.bin
     # MLP 보정 출력만 제한한다. 센서값과 최종 state에는 적용하지 않는다.
     mlp_max_residual_ax: 0.0          # [m/s^2]
     mlp_max_residual_ay: 8.0          # [m/s^2]
     mlp_max_residual_yaw_accel: 12.0  # [rad/s^2]
     # IMU는 odom 시각에 causal 정렬되어 6-state MPPI classic-model EKF에 사용된다.
-    imu_topic: /imu/data
+    imu_topic: /opp_imu/data
     imu_sync_max_age_s: 0.05
     imu_ema_alpha: 0.25
     # 0807 raw IMU is FRD; convert at the subscriber boundary to MPPI FLU.
@@ -17,9 +17,9 @@
     imu_ax_sign: 1.0
     imu_ay_sign: 1.0
     # 0817~0820 정지구간 robust median; FLU 변환 후 제거한다.
-    imu_wz_bias: 0.00073408385
-    imu_ax_bias: -0.40832535
-    imu_ay_bias: -0.14516330
+    imu_wz_bias: 0.0004
+    imu_ax_bias: -0.17
+    imu_ay_bias: 0.12
     # 6-state MPPI-model EKF. Order:
     # state/Q/P0 = [x, y, yaw, vx, vy, yaw_rate]
     # measurement/R = [MCL x, MCL y, MCL yaw, odom vx,
@@ -32,42 +32,39 @@
     max_steer: 0.4788        # rad
     # 현재 배포 모델의 학습 계약. ±4 후보는 tail 평가 미통과로 아직 배포하지 않는다.
     min_accel: -9.0          # m/s^2
-    max_accel: 10.0          # match the simulator plant; max_speed stays opponent-specific
+    max_accel: 10.0          # permit the requested 10 m/s^2 longitudinal acceleration
     min_speed: 0.5
-    max_speed: 2.0  # 허용하는 최고속도
+    max_speed: 4.0  # IFAC2026 measured collision-free: 13.86 s/lap
 
     # --- Costs (최적화 결과 반영) ---
-    q_v: 16.0 # vs 크기에 비례해서 
+    q_v: 1.0 # vs 크기에 비례해서 
     q_dist: 0.0             # legacy Euclidean path cost (MPCC에서는 0 유지)
-    q_contour: 1.5          # raceline은 강제 경로가 아닌 out-in-out 유도선으로 사용
-    q_lag: 0.1              # raceline 접선방향 오차는 최소한으로만 억제
+    q_contour: 0.0          # raceline은 강제 경로가 아닌 out-in-out 유도선으로 사용
+    q_lag: 0.0              # raceline 접선방향 오차는 최소한으로만 억제
     q_heading: 1.0          # 역주행/불안정 억제를 위한 약한 방향 regularization만 유지
-    q_error_speed: 0.0      # 중앙선 오차에 따른 속도 억제 비활성화
+    q_error_speed: 0.0     # preserve straight speed; reduce speed only while pose error grows
     q_du: 0.12
-    q_steer: 0.10
-    q_lat_g: 60.0 # friction ellipse 초과 비용
-    lat_g_soft_limit: 6.5                 # soft combined-grip ceiling # DD-diagram ay max 제한
-    longitudinal_accel_soft_limit: 9.0    # friction ellipse ax axis [m/s^2] #DD-diagram ax max 제한
+    q_steer: 0.0
+    q_lat_g: 200.0 # strongly reject combined-grip excess without lowering max_speed
+    lat_g_soft_limit: 8.5                 # soft combined-grip ceiling # DD-diagram ay max 제한
+    longitudinal_accel_soft_limit: 10.0   # do not penalize requested straight-line ax <= 10 m/s^2
     # 전륜 slip soft constraint: applied steer를 사용한 alpha_f 비용
-    q_front_slip: 300.0
-    front_slip_soft_limit_deg: 8.0
+    q_front_slip: 80.0
+    front_slip_soft_limit_deg: 6.0
     front_slip_cost_min_speed: 1.5
     # Rear-slip soft constraint: q * max(0, |alpha_r|-limit)^2.
     # alpha_r = -atan2(vy-l_r*yaw_rate, |vx|). It complements the GG ellipse
     # by detecting rear-axle saturation while total ax/ay is still moderate.
-    q_rear_slip: 800.0
-    rear_slip_soft_limit_deg: 5.0
+    q_rear_slip: 80.0
+    rear_slip_soft_limit_deg: 6.0
     rear_slip_cost_min_speed: 1.5         # disable ill-conditioned low-vx slip cost
     # MPC-style lane-boundary slack:
     # s_k=max(0, collision_radius-min_boundary_clearance), cost=q_s*s_k^2.
     # Boundary violation remains finite/selectable; only physical obstacles
     # retain post-rollout hard candidate rejection.
-    collision_radius: 0.4
-    q_boundary_slack: 5000.0
-    q_boundary_terminal_slack: 20000.0
-    # true: reject an off-track weighted-control rollout and use the
-    # lowest-cost safe sampled sequence. false: publish standard MPPI weighted
-    # controls without this post-optimization replacement.
+    collision_radius: 0.3       # planning clearance; absorb model/servo mismatch before wall contact
+    q_boundary_slack: 10000.0
+    q_boundary_terminal_slack: 50000.0
     # LMPC와 같은 terminal safe set: 최근 2개 완주 lap에서 진행도 주변 20점씩 사용.
     # 목적함수 전환: mpcc=contour/progress, lmpc=terminal safe-set/cost-to-go.
     # 현재 2 m/s safe set은 느리므로 랩타임 주행 기본값은 mpcc이다.
@@ -81,11 +78,12 @@
     safe_set_state_scale_yaw: 0.5      # yaw 오차 정규화 크기 [rad]
     q_progress: 100.0        # 경계를 가로지르는 가짜 progress가 지배하지 않도록 제한
     q_escape_vel: 0.0      # horizon 말단의 전진속도 보상
-    horizon_steps: 60       # 60 * model_dt(0.04 s) = 2.4 s prediction horizon
+    horizon_steps: 40       # 40 * model_dt(0.04 s) = 1.6 s prediction horizon
     # --- Obstacle Avoidance Params ---
-    obstacle_avoidance_enabled: true
-    # Separate predictor publishes obstacle-major poses at each 40 ms MPPI knot.
-    dynamic_obstacle_prediction_enabled: true
+    # The shared predictor predicts this opponent itself for the ego MPPI.
+    # Subscribing here would make mppi2 avoid its own predicted trajectory.
+    obstacle_avoidance_enabled: false
+    dynamic_obstacle_prediction_enabled: false
     dynamic_obstacle_trajectory_topic: /mppi/dynamic_obstacle_trajectory
     # MPPI receives obstacles exclusively from the separate predictor node.
     obstacle_timeout: 0.5
@@ -93,20 +91,25 @@
     # car_radius 진입 전부터 회피를 준비해 속도/조향의 급격한 변화를 막는다.
     obstacle_soft_margin: 0.0  # soft cost 시작 반경 = car_radius + 1.0 m
     # s=max(0, car_radius+margin-distance), cost=q_obs*s^2
-    q_obs: 5000.0
+    q_obs: 10000.0
     
     # --- Noise & Tuning ---
-    noise_steer_std: 0.35    # rad/s
-    noise_accel_std: 2.0     # m/s^3
+    noise_steer_std: 0.25    # rad/s
+    noise_accel_std: 0.5     # speed-command exploration rate [m/s^2]
     max_steer_rate: 50.0    # rad/s
     # Input slew rate: m/s^2 for direct-speed models, m/s^3 for acceleration-command models.
-    max_accel_rate: 50.0
+    # Direct-speed command slew limit [m/s^2]. At the 50 Hz controller tick,
+    # /drive.speed may therefore change by at most 10 * 0.02 = 0.20 m/s.
+    max_accel_rate: 10.0
     lambda: 20.0
     num_samples: 1600        # desktop simulation: ~4 ms measured
     visualize_candidates: false # K*T 후보 복사 비활성화
     publish_visualization: true # 실차 MPPI 주기에서 MarkerArray 생성/직렬화 비활성화
     # false이면 /mppi_optimal_trajectory와 8개 cost 재계산을 모두 생략한다(대회 권장).
     publish_optimal_trajectory: true
+    visualization_topic: /mppi_opponent_viz
+    optimal_trajectory_topic: /mppi_opponent_optimal_trajectory
+    kf_state_topic: /opp_kf_state
     # path_publisher owns the slack-zero boundary MarkerArray; MPPI does not
     # duplicate this static visualization publisher.
     boundary_visualization_topic: /mppi_boundary_viz
@@ -125,7 +128,7 @@
     kinematic_position_speed_scale: 1.0  # offline state is physical ground-relative body velocity
     kinematic_no_slip: true               # residual checkpoint 학습 조건(beta=0)
     # vx_cmd 추종 회귀값: 종방향 residual 없이 실제 바퀴속도 응답을 재현
-    speed_servo_kp: 10.3739069  # same longitudinal plant as simulator/ego
+    speed_servo_kp: 10.3739069  # bag/session-disjoint vx rollout regression
     # r_kin=vx*tan(delta)/L is a target, not an instantaneous yaw-rate assignment.
     kinematic_yaw_rate_time_constant: 0.1
     kinematic_max_yaw_accel: 15.0
@@ -133,9 +136,9 @@
     # Servo specification: 60 deg / 0.16 s = 6.5449847 rad/s.
     actuator_max_steer_rate: 6.544984694978735 # 제조사 spec: 60 deg / 0.16 s = 6.5449847 rad/s
     # all6_seed31 검증 조합: 1.2 s yaw-rate MAE/p95가 회귀 후보보다 우수함.
-    speed_reference_accel_time_constant: 0.0358766486
-    speed_reference_brake_time_constant: 0.112208409
-    actuator_max_speed_reference_rate: 10.0
+    speed_reference_accel_time_constant: 0.0358766486  # bag/session-disjoint vx rollout regression
+    speed_reference_brake_time_constant: 0.112208409  # bag/session-disjoint vx rollout regression
+    actuator_max_speed_reference_rate: 10.0  # allow internal v_ref to follow at 10 m/s^2
     I_z: 0.04712
     Cm0: 0.04                # 고속 감쇠용 모터 역기전력 계수
     
@@ -162,14 +165,14 @@
     E_r: 0.0597
 
     # 0807 dynamic regression; used only by dynamic_mlp_residual.
-    dynamic_mlp_B_f: 2.8106457835009238
-    dynamic_mlp_C_f: 0.775431537087077
-    dynamic_mlp_D_f: 0.9220400888696738
-    dynamic_mlp_E_f: -4.92271228377628
-    dynamic_mlp_B_r: 3.1366228633512927
-    dynamic_mlp_C_r: 0.33160175643604217
-    dynamic_mlp_D_r: 2.4363987954512116
-    dynamic_mlp_E_r: -10.0
+    dynamic_mlp_B_f: 4.6831638515901375
+    dynamic_mlp_C_f: 0.27946503463774897
+    dynamic_mlp_D_f: 1.7695749799699274
+    dynamic_mlp_E_f: -1.9993252777945043
+    dynamic_mlp_B_r: 4.363806277953832
+    dynamic_mlp_C_r: 0.7652213211298782
+    dynamic_mlp_D_r: 1.4379688568401385
+    dynamic_mlp_E_r: 0.999999757857285
     dynamic_mlp_I_z: 0.09059291359052173
 
     # --- Runtime environment and topics ---
@@ -184,28 +187,8 @@
     # true : simulator pose + twist come from simulation_odom_topic
     # false: real_pose_topic supplies map pose and real_odom_topic supplies velocity
     is_simulation: true
-    simulation_odom_topic: /ego_racecar/odom
-    simulation_drive_topic: /drive  # must match f1tenth_gym_ros sim.yaml ego_drive_topic
+    simulation_odom_topic: /opp_racecar/odom
+    simulation_drive_topic: /opp_drive  # must match f1tenth_gym_ros sim.yaml opp_drive_topic
     real_pose_topic: /newmcl_pose
     real_odom_topic: /odom
     real_drive_topic: /drive
-
-map2_opponent_driver:
-  ros__parameters:
-    track_csv: data/ifac2026/ifac2026_mppi_track_optimal.csv
-    target_speed: 1.8
-    lookahead_points: 12
-
-# Opponent-only runtime overrides. Model/cost parameters above are now an
-# independent copy and can be tuned without changing ego config/params.yaml.
-smppi_opponent_controller:
-  ros__parameters:
-    is_simulation: true
-    simulation_odom_topic: /opp_racecar/odom
-    simulation_drive_topic: /opp_drive
-    imu_topic: /opp_imu/data
-    obstacle_avoidance_enabled: true
-    dynamic_obstacle_prediction_enabled: true
-    visualization_topic: /mppi2/viz
-    optimal_trajectory_topic: /mppi2/optimal_trajectory
-    kf_state_topic: /mppi2/kf_state

@@ -31,5 +31,18 @@ def generate_launch_description():
             name='smppi_opponent_controller', output='screen',
             parameters=[param_file, {
                 'csv_file_path': ParameterValue(track_csv, value_type=str),
+                # Vehicle-role wiring belongs to this launch file so copying
+                # ego model/cost parameters cannot reconnect mppi2 to ego.
+                'is_simulation': True,
+                'simulation_odom_topic': '/opp_racecar/odom',
+                'simulation_drive_topic': '/opp_drive',
+                'imu_topic': '/opp_imu/data',
+                'visualization_topic': '/mppi_opponent_viz',
+                'optimal_trajectory_topic': '/mppi_opponent_optimal_trajectory',
+                'kf_state_topic': '/opp_kf_state',
+                # The shared predictor describes this opponent for ego MPPI;
+                # consuming it here would make mppi2 avoid itself.
+                'obstacle_avoidance_enabled': False,
+                'dynamic_obstacle_prediction_enabled': False,
             }]),
     ])

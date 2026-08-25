@@ -30,7 +30,7 @@ bridge:
     # RViz Marker mirroring odom_noise. A lifetime of 0 keeps it forever;
     # a positive value removes it if fresh simulator messages stop arriving.
     ego_noisy_odom_marker_topic: 'odom_noise_marker'
-    ego_noisy_odom_marker_lifetime_s: 0.2
+    ego_noisy_odom_marker_lifetime_s: 0.01
     ego_opp_odom_topic: 'opp_odom'
     # Must match smooth-mppi-cuda simulation_drive_topic. The bridge node has
     # no namespace, therefore this resolves to the absolute /drive topic.

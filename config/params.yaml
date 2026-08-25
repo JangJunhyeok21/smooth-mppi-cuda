@@ -38,7 +38,7 @@
 
     # --- Costs (최적화 결과 반영) ---
     q_v: 1.0 # vs 크기에 비례해서 
-    q_dist: 0.0             # legacy Euclidean path cost (MPCC에서는 0 유지)
+    q_dist: 10.0             # legacy Euclidean path cost (MPCC에서는 0 유지)
     q_contour: 0.0          # raceline은 강제 경로가 아닌 out-in-out 유도선으로 사용
     q_lag: 0.0              # raceline 접선방향 오차는 최소한으로만 억제
     q_heading: 1.0          # 역주행/불안정 억제를 위한 약한 방향 regularization만 유지
@@ -88,10 +88,11 @@
     dynamic_obstacle_trajectory_topic: /mppi/dynamic_obstacle_trajectory
     # MPPI receives obstacles exclusively from the separate predictor node.
     obstacle_timeout: 0.5
-    car_radius: 0.24           # ego footprint radius; predictor supplies opponent radius
-    # car_radius 진입 전부터 회피를 준비해 속도/조향의 급격한 변화를 막는다.
-    obstacle_soft_margin: 0.0  # soft cost 시작 반경 = car_radius + 1.0 m
-    # s=max(0, car_radius+margin-distance), cost=q_obs*s^2
+    # Predictor supplies each obstacle's own radius (semi_major/semi_minor);
+    # ego's own footprint is not added to the clearance margin.
+    max_obstacles: 7           # caps CUDA dynamic-obstacle buffers at solver construction
+    obstacle_soft_margin: 0.0  # soft cost 시작 반경 = predictor obstacle radius + margin
+    # s=max(0, obstacle_radius+margin-distance), cost=q_obs*s^2
     q_obs: 10000.0
     
     # --- Noise & Tuning ---
@@ -136,7 +137,7 @@
     # all6_seed31 검증 조합: 1.2 s yaw-rate MAE/p95가 회귀 후보보다 우수함.
     speed_reference_accel_time_constant: 0.0358766486  # bag/session-disjoint vx rollout regression
     speed_reference_brake_time_constant: 0.112208409  # bag/session-disjoint vx rollout regression
-    actuator_max_speed_reference_rate: 10.0  # allow internal v_ref to follow at 10 m/s^2
+    actuator_max_speed_reference_rate: 8.0  # allow internal v_ref to follow at 10 m/s^2
     I_z: 0.04712
     Cm0: 0.04                # 고속 감쇠용 모터 역기전력 계수
     

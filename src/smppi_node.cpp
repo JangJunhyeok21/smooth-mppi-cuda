@@ -205,7 +205,7 @@ private:
             }
         }
         if (horizon <= 0 || horizon > MAX_DYNAMIC_OBSTACLE_HORIZON ||
-            obstacle_count <= 0 || obstacle_count > MAX_OBS ||
+            obstacle_count <= 0 || obstacle_count > mppi_params_.max_obstacles ||
             msg->x.size() != expected || msg->y.size() != expected ||
             msg->yaw.size() != expected || msg->semi_major.size() != expected ||
             msg->semi_minor.size() != expected ||
@@ -649,14 +649,6 @@ private:
                 compute_min_boundary_distance(s,idx));
             boundary += (t+1==count?mppi_params_.q_boundary_terminal_slack:
                 mppi_params_.q_boundary_slack)*slack*slack;
-            const float obstacle_soft_radius=
-                mppi_params_.car_radius+mppi_params_.obstacle_soft_margin;
-            for(int i=0;i<mppi_params_.num_obstacles;++i){
-                const float ox=s.x-mppi_params_.obs_x[i],oy=s.y-mppi_params_.obs_y[i];
-                const float obs_slack=std::max(
-                    0.f,obstacle_soft_radius-std::hypot(ox,oy));
-                obstacle += mppi_params_.q_obs*obs_slack*obs_slack;
-            }
         }
 
         // Per-step 반환 항목과 terminal progress reward를 분리해 노출한다.
@@ -781,7 +773,11 @@ private:
         mppi_params_.safe_set_inv_y_scale=1.0/std::max(1.0e-6,this->get_parameter("safe_set_state_scale_y").as_double());
         mppi_params_.safe_set_inv_yaw_scale=1.0/std::max(1.0e-6,this->get_parameter("safe_set_state_scale_yaw").as_double());
         mppi_params_.safe_set_count=0;
-        this->declare_parameter("car_radius",           0.15);   mppi_params_.car_radius    = this->get_parameter("car_radius").as_double();
+        // Sizes the CUDA dynamic-obstacle buffers once at solver construction
+        // (allocate_cuda_memory()); changing this parameter at runtime has no
+        // effect since the buffers are never reallocated.
+        this->declare_parameter("max_obstacles", 5);
+        mppi_params_.max_obstacles = this->get_parameter("max_obstacles").as_int();
         this->declare_parameter("obstacle_soft_margin", 1.0);
         mppi_params_.obstacle_soft_margin =
             this->get_parameter("obstacle_soft_margin").as_double();
@@ -970,6 +966,7 @@ private:
             mppi_params_.collision_radius = std::abs(mppi_params_.collision_radius);
         mppi_params_.obstacle_soft_margin =
             std::max(0.0f, mppi_params_.obstacle_soft_margin);
+        mppi_params_.max_obstacles = std::max(1, mppi_params_.max_obstacles);
         if (mppi_params_.q_boundary_slack < 0.0f)
             mppi_params_.q_boundary_slack = 0.0f;
         if (mppi_params_.q_boundary_terminal_slack < 0.0f)
@@ -1532,27 +1529,6 @@ private:
         terminal_candidate.color.r=0.5f;terminal_candidate.color.g=1.0f;
         terminal_candidate.color.b=0.1f;terminal_candidate.color.a=0.85f;
         markers.markers.push_back(std::move(terminal_candidate));
-        for (int i = 0; i < mppi_params_.num_obstacles; ++i) {
-            visualization_msgs::msg::Marker obstacle;
-            obstacle.header.frame_id = "map";
-            obstacle.header.stamp = this->now();
-            obstacle.ns = "mppi_obstacles";
-            obstacle.id = 100 + i;
-            obstacle.type = visualization_msgs::msg::Marker::CYLINDER;
-            obstacle.action = visualization_msgs::msg::Marker::ADD;
-            obstacle.pose.position.x = mppi_params_.obs_x[i];
-            obstacle.pose.position.y = mppi_params_.obs_y[i];
-            obstacle.pose.position.z = 0.05;
-            obstacle.pose.orientation.w = 1.0;
-            obstacle.scale.x = 2.0f * mppi_params_.car_radius;
-            obstacle.scale.y = 2.0f * mppi_params_.car_radius;
-            obstacle.scale.z = 0.10;
-            obstacle.color.r = 1.0f;
-            obstacle.color.g = 0.1f;
-            obstacle.color.b = 0.05f;
-            obstacle.color.a = 0.35f;
-            markers.markers.push_back(obstacle);
-        }
         if (dynamic_obstacle_active_) {
             for (int obstacle_index = 0; obstacle_index < dynamic_obstacle_count_;
                  ++obstacle_index) {
@@ -1573,23 +1549,6 @@ private:
             }
         }
 
-        // MarkerArray does not replace the previous marker set.  An ADD for
-        // the current obstacles therefore leaves a marker behind whenever a
-        // perception message contains fewer obstacles (including an empty
-        // array), or when the obstacle input times out.  Explicitly delete
-        // the IDs that were published in the previous cycle but are no
-        // longer active so RViz reflects the same obstacle set used by MPPI.
-        for (int i = mppi_params_.num_obstacles;
-             i < published_obstacle_marker_count_; ++i) {
-            visualization_msgs::msg::Marker deleted_obstacle;
-            deleted_obstacle.header.frame_id = "map";
-            deleted_obstacle.header.stamp = this->now();
-            deleted_obstacle.ns = "mppi_obstacles";
-            deleted_obstacle.id = 100 + i;
-            deleted_obstacle.action = visualization_msgs::msg::Marker::DELETE;
-            markers.markers.push_back(deleted_obstacle);
-        }
-        published_obstacle_marker_count_ = mppi_params_.num_obstacles;
         vis_pub_->publish(markers);
     }
 
@@ -1649,7 +1608,6 @@ private:
     std::vector<bool> dynamic_obs_is_dynamic_;
     rclcpp::Time dynamic_obstacle_stamp_{0, 0, RCL_ROS_TIME};
     double obstacle_timeout_s_{0.5};
-    int published_obstacle_marker_count_{0};
     int published_optimal_arrow_count_{0};
     bool is_simulation_{true}, pose_received_{false}, velocity_received_{false};
     bool has_prev_velocity_{false};

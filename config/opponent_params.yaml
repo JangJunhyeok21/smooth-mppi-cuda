@@ -89,10 +89,11 @@
     dynamic_obstacle_trajectory_topic: /mppi/dynamic_obstacle_trajectory
     # MPPI receives obstacles exclusively from the separate predictor node.
     obstacle_timeout: 0.5
-    car_radius: 0.24           # ego footprint radius; predictor supplies opponent radius
-    # car_radius 진입 전부터 회피를 준비해 속도/조향의 급격한 변화를 막는다.
-    obstacle_soft_margin: 0.0  # soft cost 시작 반경 = car_radius + 1.0 m
-    # s=max(0, car_radius+margin-distance), cost=q_obs*s^2
+    # Predictor supplies each obstacle's own radius (semi_major/semi_minor);
+    # ego's own footprint is not added to the clearance margin.
+    max_obstacles: 5           # caps CUDA dynamic-obstacle buffers at solver construction
+    obstacle_soft_margin: 0.0  # soft cost 시작 반경 = predictor obstacle radius + margin
+    # s=max(0, obstacle_radius+margin-distance), cost=q_obs*s^2
     q_obs: 10000.0
     
     # --- Noise & Tuning ---

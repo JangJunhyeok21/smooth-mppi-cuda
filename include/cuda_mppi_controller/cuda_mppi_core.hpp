@@ -24,7 +24,6 @@
         } \
     } while (0)
 
-#define MAX_OBS 5 // 처리 가능한 최대 장애물 개수
 #define MAX_DYNAMIC_OBSTACLE_HORIZON 120
 #define MAX_SAFE_SET_POINTS 40 // LMPC: recent 2 laps x K_NEAR(20)
 #define RESIDUAL_HISTORY 50
@@ -143,9 +142,11 @@ struct Params {
     
     // Obstacle Avoidance Params
     int num_obstacles;
-    float obs_x[MAX_OBS];
-    float obs_y[MAX_OBS];
     float car_radius;
+    // Runtime cap on predictor-reported obstacles. Sizes the dynamic-obstacle
+    // CUDA buffers at construction time (allocate_cuda_memory()) and bounds
+    // set_dynamic_obstacles()/the incoming DynamicObstacleTrajectory message.
+    int max_obstacles;
     // Extra distance outside the hard collision radius where the smooth
     // obstacle cost starts acting.
     float obstacle_soft_margin;

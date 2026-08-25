@@ -39,7 +39,7 @@ dynamic_obstacle_predictor:
     dynamic_speed_threshold: 1.0
     # Static obstacle ellipse semi-major == semi-minor == this radius.
     static_car_radius: 0.55
-    opponent_radius: 0.3
+    opponent_radius: 0.4
     maximum_radius: 0.75
     longitudinal_ellipse_gain: 5.1
     lateral_ellipse_gain: 1.1

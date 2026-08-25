@@ -800,7 +800,13 @@ namespace mppi
 
         // Front-tire slip soft constraint. Use the same servo-lagged steering
         // angle and sign convention as update_dynamic_mlp_residual().
-        constexpr float MIN_FRONT_SLIP_SPEED = 0.5f;
+        // vy and omega vanish proportionally to v in a no-slip low-speed
+        // turn, so atan2(vy+l_f*omega, v) has a finite, correctly-small
+        // limit as v -> 0 and needs only a divide-by-zero guard here, not a
+        // large speed floor (a larger floor pins the denominator while the
+        // numerator keeps shrinking, artificially inflating the inferred
+        // slip angle toward the raw steering angle at low speed).
+        constexpr float MIN_FRONT_SLIP_SPEED = 1.0e-3f;
         const float safe_front_vx = fmaxf(fabsf(s.v), MIN_FRONT_SLIP_SPEED);
         const float front_tire_slip_angle = applied_steering_angle - atan2f(
             s.vy + p.l_f * s.omega, safe_front_vx);
@@ -816,9 +822,10 @@ namespace mppi
 
         // Rear-tire slip soft constraint. Unlike the GG ellipse, this catches
         // rear-axle saturation/oversteer even when total vehicle acceleration
-        // remains inside the combined-grip boundary. Disable it at low speed,
-        // where dividing by vx makes the inferred slip angle ill-conditioned.
-        constexpr float MIN_REAR_SLIP_SPEED = 0.5f;
+        // remains inside the combined-grip boundary. As with the front slip
+        // angle above, vy/omega vanish proportionally to v at low speed, so
+        // only a divide-by-zero guard is needed, not a large speed floor.
+        constexpr float MIN_REAR_SLIP_SPEED = 1.0e-3f;
         const float safe_vx = fmaxf(fabsf(s.v), MIN_REAR_SLIP_SPEED);
         const float rear_tire_slip_angle = -atan2f(
             s.vy - p.l_r * s.omega, safe_vx);
@@ -1142,19 +1149,6 @@ namespace mppi
             }
 
             float step_obstacle_cost = 0.0f;
-            for (int obstacle_index = 0;
-                 obstacle_index < p.num_obstacles && obstacle_index < MAX_OBS;
-                 ++obstacle_index) {
-                const float dx = x.x - p.obs_x[obstacle_index];
-                const float dy = x.y - p.obs_y[obstacle_index];
-                const float signed_clearance =
-                    sqrtf(dx * dx + dy * dy) - p.car_radius;
-                min_obstacle_clearance = fminf(
-                    min_obstacle_clearance, signed_clearance);
-                const float soft_slack = fmaxf(
-                    0.0f, p.obstacle_soft_margin - signed_clearance);
-                step_obstacle_cost += p.q_obs * soft_slack * soft_slack;
-            }
             if (dynamic_obstacle_count > 0 && dynamic_obstacle_horizon > 0) {
                 const int dynamic_step = min(t, dynamic_obstacle_horizon - 1);
                 for (int obstacle_index = 0;
@@ -1342,13 +1336,13 @@ namespace mppi
         CUDA_CHECK(cudaMalloc(&d_rng_states_, K_ * T_ * sizeof(curandState)));
         CUDA_CHECK(cudaMalloc(&d_residual_history_, RESIDUAL_HISTORY*RESIDUAL_FEATURES*sizeof(float)));
         CUDA_CHECK(cudaMalloc(&d_residual_hidden_, RESIDUAL_HIDDEN*sizeof(float)));
-        constexpr int max_dynamic_points = MAX_OBS * MAX_DYNAMIC_OBSTACLE_HORIZON;
+        const int max_dynamic_points = params_.max_obstacles * MAX_DYNAMIC_OBSTACLE_HORIZON;
         CUDA_CHECK(cudaMalloc(&d_dynamic_obs_x_, max_dynamic_points * sizeof(float)));
         CUDA_CHECK(cudaMalloc(&d_dynamic_obs_y_, max_dynamic_points * sizeof(float)));
         CUDA_CHECK(cudaMalloc(&d_dynamic_obs_yaw_, max_dynamic_points * sizeof(float)));
         CUDA_CHECK(cudaMalloc(&d_dynamic_obs_semi_major_, max_dynamic_points * sizeof(float)));
         CUDA_CHECK(cudaMalloc(&d_dynamic_obs_semi_minor_, max_dynamic_points * sizeof(float)));
-        CUDA_CHECK(cudaMalloc(&d_dynamic_obs_is_dynamic_, MAX_OBS * sizeof(std::uint8_t)));
+        CUDA_CHECK(cudaMalloc(&d_dynamic_obs_is_dynamic_, params_.max_obstacles * sizeof(std::uint8_t)));
         CUDA_CHECK(cudaMemset(d_residual_history_,0,RESIDUAL_HISTORY*RESIDUAL_FEATURES*sizeof(float)));
         CUDA_CHECK(cudaMemcpyToSymbol(rw_feature_mean,residual_weights::feature_mean,sizeof(residual_weights::feature_mean)));
         CUDA_CHECK(cudaMemcpyToSymbol(rw_feature_std,residual_weights::feature_std,sizeof(residual_weights::feature_std)));
@@ -1601,7 +1595,7 @@ namespace mppi
         const std::vector<float>& semi_minor,
         const std::vector<bool>& is_dynamic,
         int obstacle_count, int horizon) {
-        dynamic_obstacle_count_ = std::max(0, std::min(obstacle_count, MAX_OBS));
+        dynamic_obstacle_count_ = std::max(0, std::min(obstacle_count, params_.max_obstacles));
         dynamic_obstacle_horizon_ = std::max(0,
             std::min(horizon, MAX_DYNAMIC_OBSTACLE_HORIZON));
         const std::size_t count = static_cast<std::size_t>(
@@ -1645,15 +1639,7 @@ namespace mppi
         params_.rollout_obstacle_ahead=false;
         const float start_cos=std::cos(current_state.yaw);
         const float start_sin=std::sin(current_state.yaw);
-        for(int i=0;i<params_.num_obstacles;++i) {
-            const float dx=params_.obs_x[i]-current_state.x;
-            const float dy=params_.obs_y[i]-current_state.y;
-            if(dx*start_cos+dy*start_sin>-0.25f && dx*dx+dy*dy<36.0f) {
-                params_.rollout_obstacle_ahead=true;
-                break;
-            }
-        }
-        if (!params_.rollout_obstacle_ahead && dynamic_obstacle_count_ > 0 &&
+        if (dynamic_obstacle_count_ > 0 &&
             dynamic_obstacle_horizon_ > 0) {
             for (int i = 0; i < dynamic_obstacle_count_; ++i) {
                 const int index = i * dynamic_obstacle_horizon_;
@@ -1804,18 +1790,12 @@ namespace mppi
 
     float MPPISolver::trajectory_min_obstacle_clearance(
         const std::vector<State>& trajectory) const {
-        if((params_.num_obstacles<=0 || trajectory.empty()) &&
-           (dynamic_obstacle_count_ <= 0 || dynamic_obstacle_horizon_ <= 0))
+        if(trajectory.empty() ||
+           dynamic_obstacle_count_ <= 0 || dynamic_obstacle_horizon_ <= 0)
             return std::numeric_limits<float>::infinity();
         float minimum=std::numeric_limits<float>::infinity();
         for(size_t step=0; step<trajectory.size(); ++step) {
             const State& state=trajectory[step];
-            for(int i=0;i<params_.num_obstacles;++i) {
-                const float dx=state.x-params_.obs_x[i];
-                const float dy=state.y-params_.obs_y[i];
-                minimum=std::min(minimum,
-                    std::sqrt(dx*dx+dy*dy)-params_.car_radius);
-            }
             if(dynamic_obstacle_count_ > 0 && dynamic_obstacle_horizon_ > 0) {
                 const int dynamic_step=std::min(static_cast<int>(step),
                                                 dynamic_obstacle_horizon_-1);

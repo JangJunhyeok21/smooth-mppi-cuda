@@ -43,6 +43,7 @@ import numpy as np
 import inspect
 
 import pathlib
+import os
 import sys
 # Prefer the f1tenth_gym submodule beside this bridge. The launch file also
 # prepends it to PYTHONPATH; this fallback keeps direct `ros2 run` consistent.
@@ -271,6 +272,9 @@ class GymBridge(Node):
                     self.vehicle_params['steer_servo_time_constant'],
                     self.vehicle_params['speed_reference_accel_time_constant'],
                     self.vehicle_params['speed_reference_brake_time_constant']))
+        # Rendering is not used by the ROS bridge itself. Keep it opt-in so
+        # headless simulator runs do not require a Qt/pygame backend.
+        render_mode = None
         # env backend
         if self.drive_with_accel and not self.direct_speed_model:
             self.env = gym.make(
@@ -288,7 +292,7 @@ class GymBridge(Node):
                                     "scale": scale,
                                     "lidar_dist": self.get_parameter("scan_distance_to_base_link").value
                                 },
-                                render_mode="rgb_array",
+                                render_mode=render_mode,
                             )
         else:
             self.env = gym.make(
@@ -306,7 +310,7 @@ class GymBridge(Node):
                                     "scale": scale,
                                     "lidar_dist": self.get_parameter("scan_distance_to_base_link").value
                                 },
-                                render_mode="rgb_array",
+                                render_mode=render_mode,
                             )
 
         sx = self.get_parameter('sx').value

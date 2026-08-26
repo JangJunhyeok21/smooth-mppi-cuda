@@ -18,15 +18,9 @@ PARAMS = ROOT / "config/params.yaml"
 DEFAULT_OUT = ROOT / "model_tuning/results/ifac2026_30lap_tuning/domain_isolated_search"
 
 CANDIDATES = (
-    ("baseline_current", 71, {}),
-    ("rate8_current", 72,
-     {"actuator_max_speed_reference_rate": 8.0}),
-    ("rate8_slew15", 73,
-     {"actuator_max_speed_reference_rate": 8.0,
-      "max_accel_rate": 15.0, "q_du": 0.08}),
-    ("rate8_slew20", 74,
-     {"actuator_max_speed_reference_rate": 8.0,
-      "max_accel_rate": 20.0, "q_du": 0.05, "noise_accel_std": 0.9}),
+    ("params1", 71, ROOT / "config/params1.yaml"),
+    ("params2", 72, ROOT / "config/params2.yaml"),
+    ("params3", 73, ROOT / "config/params3.yaml"),
 )
 
 
@@ -53,7 +47,7 @@ def stop(item):
 
 
 def run_candidate(candidate, output_root, laps, timeout):
-    name, domain, overrides = candidate
+    name, domain, param_file = candidate
     out = output_root / name
     out.mkdir(parents=True, exist_ok=True)
     for filename in ("summary.txt", "map1_lap_data.npz",
@@ -70,6 +64,7 @@ def run_candidate(candidate, output_root, laps, timeout):
         "F1TENTH_SIM_TRACK_CSV": str(TRACK),
         "F1TENTH_SIM_NUM_AGENTS": "1",
         "F1TENTH_SIM_ENABLE_RVIZ": "false",
+        "F1TENTH_SIM_PARAMS_FILE": str(param_file),
     })
     simulator = controller = recorder = None
     try:
@@ -85,21 +80,18 @@ def run_candidate(candidate, output_root, laps, timeout):
         time.sleep(0.5)
         command = [
             "ros2", "run", "smppi_cuda_controller", "smppi_node", "--ros-args",
-            "--params-file", str(PARAMS),
+            "--params-file", str(param_file),
             "-p", "csv_file_path:=data/ifac2026/ifac2026_mppi_track_optimal.csv",
             "-p", "is_simulation:=true",
             "-p", "obstacle_avoidance_enabled:=false",
             "-p", "max_speed:=10.0",
-            "-p", "actuator_max_speed_reference_rate:=6.0",
-            "-p", "q_progress:=140.0",
+            "-p", "actuator_max_speed_reference_rate:=7.0",
             "-p", "q_contour:=0.0",
             "-p", "q_heading:=1.0",
-            "-p", "collision_radius:=0.3",
+            "-p", "collision_radius:=0.35",
             "-p", "q_boundary_slack:=10000.0",
             "-p", "q_boundary_terminal_slack:=50000.0",
         ]
-        for key, value in overrides.items():
-            command.extend(("-p", f"{key}:={value}"))
         controller = start(command, env, out / "mppi.log")
         deadline = time.monotonic() + timeout + 20
         summary = out / "summary.txt"
@@ -109,7 +101,7 @@ def run_candidate(candidate, output_root, laps, timeout):
             raise TimeoutError("recorder did not produce summary.txt")
     except Exception as error:
         return {"name": name, "domain": domain, "error": repr(error),
-                "overrides": overrides}
+                "param_file": str(param_file)}
     finally:
         stop(controller)
         stop(recorder)
@@ -120,7 +112,7 @@ def run_candidate(candidate, output_root, laps, timeout):
     if summary.exists():
         fields = dict(line.split("=", 1) for line in summary.read_text().splitlines()
                       if "=" in line)
-    return {"name": name, "domain": domain, "overrides": overrides, **fields}
+    return {"name": name, "domain": domain, "param_file": str(param_file), **fields}
 
 
 def main():

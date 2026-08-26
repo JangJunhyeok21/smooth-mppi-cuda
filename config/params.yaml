@@ -63,7 +63,7 @@
     # s_k=max(0, collision_radius-min_boundary_clearance), cost=q_s*s_k^2.
     # Boundary violation remains finite/selectable; only physical obstacles
     # retain post-rollout hard candidate rejection.
-    collision_radius: 0.3       # planning clearance; absorb model/servo mismatch before wall contact
+    collision_radius: 0.35       # planning clearance; absorb model/servo mismatch before wall contact
     q_boundary_slack: 10000.0
     q_boundary_terminal_slack: 50000.0
     # LMPC와 같은 terminal safe set: 최근 2개 완주 lap에서 진행도 주변 20점씩 사용.
@@ -138,7 +138,7 @@
     # all6_seed31 검증 조합: 1.2 s yaw-rate MAE/p95가 회귀 후보보다 우수함.
     speed_reference_accel_time_constant: 0.0943852924  # bag/session-disjoint vx rollout regression
     speed_reference_brake_time_constant: 0.103878354  # bag/session-disjoint vx rollout regression
-    actuator_max_speed_reference_rate: 6.0  # 30-lap best; tested upper bound 8.0 was slower
+    actuator_max_speed_reference_rate: 7.0  # 30-lap best; tested upper bound 8.0 was slower
     I_z: 0.04712
     Cm0: 0.04                # 고속 감쇠용 모터 역기전력 계수
     
@@ -186,7 +186,7 @@
     publish_rate: 0.2 # Hz
     # true : simulator pose + twist come from simulation_odom_topic
     # false: real_pose_topic supplies map pose and real_odom_topic supplies velocity
-    is_simulation: true
+    is_simulation: false
     simulation_odom_topic: /ego_racecar/odom_noise
     simulation_drive_topic: /drive  # must match f1tenth_gym_ros sim.yaml ego_drive_topic
     real_pose_topic: /newmcl_pose

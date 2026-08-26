@@ -1,5 +1,4 @@
-# IFAC2026 MPPI rank 3: rate8/slew15, 8 laps / 77.088185 s / 9.636 s per lap.
-# This candidate completed 8 laps without collision but has not passed a 30-lap run.
+# IFAC2026 MPPI rank 3: 8 laps / 8.995 s per lap / fixed rate 7.0 / radius 0.35.
 /**:
   ros__parameters:
     # 사용 모델: dynamic_mlp_residual_servo_lag 또는 DYNAMIC_SERVO_LAG
@@ -45,26 +44,26 @@
     q_lag: 0.0              # raceline 접선방향 오차는 최소한으로만 억제
     q_heading: 1.0          # weak direction regularization
     q_error_speed: 0.0     # preserve straight speed; reduce speed only while pose error grows
-    q_du: 0.08             # rank-3 rate8/slew15 candidate
+    q_du: 0.12             # matched to the stable relaxed-slip candidate
     q_steer: 0.0
-    q_lat_g: 200.0 # strongly reject combined-grip excess without lowering max_speed
-    lat_g_soft_limit: 8.5                 # soft combined-grip ceiling # DD-diagram ay max 제한
+    q_lat_g: 100.0 # relaxed combined-grip penalty for lap-time tuning
+    lat_g_soft_limit: 9.0                 # relaxed combined-grip ceiling
     longitudinal_accel_soft_limit: 10.0   # do not penalize requested straight-line ax <= 10 m/s^2
     # 전륜 slip soft constraint: applied steer를 사용한 alpha_f 비용
-    q_front_slip: 300.0
-    front_slip_soft_limit_deg: 12.0
+    q_front_slip: 100.0
+    front_slip_soft_limit_deg: 14.0
     front_slip_cost_min_speed: 1.5
     # Rear-slip soft constraint: q * max(0, |alpha_r|-limit)^2.
     # alpha_r = -atan2(vy-l_r*yaw_rate, |vx|). It complements the GG ellipse
     # by detecting rear-axle saturation while total ax/ay is still moderate.
-    q_rear_slip: 300.0
-    rear_slip_soft_limit_deg: 12.0
+    q_rear_slip: 100.0
+    rear_slip_soft_limit_deg: 14.0
     rear_slip_cost_min_speed: 1.5         # disable ill-conditioned low-vx slip cost
     # MPC-style lane-boundary slack:
     # s_k=max(0, collision_radius-min_boundary_clearance), cost=q_s*s_k^2.
     # Boundary violation remains finite/selectable; only physical obstacles
     # retain post-rollout hard candidate rejection.
-    collision_radius: 0.3       # planning clearance; absorb model/servo mismatch before wall contact
+    collision_radius: 0.35      # fixed requested planning clearance
     q_boundary_slack: 10000.0
     q_boundary_terminal_slack: 50000.0
     # LMPC와 같은 terminal safe set: 최근 2개 완주 lap에서 진행도 주변 20점씩 사용.
@@ -78,8 +77,8 @@
     safe_set_state_scale_x: 1.0        # x 오차 정규화 크기 [m]
     safe_set_state_scale_y: 1.0        # y 오차 정규화 크기 [m]
     safe_set_state_scale_yaw: 0.5      # yaw 오차 정규화 크기 [rad]
-    q_progress: 110.0        # IFAC2026 30 laps: 267.45 s total, 8.915 s/lap
-    q_escape_vel: 0.0      # horizon 말단의 전진속도 보상
+    q_progress: 110.0        # matched to the stable relaxed-slip candidate
+    q_escape_vel: 40.0        # rank-3 exit-speed reward
     horizon_steps: 40       # 40 * model_dt(0.04 s) = 1.6 s prediction horizon
     # --- Obstacle Avoidance Params ---
     obstacle_avoidance_enabled: true
@@ -104,7 +103,7 @@
     # Input slew rate: m/s^2 for direct-speed models, m/s^3 for acceleration-command models.
     # Direct-speed command slew limit [m/s^2]. At the 50 Hz controller tick,
     # /drive.speed may therefore change by at most 10 * 0.02 = 0.20 m/s.
-    max_accel_rate: 15.0
+    max_accel_rate: 10.0
     lambda: 20.0
     num_samples: 1600        # desktop simulation: ~4 ms measured
     visualize_candidates: false # K*T 후보 복사 비활성화
@@ -139,7 +138,7 @@
     # all6_seed31 검증 조합: 1.2 s yaw-rate MAE/p95가 회귀 후보보다 우수함.
     speed_reference_accel_time_constant: 0.0943852924  # bag/session-disjoint vx rollout regression
     speed_reference_brake_time_constant: 0.103878354  # bag/session-disjoint vx rollout regression
-    actuator_max_speed_reference_rate: 8.0  # requested upper bound
+    actuator_max_speed_reference_rate: 7.0  # fixed requested actuator limit
     I_z: 0.04712
     Cm0: 0.04                # 고속 감쇠용 모터 역기전력 계수
     

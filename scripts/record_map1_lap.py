@@ -48,7 +48,14 @@ class Recorder(Node):
         self.create_subscription(Odometry,"/ego_racecar/odom",self.odom_cb,50)
         self.create_subscription(Odometry,"/opp_racecar/odom",self.obstacle_cb,20)
         self.create_subscription(AckermannDriveStamped,"/drive",self.drive_cb,50)
-        self.create_subscription(MppiTrajectory,"/mppi_optimal_trajectory",self.pred_cb,20)
+        # Prediction telemetry is optional for lap timing. Some stale ROS
+        # workspaces cannot load this custom message's Python type support;
+        # keep odom/drive/collision recording usable in that case.
+        try:
+            self.create_subscription(MppiTrajectory,"/mppi_optimal_trajectory",self.pred_cb,20)
+        except Exception:
+            self.get_logger().warning(
+                "MPPI prediction telemetry unavailable; continuing lap timing")
         self.create_subscription(Bool,"/collision0",self.collision_cb,10)
         self.create_timer(.1,self.check)
 

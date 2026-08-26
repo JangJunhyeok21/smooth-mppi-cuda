@@ -1,4 +1,4 @@
-# IFAC2026 MPPI rank 2: relaxed slip, 30 laps / 267.936191 s / 8.931 s per lap / no collision.
+# IFAC2026 MPPI rank 2: 8 laps / 8.953 s per lap / fixed rate 7.0 / radius 0.35.
 /**:
   ros__parameters:
     # 사용 모델: dynamic_mlp_residual_servo_lag 또는 DYNAMIC_SERVO_LAG
@@ -63,7 +63,7 @@
     # s_k=max(0, collision_radius-min_boundary_clearance), cost=q_s*s_k^2.
     # Boundary violation remains finite/selectable; only physical obstacles
     # retain post-rollout hard candidate rejection.
-    collision_radius: 0.3       # planning clearance; absorb model/servo mismatch before wall contact
+    collision_radius: 0.35      # fixed requested planning clearance
     q_boundary_slack: 10000.0
     q_boundary_terminal_slack: 50000.0
     # LMPC와 같은 terminal safe set: 최근 2개 완주 lap에서 진행도 주변 20점씩 사용.
@@ -78,7 +78,7 @@
     safe_set_state_scale_y: 1.0        # y 오차 정규화 크기 [m]
     safe_set_state_scale_yaw: 0.5      # yaw 오차 정규화 크기 [rad]
     q_progress: 110.0        # IFAC2026 30 laps: 267.45 s total, 8.915 s/lap
-    q_escape_vel: 0.0      # horizon 말단의 전진속도 보상
+    q_escape_vel: 30.0     # rank-2 exit-speed reward
     horizon_steps: 40       # 40 * model_dt(0.04 s) = 1.6 s prediction horizon
     # --- Obstacle Avoidance Params ---
     obstacle_avoidance_enabled: true
@@ -138,7 +138,7 @@
     # all6_seed31 검증 조합: 1.2 s yaw-rate MAE/p95가 회귀 후보보다 우수함.
     speed_reference_accel_time_constant: 0.0943852924  # bag/session-disjoint vx rollout regression
     speed_reference_brake_time_constant: 0.103878354  # bag/session-disjoint vx rollout regression
-    actuator_max_speed_reference_rate: 6.0  # 30-lap best; tested upper bound 8.0 was slower
+    actuator_max_speed_reference_rate: 7.0  # fixed requested actuator limit
     I_z: 0.04712
     Cm0: 0.04                # 고속 감쇠용 모터 역기전력 계수
     

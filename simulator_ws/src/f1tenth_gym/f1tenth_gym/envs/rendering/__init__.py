@@ -32,6 +32,9 @@ def make_renderer(
     cfg_file = pathlib.Path(__file__).parent.absolute() / "rendering.yaml"
     render_spec = RenderSpec.from_yaml(cfg_file)
 
+    if render_mode is None:
+        return None, render_spec
+
     if render_spec.render_type == "pygame":
         from .rendering_pygame import PygameEnvRenderer as EnvRenderer
     elif render_spec.render_type == "pyqt6":

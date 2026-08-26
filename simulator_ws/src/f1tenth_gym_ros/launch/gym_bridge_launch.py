@@ -104,10 +104,15 @@ def generate_launch_description():
         'config',
         'sim.yaml'
         )
-    controller_config = os.path.join(
-        get_package_share_directory('smppi_cuda_controller'),
-        'config',
-        'params.yaml')
+    controller_config = os.environ.get(
+        'F1TENTH_SIM_PARAMS_FILE',
+        os.path.join(
+            get_package_share_directory('smppi_cuda_controller'),
+            'config',
+            'params.yaml'))
+    controller_config = os.path.abspath(controller_config)
+    if not os.path.isfile(controller_config):
+        raise RuntimeError('Simulator params file is missing: ' + controller_config)
     controller_share = get_package_share_directory('smppi_cuda_controller')
     controller_parameters = yaml.safe_load(open(controller_config, 'r'))[
         '/**']['ros__parameters']

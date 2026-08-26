@@ -3,6 +3,8 @@
 #include "nav_msgs/msg/odometry.hpp"
 #include "sensor_msgs/msg/laser_scan.hpp"
 #include "sensor_msgs/msg/imu.hpp"
+#include "sensor_msgs/msg/joy.hpp"
+#include "std_msgs/msg/bool.hpp"
 #include "visualization_msgs/msg/marker_array.hpp"
 #include "geometry_msgs/msg/point.hpp"
 #include "geometry_msgs/msg/pose_stamped.hpp"
@@ -74,6 +76,17 @@ public:
             velocity_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
                 real_odom_topic_, 10,
                 std::bind(&MPPINode::velocity_callback, this, std::placeholders::_1));
+            manual_control_sub_ = this->create_subscription<std_msgs::msg::Bool>(
+                manual_control_topic_, rclcpp::QoS(rclcpp::KeepLast(1)).reliable(),
+                std::bind(&MPPINode::manual_control_callback, this,
+                          std::placeholders::_1));
+            joy_sub_ = this->create_subscription<sensor_msgs::msg::Joy>(
+                joy_topic_, rclcpp::SensorDataQoS().keep_last(1),
+                std::bind(&MPPINode::joy_callback, this, std::placeholders::_1));
+            RCLCPP_INFO(this->get_logger(),
+                        "Manual-mode guard: manual_control=%s, joy=%s, toggle_button=%d",
+                        manual_control_topic_.c_str(), joy_topic_.c_str(),
+                        manual_toggle_button_);
         } else {
             // Simulator: pose and twist already share one odometry frame.
             odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
@@ -396,6 +409,52 @@ private:
         last_velocity_stamp_ = stamp;
         has_prev_velocity_ = true;
         velocity_received_ = true;
+    }
+
+    void manual_control_callback(const std_msgs::msg::Bool::SharedPtr msg) {
+        manual_control_active_ = msg->data;
+        manual_control_received_ = true;
+        last_manual_control_time_ = this->now();
+    }
+
+    void joy_callback(const sensor_msgs::msg::Joy::SharedPtr msg) {
+        const bool pressed = manual_toggle_button_ >= 0 &&
+            static_cast<std::size_t>(manual_toggle_button_) < msg->buttons.size() &&
+            msg->buttons[manual_toggle_button_] != 0;
+        if (pressed && !joy_toggle_pressed_)
+            joy_manual_enabled_ = !joy_manual_enabled_;
+        joy_toggle_pressed_ = pressed;
+        joy_received_ = true;
+        last_joy_time_ = this->now();
+    }
+
+    bool manual_mode_active() const {
+        const auto now = this->now();
+        const bool manual_control_fresh = manual_control_received_ &&
+            (now - last_manual_control_time_).seconds() <= manual_mode_timeout_s_;
+        if (manual_control_fresh) return manual_control_active_;
+        const bool joy_fresh = joy_received_ &&
+            (now - last_joy_time_).seconds() <= manual_mode_timeout_s_;
+        if (joy_fresh) return joy_manual_enabled_;
+        // A missing mode heartbeat must never leave autonomous speed active.
+        return true;
+    }
+
+    void publish_manual_stop() {
+        ackermann_msgs::msg::AckermannDriveStamped stop;
+        stop.header.stamp = this->now();
+        stop.header.frame_id = "base_link";
+        stop.drive.speed = 0.0;
+        stop.drive.acceleration = mppi_params_.min_accel;
+        stop.drive.steering_angle = 0.0;
+        stop.drive.steering_angle_velocity = 1.0;
+        drive_pub_->publish(stop);
+        has_published_command_ = false;
+        last_steer_cmd_ = 0.0f;
+        last_speed_cmd_ = 0.0f;
+        mppi_params_.actuator_steer_state = 0.0f;
+        mppi_params_.actuator_speed_reference_state = 0.0f;
+        command_history_.clear();
     }
 
     void imu_callback(const sensor_msgs::msg::Imu::SharedPtr msg) {
@@ -894,6 +953,15 @@ private:
         real_odom_topic_ = this->get_parameter("real_odom_topic").as_string();
         this->declare_parameter("real_drive_topic", "/drive");
         real_drive_topic_ = this->get_parameter("real_drive_topic").as_string();
+        this->declare_parameter("manual_control_topic", "/manual_control");
+        manual_control_topic_ = this->get_parameter("manual_control_topic").as_string();
+        this->declare_parameter("joy_topic", "/joy");
+        joy_topic_ = this->get_parameter("joy_topic").as_string();
+        this->declare_parameter("manual_toggle_button", 4);
+        manual_toggle_button_ = this->get_parameter("manual_toggle_button").as_int();
+        this->declare_parameter("manual_mode_timeout_s", 0.5);
+        manual_mode_timeout_s_ = std::max(
+            0.1, this->get_parameter("manual_mode_timeout_s").as_double());
         this->declare_parameter("imu_topic","/imu/data");imu_topic_=this->get_parameter("imu_topic").as_string();
         this->declare_parameter("imu_sync_max_age_s",0.05);
         imu_sync_max_age_s_=this->get_parameter("imu_sync_max_age_s").as_double();
@@ -1234,6 +1302,13 @@ private:
     }
 
     void timer_callback() {
+        if (!is_simulation_ && manual_mode_active()) {
+            RCLCPP_WARN_THROTTLE(
+                this->get_logger(), *this->get_clock(), 2000,
+                "Manual mode or missing mode heartbeat: suppressing MPPI speed command");
+            publish_manual_stop();
+            return;
+        }
         if (dynamic_obstacle_active_ && obstacle_timeout_s_ > 0.0 &&
             (this->now() - dynamic_obstacle_stamp_).seconds() > obstacle_timeout_s_) {
             solver_->set_dynamic_obstacles({}, {}, {}, {}, {}, {}, 0, 0);
@@ -1569,6 +1644,8 @@ private:
     rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr mcl_pose_sub_;
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr velocity_sub_;
     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_sub_;
+    rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr manual_control_sub_;
+    rclcpp::Subscription<sensor_msgs::msg::Joy>::SharedPtr joy_sub_;
 
     rclcpp::Publisher<ackermann_msgs::msg::AckermannDriveStamped>::SharedPtr drive_pub_;
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr       vis_pub_;
@@ -1579,6 +1656,7 @@ private:
 
     std::string simulation_odom_topic_, simulation_drive_topic_;
     std::string real_pose_topic_, real_odom_topic_, real_drive_topic_;
+    std::string manual_control_topic_, joy_topic_;
     std::string selected_drive_topic_, csv_file_path_, imu_topic_, dynamics_model_name_;
     std::string visualization_topic_;
     std::string optimal_trajectory_topic_, kf_state_topic_;
@@ -1610,6 +1688,12 @@ private:
     double obstacle_timeout_s_{0.5};
     int published_optimal_arrow_count_{0};
     bool is_simulation_{true}, pose_received_{false}, velocity_received_{false};
+    bool manual_control_active_{false}, manual_control_received_{false};
+    bool joy_manual_enabled_{false}, joy_toggle_pressed_{false}, joy_received_{false};
+    int manual_toggle_button_{4};
+    double manual_mode_timeout_s_{0.5};
+    rclcpp::Time last_manual_control_time_{0, 0, RCL_ROS_TIME};
+    rclcpp::Time last_joy_time_{0, 0, RCL_ROS_TIME};
     bool has_prev_velocity_{false};
     rclcpp::Time last_velocity_stamp_{0, 0, RCL_ROS_TIME};
     bool has_prev_odom_{false};

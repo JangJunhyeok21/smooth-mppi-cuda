@@ -192,3 +192,8 @@
     real_pose_topic: /newmcl_pose
     real_odom_topic: /odom
     real_drive_topic: /drive
+    # f1tenth_system publishes this Bool from the Joy LB toggle (button 4).
+    manual_control_topic: /manual_control
+    joy_topic: /joy
+    manual_toggle_button: 4
+    manual_mode_timeout_s: 0.5

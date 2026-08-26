@@ -40,3 +40,7 @@
     control_rate_hz: 50.0
     model_dt: 0.04
     actuator_max_speed_reference_rate: 7.0
+    manual_control_topic: /manual_control
+    joy_topic: /joy
+    manual_toggle_button: 4
+    manual_mode_timeout_s: 0.5

@@ -122,21 +122,21 @@
     l_f: 0.1833
     l_r: 0.1407
     # tiv_imu_bagdisjoint_kinematic_classic 식별 결과. l_f/l_r/mass는 학습 시 고정값.
-    kinematic_steer_scale: 1.45256687  # Step 4 vehicle-response identification
-    kinematic_steer_bias: -0.0360566532  # Step 4 vehicle-response identification
+    kinematic_steer_scale: 1.39621252  # Step 4 vehicle-response identification
+    kinematic_steer_bias: -0.0237573549  # Step 4 vehicle-response identification
     kinematic_position_speed_scale: 1.0  # offline state is physical ground-relative body velocity
     kinematic_no_slip: true               # residual checkpoint 학습 조건(beta=0)
     # vx_cmd 추종 회귀값: 종방향 residual 없이 실제 바퀴속도 응답을 재현
-    speed_servo_kp: 10.3739069  # bag/session-disjoint vx rollout regression
+    speed_servo_kp: 18.190463  # bag/session-disjoint vx rollout regression
     # r_kin=vx*tan(delta)/L is a target, not an instantaneous yaw-rate assignment.
     kinematic_yaw_rate_time_constant: 0.1
     kinematic_max_yaw_accel: 15.0
-    steer_servo_time_constant: 0.200076968  # Step 4 vehicle-response identification
+    steer_servo_time_constant: 0.197122435  # Step 4 vehicle-response identification
     # Servo specification: 60 deg / 0.16 s = 6.5449847 rad/s.
     actuator_max_steer_rate: 6.544984694978735 # 제조사 spec: 60 deg / 0.16 s = 6.5449847 rad/s
     # all6_seed31 검증 조합: 1.2 s yaw-rate MAE/p95가 회귀 후보보다 우수함.
-    speed_reference_accel_time_constant: 0.0358766486  # bag/session-disjoint vx rollout regression
-    speed_reference_brake_time_constant: 0.112208409  # bag/session-disjoint vx rollout regression
+    speed_reference_accel_time_constant: 0.0943852924  # bag/session-disjoint vx rollout regression
+    speed_reference_brake_time_constant: 0.103878354  # bag/session-disjoint vx rollout regression
     actuator_max_speed_reference_rate: 6.0  # fixed for IFAC2026 lap-time tuning
     I_z: 0.04712
     Cm0: 0.04                # 고속 감쇠용 모터 역기전력 계수
@@ -164,14 +164,14 @@
     E_r: 0.0597
 
     # 0807 dynamic regression; used only by dynamic_mlp_residual.
-    dynamic_mlp_B_f: 0.3366075474431282
-    dynamic_mlp_C_f: 0.6356924636110722
-    dynamic_mlp_D_f: 1.0411165641262696
-    dynamic_mlp_E_f: -14231.435412582694
-    dynamic_mlp_B_r: 0.8670431599215196
-    dynamic_mlp_C_r: 1.078260951127556
-    dynamic_mlp_D_r: 1.3367398542655606
-    dynamic_mlp_E_r: -5504.52844896071
+    dynamic_mlp_B_f: 1.1059018
+    dynamic_mlp_C_f: 1.41095005
+    dynamic_mlp_D_f: 1.02235053
+    dynamic_mlp_E_f: 0.0306089224
+    dynamic_mlp_B_r: 3.02615957
+    dynamic_mlp_C_r: 0.894503471
+    dynamic_mlp_D_r: 1.1383197
+    dynamic_mlp_E_r: 0.0832654531
     dynamic_mlp_I_z: 0.09059291359052173
 
     # --- Runtime environment and topics ---

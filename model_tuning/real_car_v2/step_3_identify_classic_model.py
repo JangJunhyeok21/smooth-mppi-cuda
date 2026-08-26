@@ -13,14 +13,15 @@ import classic_model_regression as regression
 # ---------------------------------------------------------------------------
 ROOT = Path(__file__).resolve().parents[2]
 # 변경사항
-DATA_PATH = ROOT / "model_tuning/data/ifac2026_collision_refined_current_kf_gt"
+DATA_PATH = ROOT / "model_tuning/data/ifac2026"
 YAML_EVALUATION_MODE = False # os.environ.get("STEP3_YAML_EVALUATION_MODE", "0") != "0"
 REGRESSION_METHODS = ("de_robust_ls",) # adam, de_robust_ls, mlp_surrogate
 
 OUTPUT_DIR = Path(os.environ.get("DYNAMIC_REGRESSION_OUT",
     ROOT / "model_tuning/results/dynamic_40ms_regression_collision_refined"))
 ROLLOUT_HORIZON_STEPS = 40       # 40 * 40 ms = 1.6 s
-MAX_WINDOWS_PER_BAG = 2000
+MAX_WINDOWS_PER_BAG = 0           # 0 = keep every eligible window in each bag
+WINDOW_START_STRIDE = 1           # 1 = do not discard every second/third window
 V_MIN = 0.1                      # [m/s] reject rollouts containing lower GT vx
 ACTUATOR_WARMUP_SAMPLES = 40     # 40 * 20 ms = 0.8 s
 RANDOM_SEED = 31
@@ -116,6 +117,7 @@ def main():
     regression.OUT = Path(OUTPUT_DIR).expanduser().resolve()
     regression.HORIZON = ROLLOUT_HORIZON_STEPS
     regression.MAX_PER_BAG = MAX_WINDOWS_PER_BAG
+    regression.WINDOW_START_STRIDE = WINDOW_START_STRIDE
     if V_MIN < 0.0:
         raise ValueError(f"V_MIN must be non-negative, got {V_MIN}")
     regression.V_MIN = float(V_MIN)

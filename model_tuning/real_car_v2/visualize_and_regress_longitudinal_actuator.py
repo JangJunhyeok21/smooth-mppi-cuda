@@ -31,6 +31,9 @@ MODEL_DT_S = 0.04
 HORIZON_STEPS = 25
 START_STRIDE = 5                   # overlapping causal rollouts
 MAX_ROLLOUTS_PER_SESSION = 800
+# False uses informative longitudinal windows regardless of steering/yaw rate.
+# Enable only when deliberately identifying a straight-line-only actuator.
+REQUIRE_STRAIGHT_WINDOWS = False
 RANDOM_SEED = 31
 OPTIMIZER_POPULATION_SIZE = 36
 OPTIMIZER_MAX_ITERATIONS = 80
@@ -180,10 +183,13 @@ def choose_starts(session):
         np.mean(np.abs(session["cmd"][i:i + ROLLOUT_STEPS] - session["vx"][i:i + ROLLOUT_STEPS])) > 0.12
         for i in starts
     ],dtype=bool)
-    straight = np.array([
-        np.mean(np.abs(session["steer"][i:i + ROLLOUT_STEPS])) < 0.12 and
-        np.mean(np.abs(session["yaw_rate"][i:i + ROLLOUT_STEPS])) < 0.35
-        for i in starts],dtype=bool)
+    if REQUIRE_STRAIGHT_WINDOWS:
+        straight = np.array([
+            np.mean(np.abs(session["steer"][i:i + ROLLOUT_STEPS])) < 0.12 and
+            np.mean(np.abs(session["yaw_rate"][i:i + ROLLOUT_STEPS])) < 0.35
+            for i in starts],dtype=bool)
+    else:
+        straight = np.ones(len(starts),dtype=bool)
     starts = starts[informative & straight]
     if len(starts) > MAX_ROLLOUTS_PER_SESSION:
         starts = starts[np.linspace(0, len(starts) - 1, MAX_ROLLOUTS_PER_SESSION).astype(int)]

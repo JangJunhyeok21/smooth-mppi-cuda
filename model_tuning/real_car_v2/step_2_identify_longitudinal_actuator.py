@@ -15,7 +15,7 @@ import visualize_and_regress_longitudinal_actuator as regression
 # User-configurable Step 2 settings
 # ---------------------------------------------------------------------------
 ROOT = Path(__file__).resolve().parents[2]
-SOURCE_DIRS = (ROOT / "model_tuning/data/ifac2026_collision_refined_current_kf_gt",)
+SOURCE_DIRS = (ROOT / "model_tuning/data/ifac2026",)
 OUTPUT_DIR = ROOT / "model_tuning/results/longitudinal_actuator_regression_collision_refined"
 
 # Identified parameter bounds. Units: Kp [1/s], time constants [s].
@@ -33,6 +33,9 @@ HORIZON_STEPS = 40
 WARMUP_DURATION_S = 0.8
 START_STRIDE_SAMPLES = 5
 MAX_ROLLOUTS_PER_SESSION = 800
+# Longitudinal actuator data need not be straight. False retains acceleration
+# and braking excitation during cornering as well.
+REQUIRE_STRAIGHT_WINDOWS = False
 OPTIMIZER_POPULATION_SIZE = 36
 OPTIMIZER_MAX_ITERATIONS = 80
 OPTIMIZER_LOCAL_MAX_ITERATIONS = 600
@@ -68,6 +71,7 @@ def main():
     regression.WARMUP_S = WARMUP_DURATION_S
     regression.START_STRIDE = START_STRIDE_SAMPLES
     regression.MAX_ROLLOUTS_PER_SESSION = MAX_ROLLOUTS_PER_SESSION
+    regression.REQUIRE_STRAIGHT_WINDOWS = REQUIRE_STRAIGHT_WINDOWS
     regression.OPTIMIZER_POPULATION_SIZE = OPTIMIZER_POPULATION_SIZE
     regression.OPTIMIZER_MAX_ITERATIONS = OPTIMIZER_MAX_ITERATIONS
     regression.OPTIMIZER_LOCAL_MAX_ITERATIONS = OPTIMIZER_LOCAL_MAX_ITERATIONS

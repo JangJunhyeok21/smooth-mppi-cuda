@@ -10,6 +10,7 @@ import datetime as dtlib
 import json
 import os
 import re
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -30,7 +31,9 @@ NEW_DATA_ROOTS = (
     # Path("/mnt/nas_custom/F1tenth/2026 IFAC/0818"),
     # Path("/mnt/nas_custom/F1tenth/2026 IFAC/0819"),
     # Path("/mnt/nas_custom/F1tenth/2026 IFAC/ifac2026"),
-    Path("/mnt/nas_custom/F1tenth/2026 IFAC/ifac2026_pratice_3th/"),
+    # Path("/mnt/nas_custom/F1tenth/2026 IFAC/ifac2026_pratice_3th/"),
+    Path("/mnt/nas_custom/F1tenth/2026 IFAC/ifac_0825_last_practice/"),
+
 )
 # Keep F5 configuration robust when a single Path is assigned without tuple
 # syntax.  A pathlib.Path is path-like but is not a collection of roots.
@@ -45,7 +48,7 @@ BAG_PATH = sorted({metadata.parent for root in NEW_DATA_ROOTS
 OUTPUT_PATH = PROJECT_ROOT / "model_tuning/data/ifac2026"
 # F5/direct execution is an interactive inspection workflow.  Set this to
 # False only for unattended batch extraction.
-USE_PLOT = os.environ.get("STEP1_USE_PLOT", "1") != "0"
+USE_PLOT = True # os.environ.get("STEP1_USE_PLOT", "1") != "0"
 # Set True for F5 to skip rosbag extraction and re-open the saved NPZ files.
 REVIEW_SAVED_COLLISIONS = True
 # Bag-to-pose verification shows that the sensor/body convention changed by
@@ -65,6 +68,13 @@ PHYSICS_MOVING_VX = .7; PHYSICS_FROZEN_POSE_SPEED = .12
 PHYSICS_DISTANCE_WINDOW_S = .5; PHYSICS_MIN_ODOM_DISTANCE = .35
 PHYSICS_MIN_POSE_ODOM_RATIO = .65; PHYSICS_IMPACT_DECEL = -8.0
 PHYSICS_MAX_POSE_STEP = .30; PHYSICS_MAX_YAW_STEP = .45
+# Master switch for frozen-pose, odom/pose mismatch, impact-like deceleration
+# and localization-jump rejection. Collision/reverse-recovery filtering is a
+# separate safety rule and is not disabled by this option.
+FILTER_PHYSICAL_INCONSISTENCIES = False
+# True keeps samples across /newmcl_pose position/yaw jumps. Other physical
+# inconsistency checks (frozen pose, odom mismatch and impact) remain enabled.
+INCLUDE_LOCALIZATION_JUMPS = False
 DT = .02; MAX_POSE_AGE = .10; MAX_VELOCITY_AGE = .10; MAX_COMMAND_AGE = .10; MAX_IMU_AGE = .05
 # MPPI/residual-model rollout contract. Step 1 stores future GT densely at DT,
 # while HORIZON_STEPS counts the coarser MODEL_DT_S prediction steps consumed
@@ -111,19 +121,54 @@ def resolve_storage(path):
     """Resolve a rosbag directory to its single .mcap/.db3 storage file."""
     path = Path(path).expanduser()
     if path.is_file():
-        return path
-    candidates = sorted([*path.glob("*.mcap"), *path.glob("*.db3")])
-    if len(candidates) != 1:
-        raise RuntimeError(f"{path}: expected one .mcap/.db3 file, found {candidates}")
-    return candidates[0]
+        storage=path
+    else:
+        candidates = sorted([*path.glob("*.mcap"), *path.glob("*.db3")])
+        if len(candidates) != 1:
+            raise RuntimeError(f"{path}: expected one .mcap/.db3 file, found {candidates}")
+        storage=candidates[0]
+    if storage.stat().st_size == 0:
+        raise RuntimeError(f"{storage}: storage file is empty (0 bytes)")
+    if storage.suffix == ".db3":
+        # Validate the minimum rosbag2 SQLite schema in read-only mode so an
+        # empty/corrupt recovery artifact is skipped before rosbag2 emits a
+        # plugin error and interrupts the interactive batch workflow.
+        try:
+            connection=sqlite3.connect(f"file:{storage}?mode=ro",uri=True)
+            tables={row[0] for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")}
+        except sqlite3.DatabaseError as error:
+            raise RuntimeError(f"{storage}: invalid SQLite database: {error}") from error
+        finally:
+            if "connection" in locals():connection.close()
+        missing={"topics","messages"}-tables
+        if missing:
+            raise RuntimeError(
+                f"{storage}: not a rosbag2 database; missing tables {sorted(missing)}")
+    return storage
 
 
-def output_for_bag(output, storage, multiple):
+def bag_output_stem(requested, storage):
+    """Return the rosbag name, independent of its MCAP/DB3 segment filename."""
+    requested = Path(requested).expanduser()
+    storage = Path(storage)
+    if requested.is_dir():
+        return requested.name
+    # A storage file selected directly from a normal rosbag2 directory still
+    # belongs to the directory named by metadata.yaml.  In particular, do not
+    # leak the segment suffix from ``<bag_name>_0.mcap`` into the NPZ name.
+    if (storage.parent / "metadata.yaml").is_file():
+        return storage.parent.name
+    # Standalone storage without rosbag2 metadata has no higher-level bag name.
+    return storage.stem
+
+
+def output_for_bag(output, requested, storage, multiple):
     output = Path(output)
     if not multiple and output.suffix == ".npz":
         return output
     output.mkdir(parents=True, exist_ok=True)
-    return output / f"{storage.parent.name}.npz"
+    return output / f"{bag_output_stem(requested, storage)}.npz"
 
 
 def stamp_seconds(msg, record_ns):
@@ -879,7 +924,10 @@ def extract_one(storage, out, args):
         frozen_pose_speed=args.physics_frozen_pose_speed,
         distance_window_s=args.physics_distance_window,min_odom_distance=args.physics_min_odom_distance,
         min_pose_odom_ratio=args.physics_min_pose_odom_ratio,impact_decel=args.physics_impact_decel,
-        max_pose_step=args.physics_max_pose_step,max_yaw_step=args.physics_max_yaw_step)
+        max_pose_step=args.physics_max_pose_step,max_yaw_step=args.physics_max_yaw_step,
+        filter_localization_jumps=not args.include_localization_jumps)
+    if not args.filter_physical_inconsistencies:
+        physical_bad=np.zeros(len(base),dtype=bool)
     # A bag is one physical run. Once physics corruption appears,
     # never splice a later recovery fragment back onto it. Callback jitter or
     # a temporary sensor-age gap is recorded but is not a terminal collision.
@@ -947,11 +995,17 @@ def extract_one(storage, out, args):
         "classic_kf_initial_var":list(map(float,cfg["classic_kf_initial_var"])),
         "kf_pose_vy_window_s":float(cfg.get("kf_pose_vy_window_s",.12))}
     future_horizon_s=args.horizon_steps*args.model_dt
+    reject_callback_jumps=(args.filter_physical_inconsistencies and
+                           not args.include_localization_jumps)
+    callback_max_pose_step=(args.physics_max_pose_step
+                            if reject_callback_jumps else np.inf)
+    callback_max_yaw_step=(args.physics_max_yaw_step
+                           if reject_callback_jumps else np.inf)
     callback_inputs,callback_future_states,callback_future_commands,callback_future_offsets_s=(
         build_callback_prediction_samples(pose,velocity,drive,imu,signs,cfg,
             accepted_intervals,times[0],future_horizon_s,args.dt,
-            args.max_command_age,args.max_imu_age,args.physics_max_pose_step,
-            args.physics_max_yaw_step))
+            args.max_command_age,args.max_imu_age,callback_max_pose_step,
+            callback_max_yaw_step))
     out.parent.mkdir(parents=True,exist_ok=True)
     np.savez_compressed(out,samples=samples,dt=args.dt,columns=columns,
                         alignment_start_epoch_s=np.array(start,np.float64),
@@ -1006,7 +1060,9 @@ def extract_one(storage, out, args):
               "distance_window_s":args.physics_distance_window,"min_odom_distance_m":args.physics_min_odom_distance,
               "min_mcl_odom_distance_ratio":args.physics_min_pose_odom_ratio,
               "impact_decel_mps2":args.physics_impact_decel,"max_pose_step_m":args.physics_max_pose_step,
-              "max_yaw_step_rad":args.physics_max_yaw_step},
+              "max_yaw_step_rad":args.physics_max_yaw_step,
+              "enabled":bool(args.filter_physical_inconsistencies),
+              "include_localization_jumps":bool(args.include_localization_jumps)},
           "command_topic_comparison":{"diagnostic_only":True,
               "steer_tolerance":args.command_steer_match_tol,"speed_tolerance":args.command_speed_match_tol},
           "output_samples":len(samples),"collision_episodes":episodes,"segments":segments,
@@ -1033,7 +1089,9 @@ def extract_one(storage, out, args):
               "future_offsets_s":callback_future_offsets_s.tolist(),
               "future_state_order":["x","y","unwrapped_yaw","vx","vy","yaw_rate"],
               "future_command_order":["steer_cmd","speed_cmd"],
-              "continuity":"no extrapolation; no retained segment crossing; pose/yaw jump rejection"},
+              "continuity":("no extrapolation; no retained segment crossing; " +
+                  ("pose/yaw jump rejection" if reject_callback_jumps else
+                   "pose/yaw jumps included"))},
           "split_policy":"single-bag-identical-train-test"}
     out.with_suffix(".json").write_text(json.dumps(meta,indent=2)+"\n")
     print(json.dumps({**meta,"output":str(out)},indent=2))
@@ -1078,6 +1136,12 @@ def main():
     p.add_argument("--physics-impact-decel",type=float,default=PHYSICS_IMPACT_DECEL)
     p.add_argument("--physics-max-pose-step",type=float,default=PHYSICS_MAX_POSE_STEP)
     p.add_argument("--physics-max-yaw-step",type=float,default=PHYSICS_MAX_YAW_STEP)
+    p.add_argument("--filter-physical-inconsistencies",action=argparse.BooleanOptionalAction,
+                   default=FILTER_PHYSICAL_INCONSISTENCIES,
+                   help="filter frozen pose, odom mismatch, impact and localization jumps")
+    p.add_argument("--include-localization-jumps",action=argparse.BooleanOptionalAction,
+                   default=INCLUDE_LOCALIZATION_JUMPS,
+                   help="keep /newmcl_pose position/yaw jumps instead of treating them as terminal corruption")
     p.add_argument("--dt", type=float, default=DT)
     # 0815 topics are near 50 Hz or faster. Reject stale held samples instead
     # of silently turning a topic dropout into apparently valid dynamics data.
@@ -1125,14 +1189,26 @@ def main():
 
     requested=[Path(x) for x in args.bag] if args.bag else list(BAG_PATH)
     if not requested: raise SystemExit("BAG_PATH is empty")
-    storages=[resolve_storage(x) for x in requested]
+    bag_entries=[]
+    for requested_path in requested:
+        try:
+            storage=resolve_storage(requested_path)
+        except RuntimeError as error:
+            # A stale/recovered metadata.yaml can survive even when its DB3 or
+            # MCAP payload is gone.  Do not prevent all other valid bags in a
+            # batch from being extracted because of that one incomplete bag.
+            print(f"SKIPPED invalid rosbag: {error}",file=sys.stderr)
+            continue
+        bag_entries.append((requested_path,storage))
+    if not bag_entries:
+        raise SystemExit("No valid rosbag storage files were found")
     storage_index=0
-    while storage_index<len(storages):
-        number=storage_index+1;storage=storages[storage_index]
-        out=output_for_bag(args.output,storage,len(storages)>1)
+    while storage_index<len(bag_entries):
+        number=storage_index+1;requested_path,storage=bag_entries[storage_index]
+        out=output_for_bag(args.output,requested_path,storage,len(bag_entries)>1)
         preserved_range=(saved_absolute_time_range(out)
                          if args.preserve_existing_trim else None)
-        print(f"[{number}/{len(storages)}] Extracting {storage} -> {out}")
+        print(f"[{number}/{len(bag_entries)}] Extracting {storage} -> {out}")
         backups=(backup_interactive_outputs(out)
                  if USE_PLOT and args.interactive_trim else [])
         try:
@@ -1140,18 +1216,19 @@ def main():
         except RuntimeError as error:
             if USE_PLOT and args.interactive_trim:
                 finish_interactive_outputs(out,backups,save=False)
-            print(f"[{number}/{len(storages)}] SKIPPED: {error}",file=sys.stderr)
+            print(f"[{number}/{len(bag_entries)}] SKIPPED: {error}",file=sys.stderr)
             storage_index+=1
             continue
         if preserved_range is not None:
             samples=reapply_absolute_time_range(out,samples,columns,preserved_range)
         if USE_PLOT:
-            title=f"Bag {number}/{len(storages)}: {storage.parent.name}"
+            title=(f"Bag {number}/{len(bag_entries)}: "
+                   f"{bag_output_stem(requested_path, storage)}")
             if args.interactive_trim:
                 try:
                     selected,jump_index=interactive_trim_saved_extract(
                         out,samples,columns,args.dt,title,args.command_topic,signs,
-                        args.map_yaml,len(storages),number)
+                        args.map_yaml,len(bag_entries),number)
                 except BaseException:
                     finish_interactive_outputs(out,backups,save=False)
                     raise
@@ -1160,7 +1237,7 @@ def main():
                     if jump_index is not None:
                         storage_index=jump_index
                         continue
-                    print(f"[{number}/{len(storages)}] not saved; moving to next bag")
+                    print(f"[{number}/{len(bag_entries)}] not saved; moving to next bag")
                     storage_index+=1
                     continue
                 samples=selected

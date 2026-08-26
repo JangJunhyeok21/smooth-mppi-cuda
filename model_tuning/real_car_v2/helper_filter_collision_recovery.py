@@ -22,7 +22,8 @@ def physical_inconsistency_mask(samples, dt, pre_margin_s=1.2, post_margin_s=.5,
                                 moving_vx=.7, moving_command=.7, frozen_pose_speed=.12,
                                 distance_window_s=.5, min_odom_distance=.35,
                                 min_pose_odom_ratio=.65, impact_decel=-8.,
-                                max_pose_step=.30, max_yaw_step=.45):
+                                max_pose_step=.30, max_yaw_step=.45,
+                                filter_localization_jumps=True):
     """Remove impact/wheel-spin/localization states that no vehicle model can fit.
 
     ``samples`` follows the extractor base layout
@@ -64,7 +65,10 @@ def physical_inconsistency_mask(samples, dt, pre_margin_s=1.2, post_margin_s=.5,
             "commanded_motion_without_pose_change":commanded_frozen,
             "mcl_odom_distance_mismatch":wheel_spin_or_blocked,
             "impact_like_vx_drop":impact,"localization_jump":localization_jump}
-    seed=np.logical_or.reduce(tuple(causes.values()))
+    active_causes=(causes.values() if filter_localization_jumps else
+                   (value for name,value in causes.items()
+                    if name != "localization_jump"))
+    seed=np.logical_or.reduce(tuple(active_causes))
     expanded,intervals=_expanded_intervals(seed,round(pre_margin_s/dt),round(post_margin_s/dt))
     events=[]
     for start,end in intervals:

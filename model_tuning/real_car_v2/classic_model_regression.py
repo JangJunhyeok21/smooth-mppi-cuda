@@ -24,6 +24,7 @@ HORIZON = 25                    # 1.0 s at one 40 ms MPPI knot
 # optimizer balanced per bag, but cap redundant windows so a full rerun remains
 # practical after adding a day of data.
 MAX_PER_BAG = 80
+WINDOW_START_STRIDE = 3
 V_MIN = 0.5                     # minimum GT longitudinal speed used for fitting
 WARMUP_SAMPLES = 40             # 0.8 s at source 50 Hz
 ADAM_RESTARTS = int(os.environ.get("CLASSIC_ADAM_RESTARTS","3"))
@@ -396,10 +397,10 @@ def starts(data, split):
             # rollout falls below V_MIN. Warm-up remains available only for
             # reconstructing actuator state and is not a loss target.
             and np.all(longitudinal_speed[index:index+2*HORIZON+1] >= V_MIN)], int)
-        if len(candidate) > MAX_PER_BAG:
+        if MAX_PER_BAG > 0 and len(candidate) > MAX_PER_BAG:
             candidate = candidate[np.linspace(
                 0, len(candidate)-1, MAX_PER_BAG).astype(int)]
-        result.extend(candidate[::3])
+        result.extend(candidate[::max(1,int(WINDOW_START_STRIDE))])
     return np.asarray(result, int)
 
 
@@ -648,8 +649,12 @@ def objective(parameters, data, window_starts, config, regularize=True):
                      .5*state_error**2, .3*(np.abs(state_error)-.15))
     state_weights=np.asarray((VX_LOSS_WEIGHT,VY_LOSS_WEIGHT,
                               YAW_RATE_LOSS_WEIGHT))[None,None,:]
+    # Each configured weight must retain its absolute meaning. Dividing by the
+    # sum of weights made YAW_RATE_LOSS_WEIGHT cancel completely whenever vx
+    # and vy weights were zero, turning the requested weight search into a
+    # no-op along that axis.
     loss = float(np.sum(huber*time_weight*state_weights)
-                 / max(len(prediction)*np.sum(time_weight)*np.sum(state_weights),1e-12))
+                 / max(len(prediction)*np.sum(time_weight),1e-12))
     position_scale=float(config.get("kinematic_position_speed_scale",1.0))
     trajectory_truth=(mcl_relative_pose(data,window_starts) if "target_pose" in data.files or "mcl_pose" in data.files
                       else relative_pose(truth,position_scale))
@@ -678,8 +683,7 @@ def objective(parameters, data, window_starts, config, regularize=True):
         endpoint_state_huber=np.where(
             np.abs(endpoint_state_error)<.3,.5*endpoint_state_error**2,
             .3*(np.abs(endpoint_state_error)-.15))
-        endpoint_state_cost=np.sum(endpoint_state_huber*state_weights[0],axis=1) \
-            / max(float(np.sum(state_weights)),1e-12)
+        endpoint_state_cost=np.sum(endpoint_state_huber*state_weights[0],axis=1)
         position_cost=np.sum(position_error**2,axis=1)
         yaw_cost=yaw_error**2
         def cvar(values):
@@ -716,7 +720,7 @@ def objective(parameters, data, window_starts, config, regularize=True):
         # dynamics without overwhelming prediction quality.
         loss += CLASSIC_RESIDUAL_PENALTY*float(np.mean(residual_trace**2))
     if regularize:
-        span = BOUNDS[:, 1]-BOUNDS[:, 0]
+        span = np.maximum(BOUNDS[:, 1]-BOUNDS[:, 0],1e-12)
         loss += 2e-4*float(np.mean(((parameters-REFERENCE)/span)**2))
         # Keep front/rear small-slip gains in the same physical order without
         # forcing identical tires under unequal load/observability.
@@ -724,6 +728,42 @@ def objective(parameters, data, window_starts, config, regularize=True):
                             parameters[4]*parameters[5]*parameters[6]))
         loss += 1e-4*float((np.log((gains[0]+1e-4)/(gains[1]+1e-4)))**2)
     return loss if np.isfinite(loss) else 1e12
+
+
+def loss_weight_components(parameters, data, window_starts, config):
+    """Return unweighted yaw-rate/position/yaw losses plus regularization.
+
+    These components make a dense discrete loss-weight search cheap: each
+    model candidate is rolled out once, then every weight tuple is evaluated
+    by a dot product without rerunning the vehicle model.
+    """
+    prediction,truth=rollout_numpy(parameters,data,window_starts,config)
+    if (not np.isfinite(prediction).all() or not np.isfinite(truth).all()
+            or np.max(np.abs(prediction))>1e4):
+        return np.full(4,1e12,float)
+    time_weight=np.linspace(.25,1.,HORIZON)[None,:]
+    yaw_rate_error=(prediction[:,:,2]-truth[:,:,2])*1.5
+    yaw_rate_huber=np.where(np.abs(yaw_rate_error)<.3,
+        .5*yaw_rate_error**2,.3*(np.abs(yaw_rate_error)-.15))
+    yaw_rate=float(np.sum(yaw_rate_huber*time_weight)
+                   /max(len(prediction)*np.sum(time_weight),1e-12))
+    position_scale=float(config.get("kinematic_position_speed_scale",1.0))
+    trajectory_truth=(mcl_relative_pose(data,window_starts)
+        if "target_pose" in data.files or "mcl_pose" in data.files
+        else relative_pose(truth,position_scale))
+    predicted_trajectory=relative_pose(prediction,position_scale)
+    position=float(np.mean(np.sum(
+        (predicted_trajectory[:,-1,:2]-trajectory_truth[:,-1,:2])**2,axis=1)))
+    yaw_error=((predicted_trajectory[:,-1,2]-trajectory_truth[:,-1,2]
+                +np.pi)%(2*np.pi)-np.pi)
+    yaw=float(np.mean(yaw_error**2))
+    span=np.maximum(BOUNDS[:,1]-BOUNDS[:,0],1e-12)
+    regularization=2e-4*float(np.mean(((parameters-REFERENCE)/span)**2))
+    gains=np.asarray((parameters[0]*parameters[1]*parameters[2],
+                      parameters[4]*parameters[5]*parameters[6]))
+    regularization+=1e-4*float(
+        np.log((gains[0]+1e-4)/(gains[1]+1e-4))**2)
+    return np.asarray((yaw_rate,position,yaw,regularization),float)
 
 
 def objective_breakdown(parameters,data,window_starts,config):
@@ -734,7 +774,7 @@ def objective_breakdown(parameters,data,window_starts,config):
         (VX_LOSS_WEIGHT,VY_LOSS_WEIGHT,YAW_RATE_LOSS_WEIGHT))
     error=(prediction-truth)*scales[None,None,:]
     huber=np.where(np.abs(error)<.3,.5*error**2,.3*(np.abs(error)-.15))
-    denominator=max(len(prediction)*float(np.sum(time_weight))*float(np.sum(weights)),1e-12)
+    denominator=max(len(prediction)*float(np.sum(time_weight)),1e-12)
     result={f"recursive_{name}":float(np.sum(
         huber[:,:,column]*time_weight[:,:,0])*weights[column]/denominator)
         for column,name in enumerate(("vx","vy","yaw_rate"))}
@@ -767,7 +807,7 @@ def objective_breakdown(parameters,data,window_starts,config):
                              .3*(np.abs(first_error)-.15))
         for column,name in enumerate(("vx","vy","yaw_rate")):
             value=(ONE_STEP_LOSS_WEIGHT*float(np.sum(first_huber[:,column]))
-                   *weights[column]/max(len(prediction)*float(np.sum(weights)),1e-12))
+                   *weights[column]/max(len(prediction),1e-12))
             result[f"one_step_{name}"]=value;one_step_total+=value
         first_position=predicted_trajectory[:,0,:2]-trajectory_truth[:,0,:2]
         first_yaw=(predicted_trajectory[:,0,2]-trajectory_truth[:,0,2]+np.pi)%(2*np.pi)-np.pi
@@ -781,7 +821,7 @@ def objective_breakdown(parameters,data,window_starts,config):
         endpoint_error=(prediction[:,-1]-truth[:,-1])*scales
         endpoint_huber=np.where(np.abs(endpoint_error)<.3,.5*endpoint_error**2,
                                 .3*(np.abs(endpoint_error)-.15))
-        endpoint_cost=np.sum(endpoint_huber*weights,axis=1)/max(float(np.sum(weights)),1e-12)
+        endpoint_cost=np.sum(endpoint_huber*weights,axis=1)
         def cvar(values):
             threshold=np.quantile(values,ENDPOINT_TAIL_QUANTILE)
             return float(np.mean(values[values>=threshold]))
@@ -963,7 +1003,7 @@ def torch_rollout_loss(raw_parameters, data, window_starts, config, device):
     element_loss=torch.nn.functional.smooth_l1_loss(
         error,torch.zeros_like(error),beta=.3,reduction="none")
     loss=torch.sum(element_loss*state_weights)/(
-        prediction.shape[0]*prediction.shape[1]*torch.sum(state_weights))
+        prediction.shape[0]*prediction.shape[1])
     # Match the black-box objective: recursively integrate body velocities so
     # Adam cannot improve vy/r while silently worsening the actual trajectory.
     predicted_pose=torch.zeros((len(window_starts),3),device=device,dtype=torch.float64)
@@ -1029,10 +1069,10 @@ def adam_search(data, train_starts, config):
 def validation_score(metric):
     state_scale=np.asarray((.4,2.,1.5))
     state_weight=np.asarray((VX_LOSS_WEIGHT,VY_LOSS_WEIGHT,YAW_RATE_LOSS_WEIGHT))
-    state_mean=float(np.sum(state_scale*state_weight*np.asarray(metric["state_mae"]))
-                     / max(np.sum(state_weight),1e-12))
-    state_p95=float(np.sum(state_scale*state_weight*np.asarray(metric["state_p95"]))
-                    / max(np.sum(state_weight),1e-12))
+    state_mean=float(np.sum(
+        state_scale*state_weight*np.asarray(metric["state_mae"])))
+    state_p95=float(np.sum(
+        state_scale*state_weight*np.asarray(metric["state_p95"])))
     score=(POSITION_LOSS_WEIGHT*(metric["trajectory_mean_m"]
                                 +.5*metric["trajectory_p95_m"])
            +YAW_TRAJECTORY_LOSS_WEIGHT*(metric["trajectory_yaw_mean_rad"]
@@ -1040,8 +1080,7 @@ def validation_score(metric):
            +.2*state_mean+.1*state_p95)
     if ONE_STEP_LOSS_WEIGHT>0. and "one_step_state_mae" in metric:
         first_state=float(np.sum(
-            state_scale*state_weight*np.asarray(metric["one_step_state_mae"]))
-            / max(np.sum(state_weight),1e-12))
+            state_scale*state_weight*np.asarray(metric["one_step_state_mae"])))
         score += ONE_STEP_LOSS_WEIGHT*(
             .2*first_state
             +POSITION_LOSS_WEIGHT*metric["one_step_position_mean_m"]

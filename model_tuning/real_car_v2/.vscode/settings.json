@@ -1,0 +1,23 @@
+{
+    "ROS2.distro": "humble",
+    "python.autoComplete.extraPaths": [
+        "/home/a/smooth-mppi-cuda/simulator_ws/build/f1tenth_gym_ros",
+        "/home/a/smooth-mppi-cuda/simulator_ws/install/f1tenth_gym_ros/lib/python3.10/site-packages",
+        "/home/a/smooth-mppi-cuda/install/smppi_cuda_controller/local/lib/python3.10/dist-packages",
+        "/home/a/f1tenth_control/install_dynamic_servo/f1_msgs/local/lib/python3.10/dist-packages",
+        "/home/a/alpha-RACER/ros2_ws/install/my_custom_msgs/local/lib/python3.10/dist-packages",
+        "/opt/ros/humble/lib/python3.10/site-packages",
+        "/opt/ros/humble/local/lib/python3.10/dist-packages",
+        "/home/a/alpha-RACER/car_dynamics"
+    ],
+    "python.analysis.extraPaths": [
+        "/home/a/smooth-mppi-cuda/simulator_ws/build/f1tenth_gym_ros",
+        "/home/a/smooth-mppi-cuda/simulator_ws/install/f1tenth_gym_ros/lib/python3.10/site-packages",
+        "/home/a/smooth-mppi-cuda/install/smppi_cuda_controller/local/lib/python3.10/dist-packages",
+        "/home/a/f1tenth_control/install_dynamic_servo/f1_msgs/local/lib/python3.10/dist-packages",
+        "/home/a/alpha-RACER/ros2_ws/install/my_custom_msgs/local/lib/python3.10/dist-packages",
+        "/opt/ros/humble/lib/python3.10/site-packages",
+        "/opt/ros/humble/local/lib/python3.10/dist-packages",
+        "/home/a/alpha-RACER/car_dynamics"
+    ]
+}

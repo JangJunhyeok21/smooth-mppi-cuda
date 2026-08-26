@@ -1,4 +1,5 @@
-# IFAC2026 MPPI rank 1: 30 laps / 267.445612 s / 8.915 s per lap / no collision.
+# IFAC2026 MPPI rank 3: rate8/slew15, 8 laps / 77.088185 s / 9.636 s per lap.
+# This candidate completed 8 laps without collision but has not passed a 30-lap run.
 /**:
   ros__parameters:
     # 사용 모델: dynamic_mlp_residual_servo_lag 또는 DYNAMIC_SERVO_LAG
@@ -44,7 +45,7 @@
     q_lag: 0.0              # raceline 접선방향 오차는 최소한으로만 억제
     q_heading: 1.0          # weak direction regularization
     q_error_speed: 0.0     # preserve straight speed; reduce speed only while pose error grows
-    q_du: 0.12             # IFAC2026 30-lap best; lower 0.08 was slower alone
+    q_du: 0.08             # rank-3 rate8/slew15 candidate
     q_steer: 0.0
     q_lat_g: 200.0 # strongly reject combined-grip excess without lowering max_speed
     lat_g_soft_limit: 8.5                 # soft combined-grip ceiling # DD-diagram ay max 제한
@@ -103,7 +104,7 @@
     # Input slew rate: m/s^2 for direct-speed models, m/s^3 for acceleration-command models.
     # Direct-speed command slew limit [m/s^2]. At the 50 Hz controller tick,
     # /drive.speed may therefore change by at most 10 * 0.02 = 0.20 m/s.
-    max_accel_rate: 10.0    # slew=15 with actuator rate=8 was slower in isolated test
+    max_accel_rate: 15.0
     lambda: 20.0
     num_samples: 1600        # desktop simulation: ~4 ms measured
     visualize_candidates: false # K*T 후보 복사 비활성화
@@ -138,7 +139,7 @@
     # all6_seed31 검증 조합: 1.2 s yaw-rate MAE/p95가 회귀 후보보다 우수함.
     speed_reference_accel_time_constant: 0.0943852924  # bag/session-disjoint vx rollout regression
     speed_reference_brake_time_constant: 0.103878354  # bag/session-disjoint vx rollout regression
-    actuator_max_speed_reference_rate: 6.0  # 30-lap best; tested upper bound 8.0 was slower
+    actuator_max_speed_reference_rate: 8.0  # requested upper bound
     I_z: 0.04712
     Cm0: 0.04                # 고속 감쇠용 모터 역기전력 계수
     

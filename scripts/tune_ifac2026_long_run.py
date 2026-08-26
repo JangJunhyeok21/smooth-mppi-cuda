@@ -18,14 +18,15 @@ PARAMS = ROOT / "config/params.yaml"
 DEFAULT_OUT = ROOT / "model_tuning/results/ifac2026_30lap_tuning/domain_isolated_search"
 
 CANDIDATES = (
-    ("v9_p110", 71,
-     {"max_speed": 9.0, "q_progress": 110.0, "noise_accel_std": 0.7}),
-    ("v10_p110", 72,
-     {"max_speed": 10.0, "q_progress": 110.0, "noise_accel_std": 0.7}),
-    ("v9_p120", 73,
-     {"max_speed": 9.0, "q_progress": 120.0, "noise_accel_std": 0.7}),
-    ("v10_p120", 74,
-     {"max_speed": 10.0, "q_progress": 120.0, "noise_accel_std": 0.7}),
+    ("baseline_current", 71, {}),
+    ("rate8_current", 72,
+     {"actuator_max_speed_reference_rate": 8.0}),
+    ("rate8_slew15", 73,
+     {"actuator_max_speed_reference_rate": 8.0,
+      "max_accel_rate": 15.0, "q_du": 0.08}),
+    ("rate8_slew20", 74,
+     {"actuator_max_speed_reference_rate": 8.0,
+      "max_accel_rate": 20.0, "q_du": 0.05, "noise_accel_std": 0.9}),
 )
 
 
@@ -88,7 +89,7 @@ def run_candidate(candidate, output_root, laps, timeout):
             "-p", "csv_file_path:=data/ifac2026/ifac2026_mppi_track_optimal.csv",
             "-p", "is_simulation:=true",
             "-p", "obstacle_avoidance_enabled:=false",
-            "-p", "max_speed:=8.0",
+            "-p", "max_speed:=10.0",
             "-p", "actuator_max_speed_reference_rate:=6.0",
             "-p", "q_progress:=140.0",
             "-p", "q_contour:=0.0",

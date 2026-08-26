@@ -1,4 +1,4 @@
-# IFAC2026 MPPI rank 1: 30 laps / 267.445612 s / 8.915 s per lap / no collision.
+# IFAC2026 MPPI rank 2: relaxed slip, 30 laps / 267.936191 s / 8.931 s per lap / no collision.
 /**:
   ros__parameters:
     # 사용 모델: dynamic_mlp_residual_servo_lag 또는 DYNAMIC_SERVO_LAG
@@ -46,18 +46,18 @@
     q_error_speed: 0.0     # preserve straight speed; reduce speed only while pose error grows
     q_du: 0.12             # IFAC2026 30-lap best; lower 0.08 was slower alone
     q_steer: 0.0
-    q_lat_g: 200.0 # strongly reject combined-grip excess without lowering max_speed
-    lat_g_soft_limit: 8.5                 # soft combined-grip ceiling # DD-diagram ay max 제한
+    q_lat_g: 100.0 # rank-2 relaxed combined-grip penalty
+    lat_g_soft_limit: 9.0                 # rank-2 relaxed combined-grip ceiling
     longitudinal_accel_soft_limit: 10.0   # do not penalize requested straight-line ax <= 10 m/s^2
     # 전륜 slip soft constraint: applied steer를 사용한 alpha_f 비용
-    q_front_slip: 300.0
-    front_slip_soft_limit_deg: 12.0
+    q_front_slip: 100.0
+    front_slip_soft_limit_deg: 14.0
     front_slip_cost_min_speed: 1.5
     # Rear-slip soft constraint: q * max(0, |alpha_r|-limit)^2.
     # alpha_r = -atan2(vy-l_r*yaw_rate, |vx|). It complements the GG ellipse
     # by detecting rear-axle saturation while total ax/ay is still moderate.
-    q_rear_slip: 300.0
-    rear_slip_soft_limit_deg: 12.0
+    q_rear_slip: 100.0
+    rear_slip_soft_limit_deg: 14.0
     rear_slip_cost_min_speed: 1.5         # disable ill-conditioned low-vx slip cost
     # MPC-style lane-boundary slack:
     # s_k=max(0, collision_radius-min_boundary_clearance), cost=q_s*s_k^2.

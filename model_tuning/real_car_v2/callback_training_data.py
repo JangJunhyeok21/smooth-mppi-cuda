@@ -1,4 +1,5 @@
 """Load Step-1 callback archives with online MPPI-model EKF states directly."""
+import hashlib
 from pathlib import Path
 import numpy as np
 
@@ -6,6 +7,25 @@ import numpy as np
 VAL_NAMES={"rosbag2_2026_08_19-19_53_54.npz","rosbag2_2026_08_19-20_02_26.npz"}
 TEST_NAMES={"rosbag2_2026_08_19-20_23_43.npz"}
 STATE_NAMES=("kf_x","kf_y","kf_yaw","kf_vx","kf_vy","kf_yaw_rate")
+
+
+def _bag_group(name):
+    """Strip a Step-7 '__segment_NN' suffix so a source bag's segments stay
+    on one side of the split (no leakage from near-duplicate windows)."""
+    return name.split("__segment_")[0]
+
+
+def _fallback_split(paths):
+    """Deterministic bag-disjoint ~70/15/15 split, used only when a dataset
+    contains none of the legacy hardcoded VAL_NAMES/TEST_NAMES (i.e. it is
+    not the original 2026-08-19 dataset those names were pinned to)."""
+    groups=sorted({_bag_group(p.name) for p in paths})
+    val,test=set(),set()
+    for group in groups:
+        bucket=int(hashlib.sha1(group.encode()).hexdigest(),16)%100
+        if bucket<15:test.add(group)
+        elif bucket<30:val.add(group)
+    return val,test
 HISTORY_NAMES=tuple(value for k in range(4,-1,-1) for value in
     ((f"steer_t-{k}",f"speed_t-{k}") if k else ("steer_t","speed_t")))
 
@@ -22,7 +42,12 @@ def _interpolate(t,values,query):
 def load_callback_archives(directory,model_dt=.04,horizon=30):
     """Return in-memory arrays; never creates an intermediate training NPZ."""
     records=[]
-    for path in sorted(Path(directory).glob("*.npz")):
+    paths=sorted(Path(directory).glob("*.npz"))
+    if any(p.name in VAL_NAMES or p.name in TEST_NAMES for p in paths):
+        fallback_val,fallback_test=set(),set()
+    else:
+        fallback_val,fallback_test=_fallback_split(paths)
+    for path in paths:
         with np.load(path,allow_pickle=False) as data:
             required=("samples","columns","callback_inputs","callback_input_columns",
                       "callback_future_commands","callback_future_offsets_s")
@@ -55,7 +80,9 @@ def load_callback_archives(directory,model_dt=.04,horizon=30):
         finite=(np.isfinite(initial).all(1)&np.isfinite(target).all((1,2))&
                 np.isfinite(commands).all((1,2))&np.isfinite(history).all(1)&
                 np.isfinite(imu).all(1)&np.isfinite(actuator).all(1))
-        split=2 if path.name in TEST_NAMES else 1 if path.name in VAL_NAMES else 0
+        group=_bag_group(path.name)
+        split=(2 if path.name in TEST_NAMES or group in fallback_test else
+               1 if path.name in VAL_NAMES or group in fallback_val else 0)
         records.append(dict(anchor_time=anchor_t[finite],
             initial_pose=initial[finite,:3],initial_state=initial[finite,3:],
             target_pose=target[finite,:,:3],target_state=target[finite,:,3:],

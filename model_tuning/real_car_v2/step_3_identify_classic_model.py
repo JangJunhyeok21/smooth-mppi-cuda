@@ -13,7 +13,7 @@ import classic_model_regression as regression
 # ---------------------------------------------------------------------------
 ROOT = Path(__file__).resolve().parents[2]
 # 변경사항
-DATA_PATH = ROOT / "model_tuning/data/track_20260814_0829"
+DATA_PATH = ROOT / "model_tuning/data/track_20260814_combined_refreshed"
 YAML_EVALUATION_MODE = False # os.environ.get("STEP3_YAML_EVALUATION_MODE", "0") != "0"
 REGRESSION_METHODS = ("de_robust_ls",) # adam, de_robust_ls, mlp_surrogate
 
@@ -101,7 +101,7 @@ INCLUDE_CURRENT_MODEL_AS_CANDIDATE = True
 # This is a separate DE-based Pacejka/I_z coordinate-descent refinement. Keep
 # it disabled for a genuinely Adam-only experiment; otherwise it can drive E
 # back to a bound even when Adam itself returned an interior solution.
-RUN_ALTERNATING_PACEJKA_IZ = False
+RUN_ALTERNATING_PACEJKA_IZ = True
 
 ADAM_RESTARTS = 3
 ADAM_STEPS = 600

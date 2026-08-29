@@ -15,7 +15,7 @@ import visualize_and_regress_longitudinal_actuator as regression
 # User-configurable Step 2 settings
 # ---------------------------------------------------------------------------
 ROOT = Path(__file__).resolve().parents[2]
-SOURCE_DIRS = (ROOT / "model_tuning/data/ifac2026",)
+SOURCE_DIRS = (ROOT / "model_tuning/data/track_20260814_0829",)
 OUTPUT_DIR = ROOT / "model_tuning/results/longitudinal_actuator_regression_collision_refined"
 
 # Identified parameter bounds. Units: Kp [1/s], time constants [s].
@@ -41,7 +41,7 @@ OPTIMIZER_MAX_ITERATIONS = 80
 OPTIMIZER_LOCAL_MAX_ITERATIONS = 600
 RANDOM_SEED = 31
 UPDATE_PARAMS_YAML = True
-USE_PLOT = True
+USE_PLOT = False
 
 # False: use every bag for fitting and reuse one train bag only for the
 # performance plots/metrics (in-sample diagnostic, not generalization).

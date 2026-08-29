@@ -128,9 +128,15 @@ def main() -> None:
     # compatibility path, which is unnecessary for this pre-refined map.
     prepared = reftrack
     closed_xy = np.vstack((prepared[:, :2], prepared[0, :2]))
-    _, _, a_matrix, normals = tph.calc_splines.calc_splines(path=closed_xy)
-    alpha, prepared, normals = tph.iqp_handler.iqp_handler(
+    coeffs_x, coeffs_y, a_matrix, normals = tph.calc_splines.calc_splines(path=closed_xy)
+    spline_len = tph.calc_spline_lengths.calc_spline_lengths(coeffs_x=coeffs_x, coeffs_y=coeffs_y)
+    psi, kappa, dkappa = tph.calc_head_curv_an.calc_head_curv_an(
+        coeffs_x=coeffs_x, coeffs_y=coeffs_y,
+        ind_spls=np.arange(coeffs_x.shape[0]), t_spls=np.zeros(coeffs_x.shape[0]),
+        calc_curv=True, calc_dcurv=True)
+    alpha, prepared, normals, *_ = tph.iqp_handler.iqp_handler(
         reftrack=prepared, normvectors=normals, A=a_matrix,
+        spline_len=spline_len, psi=psi, kappa=kappa, dkappa=dkappa,
         kappa_bound=args.curvature_limit, w_veh=args.vehicle_width,
         print_debug=True, plot_debug=False,
         stepsize_interp=args.optimizer_step,

@@ -13,7 +13,7 @@ import classic_model_regression as regression
 # ---------------------------------------------------------------------------
 ROOT = Path(__file__).resolve().parents[2]
 # 변경사항
-DATA_PATH = ROOT / "model_tuning/data/ifac2026"
+DATA_PATH = ROOT / "model_tuning/data/track_20260814_0829"
 YAML_EVALUATION_MODE = False # os.environ.get("STEP3_YAML_EVALUATION_MODE", "0") != "0"
 REGRESSION_METHODS = ("de_robust_ls",) # adam, de_robust_ls, mlp_surrogate
 
@@ -42,7 +42,7 @@ APPLY_ACCEPTED_PARAMS_TO_YAML = os.environ.get("STEP3_APPLY_TO_YAML","1")!="0"
 
 # False: fit with every split and reuse one train bag for performance metrics
 # and plots. This is an in-sample diag01.nostic, not held-out generalization.
-USE_VALIDATION_TEST_SPLIT = False
+USE_VALIDATION_TEST_SPLIT = True
 TRAIN_EVALUATION_BAG_INDEX = -1   # -1 selects the last usable train bag
 
 # Reject only unmistakable MCL discontinuities. Step 1 manual review owns
@@ -77,16 +77,16 @@ LOAD_TRANSFER_H_CG_M = float(os.environ.get("LOAD_TRANSFER_H_CG_M","0.0"))
 
 # Pacejka bounds: B, C, D, E for front and rear tires.
 PACEJKA_B_F_BOUNDS = (0.2, 30.0)
-PACEJKA_C_F_BOUNDS = (0.0, 2.5)
+PACEJKA_C_F_BOUNDS = (0.0, 5.0)
 PACEJKA_D_F_BOUNDS = (0.05, 3.5)
-PACEJKA_E_F_BOUNDS = (-10.0, 1.0)
+PACEJKA_E_F_BOUNDS = (-1.0, 1.0)
 PACEJKA_B_R_BOUNDS = (0.2, 30.0)
-PACEJKA_C_R_BOUNDS = (0.0, 2.5)
+PACEJKA_C_R_BOUNDS = (0.0, 5.0)
 PACEJKA_D_R_BOUNDS = (0.05, 3.5)
-PACEJKA_E_R_BOUNDS = (-10.0, 1.0)
+PACEJKA_E_R_BOUNDS = (-1.0, 1.0)
 # True: E_f=E_r=0으로 고정하고 B/C/D만 회귀한다.
 # False: 위의 E bounds를 사용해 B/C/D/E를 모두 회귀한다.
-FIX_PACEJKA_E_ZERO = False
+FIX_PACEJKA_E_ZERO = True
 YAW_INERTIA_MIN = 0.005
 YAW_INERTIA_MAX = 0.5
 

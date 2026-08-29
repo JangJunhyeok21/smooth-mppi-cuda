@@ -37,3 +37,4 @@ scripts/__pycache__/**.pyc
 vesc/
 __pycache__/
 *.pyc
+f1tenth_gym_ros/

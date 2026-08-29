@@ -10,7 +10,7 @@ import steering_actuator_regression as regression
 # User-configurable Step 4 settings
 # ---------------------------------------------------------------------------
 ROOT = Path(__file__).resolve().parents[2]
-DATA_PATH = ROOT / "model_tuning/data/ifac2026"
+DATA_PATH = ROOT / "model_tuning/data/track_20260814_0829"
 OUTPUT_DIR = ROOT / "model_tuning/results/steering_actuator_regression_collision_refined"
 # Steering scale/bias/tau are identified by recursive open-loop response, not
 # by a one-step steering-angle target. Keep this aligned with the MPPI horizon.

@@ -28,14 +28,13 @@ ROOT = Path(__file__).resolve().parents[2]
 
 # User-configurable defaults.  The source is never modified.
 RAW_BAG_ROOTS = (
-    Path("/mnt/nas_custom/F1tenth/2026 IFAC/ifac2026"),
-    Path("/mnt/nas_custom/F1tenth/2026 IFAC/ifac2026_pratice_3th"),
+    Path("/home/a/Downloads/f1tenth_bag/0829"),
 )
 # F5/direct-execution defaults. These are equivalent to passing
 # --no-extract-raw-bags and --overwrite on the command line.
 EXTRACT_RAW_BAGS = False # False일 경우 기존 Step-1 NPZ를 그대로 사용하고, True일 경우 RAW_BAG_ROOTS에서 새로 Step-1을 수행
-SOURCE_DATA_PATH = ROOT / "model_tuning/data/ifac2026"
-OUTPUT_DATA_PATH = ROOT / "model_tuning/data/ifac2026_collision_refined_current_kf_gt"
+SOURCE_DATA_PATH = ROOT / "model_tuning/data/track_20260814_0829"
+OUTPUT_DATA_PATH = ROOT / "model_tuning/data/track_20260814_0829_refreshed"
 OVERWRITE_OUTPUT = True
 REFINE_COLLISIONS_AND_SPLIT = True
 # A retained piece must support actuator warm-up plus a full 1.6 s rollout.

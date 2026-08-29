@@ -36,7 +36,22 @@ dynamic_obstacle_predictor:
     # Relative paths are resolved from the package share directory.
     use_speed_model_path: config/predictor/dynamic_obstacle_frenet_speed_mdn_ifac2026_pose_noise/frenet_mdn.onnx
     no_speed_model_path: config/predictor/dynamic_obstacle_frenet_mdn_ifac2026_pose_noise/frenet_mdn.onnx
-    track_csv: data/ifac2026/ifac2026_mppi_track_optimal.csv
+    track_csv: data/track_20260814/track_20260814_mppi_track_optimal.csv
+
+    # The MDN weights are trained per track (see the metadata.json beside each
+    # model: data_dir is a simulator MPPI run on one specific track). On
+    # track_20260814 the ifac2026 weights are worse than assuming the obstacle
+    # is frozen -- median error at the 2.4 s horizon over 238 rollout windows on
+    # four bags: MDN 5.67 m, frozen 3.72 m, constant velocity along the raceline
+    # 2.75 m. So run constant velocity here until this track has its own weights.
+    # Set false on a track whose weights exist (ifac2026: MDN 2.67 m beats
+    # constant velocity 2.76 m).
+    constant_velocity_prediction: true
+    # Per-step sigma of the random walk that grows the ellipse in that mode,
+    # chosen to reproduce the measured 2.75 m error at 2.4 s. maximum_radius
+    # caps the ellipse long before the horizon, so this mostly decides how fast
+    # it reaches that cap.
+    constant_velocity_sigma_step_m: 0.355
 
     # |v| <= threshold: fixed-pose circular ellipse. |v| > threshold: MDN.
     dynamic_speed_threshold: 1.0

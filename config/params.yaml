@@ -181,7 +181,7 @@
     # PathPublisher converts them to center/left/right paths.
     # Relative paths are resolved from the installed package share directory.
     # STEP3 track을 STEP4 minimum-curvature optimizer로 변환한 MPPI 산출물.
-    csv_file_path: data/ifac2026/ifac2026_mppi_track_optimal.csv
+    csv_file_path: data/track_20260814/track_20260814_mppi_track_optimal.csv
     frame_id: map
     publish_rate: 0.2 # Hz
     # true : simulator pose + twist come from simulation_odom_topic

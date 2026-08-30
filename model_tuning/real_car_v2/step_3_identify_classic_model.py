@@ -13,7 +13,7 @@ import classic_model_regression as regression
 # ---------------------------------------------------------------------------
 ROOT = Path(__file__).resolve().parents[2]
 # 변경사항
-DATA_PATH = ROOT / "model_tuning/data/track_20260814_combined_refreshed"
+DATA_PATH = ROOT / "model_tuning/data/track_20260814_combined4_refreshed"
 YAML_EVALUATION_MODE = False # os.environ.get("STEP3_YAML_EVALUATION_MODE", "0") != "0"
 REGRESSION_METHODS = ("de_robust_ls",) # adam, de_robust_ls, mlp_surrogate
 

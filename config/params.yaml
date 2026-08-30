@@ -91,7 +91,7 @@
     obstacle_timeout: 0.5
     # Predictor supplies each obstacle's own radius (semi_major/semi_minor);
     # ego's own footprint is not added to the clearance margin.
-    max_obstacles: 7           # caps CUDA dynamic-obstacle buffers at solver construction
+    max_obstacles: 15           # caps CUDA dynamic-obstacle buffers at solver construction
     obstacle_soft_margin: 0.0  # soft cost 시작 반경 = predictor obstacle radius + margin
     # s=max(0, obstacle_radius+margin-distance), cost=q_obs*s^2
     q_obs: 10000.0

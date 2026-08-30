@@ -54,6 +54,9 @@ dynamic_obstacle_predictor:
     constant_velocity_sigma_step_m: 0.355
 
     # |v| <= threshold: fixed-pose circular ellipse. |v| > threshold: MDN.
+    # Must equal the controller's max_obstacles (params.yaml): smppi_node rejects
+    # a whole trajectory message carrying more than that.
+    max_obstacles: 15
     dynamic_speed_threshold: 1.0
     # Static obstacle ellipse semi-major == semi-minor == this radius.
     static_car_radius: 0.6
